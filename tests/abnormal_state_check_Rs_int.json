@@ -1,0 +1,5983 @@
+{
+  "ok": true,
+  "scene_model": "Rs_int",
+  "num_objects": 81,
+  "num_objects_with_abnormal_like_states": 81,
+  "num_objects_with_broken_like_states": 0,
+  "num_target_objects": 2,
+  "objects_with_broken_like_states": [],
+  "objects_with_abnormal_like_states": [
+    {
+      "name": "bookcase_njwsoa_0",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_njwsoa_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bookcase_njwsoa_1",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_njwsoa_1",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bookcase_owvfik_0",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_owvfik_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_bamfsz_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_bamfsz_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_bamfsz_1",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_bamfsz_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_dajebq_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_dajebq_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_jhymlr_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_jhymlr_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "breakfast_table_skczfi_0",
+      "category": "breakfast_table",
+      "prim_path": "/World/scene_0/breakfast_table_skczfi_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "breakfast_table_skczfi_1",
+      "category": "breakfast_table",
+      "prim_path": "/World/scene_0/breakfast_table_skczfi_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "coffee_table_fqluyq_0",
+      "category": "coffee_table",
+      "prim_path": "/World/scene_0/coffee_table_fqluyq_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floor_lamp_vdxlda_0",
+      "category": "floor_lamp",
+      "prim_path": "/World/scene_0/floor_lamp_vdxlda_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "laptop_nvulcs_0",
+      "category": "laptop",
+      "prim_path": "/World/scene_0/laptop_nvulcs_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "loudspeaker_bmpdyv_0",
+      "category": "loudspeaker",
+      "prim_path": "/World/scene_0/loudspeaker_bmpdyv_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ottoman_ycfbsd_0",
+      "category": "ottoman",
+      "prim_path": "/World/scene_0/ottoman_ycfbsd_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_jatssq_0",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_jatssq_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_jatssq_1",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_jatssq_1",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_udqjui_0",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_udqjui_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "public_trash_can_zotrbg_0",
+      "category": "public_trash_can",
+      "prim_path": "/World/scene_0/public_trash_can_zotrbg_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sofa_mnfbbh_0",
+      "category": "sofa",
+      "prim_path": "/World/scene_0/sofa_mnfbbh_0",
+      "is_target_category": false,
+      "num_states": 15,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "standing_tv_udotid_0",
+      "category": "standing_tv",
+      "prim_path": "/World/scene_0/standing_tv_udotid_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_0",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_1",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_2",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_2",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_eospnr_0",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_eospnr_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_eospnr_1",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_eospnr_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "swivel_chair_qtqitn_0",
+      "category": "swivel_chair",
+      "prim_path": "/World/scene_0/swivel_chair_qtqitn_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "table_lamp_xbfgjc_0",
+      "category": "table_lamp",
+      "prim_path": "/World/scene_0/table_lamp_xbfgjc_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bed_zrumze_0",
+      "category": "bed",
+      "prim_path": "/World/scene_0/bed_zrumze_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_slgzfc_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_slgzfc_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_slgzfc_1",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_slgzfc_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "carpet_ctclvd_0",
+      "category": "carpet",
+      "prim_path": "/World/scene_0/carpet_ctclvd_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "carpet_ctclvd_1",
+      "category": "carpet",
+      "prim_path": "/World/scene_0/carpet_ctclvd_1",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "countertop_tpuwys_0",
+      "category": "countertop",
+      "prim_path": "/World/scene_0/countertop_tpuwys_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dishwasher_xlmier_0",
+      "category": "dishwasher",
+      "prim_path": "/World/scene_0/dishwasher_xlmier_0",
+      "is_target_category": false,
+      "num_states": 20,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "door_ktydvs_0",
+      "category": "door",
+      "prim_path": "/World/scene_0/door_ktydvs_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "door_lvgliq_0",
+      "category": "door",
+      "prim_path": "/World/scene_0/door_lvgliq_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_0",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_1",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_1",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_2",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_2",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_3",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_3",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_4",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_4",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_5",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_5",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fridge_xyejdx_0",
+      "category": "fridge",
+      "prim_path": "/World/scene_0/fridge_xyejdx_0",
+      "is_target_category": false,
+      "num_states": 20,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "furniture_sink_zexzrc_0",
+      "category": "furniture_sink",
+      "prim_path": "/World/scene_0/furniture_sink_zexzrc_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "microwave_abzvij_0",
+      "category": "microwave",
+      "prim_path": "/World/scene_0/microwave_abzvij_0",
+      "is_target_category": false,
+      "num_states": 21,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mirror_pevdqu_0",
+      "category": "mirror",
+      "prim_path": "/World/scene_0/mirror_pevdqu_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered",
+        "AttachedTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_0",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_1",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_1",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_2",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_2",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ulnafj_0",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ulnafj_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "oven_wuinhm_0",
+      "category": "oven",
+      "prim_path": "/World/scene_0/oven_wuinhm_0",
+      "is_target_category": false,
+      "num_states": 21,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pedestal_sink_ksecxq_0",
+      "category": "pedestal_sink",
+      "prim_path": "/World/scene_0/pedestal_sink_ksecxq_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_etixod_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_etixod_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_hhxttu_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_hhxttu_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_jpfyrq_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_jpfyrq_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "shower_stall_invgma_0",
+      "category": "shower_stall",
+      "prim_path": "/World/scene_0/shower_stall_invgma_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "toilet_vtqdev_0",
+      "category": "toilet",
+      "prim_path": "/World/scene_0/toilet_vtqdev_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_fqhdne_0",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_fqhdne_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_0",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_1",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_2",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_2",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_3",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_3",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "towel_rack_kqrmrh_0",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_0",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "towel_rack_kqrmrh_1",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_1",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_jfsbfp_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_jfsbfp_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_phrrml_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_phrrml_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_rhfker_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_rhfker_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_yimfml_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_yimfml_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_zlhppj_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_zlhppj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_avvnuv_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_avvnuv_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_gjemfr_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_gjemfr_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ifmioj_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ifmioj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ptwlei_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ptwlei_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ucjdgj_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ucjdgj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_axhynp_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_axhynp_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_bcjmdz_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_bcjmdz_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_dekben_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_dekben_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_exiopd_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_exiopd_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_gxvfxw_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_gxvfxw_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_gxynpx_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_gxynpx_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_xlgydu_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_xlgydu_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    }
+  ],
+  "target_objects": [
+    {
+      "name": "towel_rack_kqrmrh_0",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_0",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "towel_rack_kqrmrh_1",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_1",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    }
+  ],
+  "all_objects": [
+    {
+      "name": "bookcase_njwsoa_0",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_njwsoa_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bookcase_njwsoa_1",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_njwsoa_1",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bookcase_owvfik_0",
+      "category": "bookcase",
+      "prim_path": "/World/scene_0/bookcase_owvfik_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_bamfsz_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_bamfsz_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_bamfsz_1",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_bamfsz_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_dajebq_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_dajebq_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_jhymlr_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_jhymlr_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "breakfast_table_skczfi_0",
+      "category": "breakfast_table",
+      "prim_path": "/World/scene_0/breakfast_table_skczfi_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "breakfast_table_skczfi_1",
+      "category": "breakfast_table",
+      "prim_path": "/World/scene_0/breakfast_table_skczfi_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "coffee_table_fqluyq_0",
+      "category": "coffee_table",
+      "prim_path": "/World/scene_0/coffee_table_fqluyq_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floor_lamp_vdxlda_0",
+      "category": "floor_lamp",
+      "prim_path": "/World/scene_0/floor_lamp_vdxlda_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "laptop_nvulcs_0",
+      "category": "laptop",
+      "prim_path": "/World/scene_0/laptop_nvulcs_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "loudspeaker_bmpdyv_0",
+      "category": "loudspeaker",
+      "prim_path": "/World/scene_0/loudspeaker_bmpdyv_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ottoman_ycfbsd_0",
+      "category": "ottoman",
+      "prim_path": "/World/scene_0/ottoman_ycfbsd_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_jatssq_0",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_jatssq_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_jatssq_1",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_jatssq_1",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pot_plant_udqjui_0",
+      "category": "pot_plant",
+      "prim_path": "/World/scene_0/pot_plant_udqjui_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "public_trash_can_zotrbg_0",
+      "category": "public_trash_can",
+      "prim_path": "/World/scene_0/public_trash_can_zotrbg_0",
+      "is_target_category": false,
+      "num_states": 18,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sofa_mnfbbh_0",
+      "category": "sofa",
+      "prim_path": "/World/scene_0/sofa_mnfbbh_0",
+      "is_target_category": false,
+      "num_states": 15,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "standing_tv_udotid_0",
+      "category": "standing_tv",
+      "prim_path": "/World/scene_0/standing_tv_udotid_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_0",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_1",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_amgwaw_2",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_amgwaw_2",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_eospnr_0",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_eospnr_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "straight_chair_eospnr_1",
+      "category": "straight_chair",
+      "prim_path": "/World/scene_0/straight_chair_eospnr_1",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "swivel_chair_qtqitn_0",
+      "category": "swivel_chair",
+      "prim_path": "/World/scene_0/swivel_chair_qtqitn_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "table_lamp_xbfgjc_0",
+      "category": "table_lamp",
+      "prim_path": "/World/scene_0/table_lamp_xbfgjc_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bed_zrumze_0",
+      "category": "bed",
+      "prim_path": "/World/scene_0/bed_zrumze_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_slgzfc_0",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_slgzfc_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "bottom_cabinet_slgzfc_1",
+      "category": "bottom_cabinet",
+      "prim_path": "/World/scene_0/bottom_cabinet_slgzfc_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "carpet_ctclvd_0",
+      "category": "carpet",
+      "prim_path": "/World/scene_0/carpet_ctclvd_0",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "carpet_ctclvd_1",
+      "category": "carpet",
+      "prim_path": "/World/scene_0/carpet_ctclvd_1",
+      "is_target_category": false,
+      "num_states": 17,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "ModifiedParticles",
+        "Saturated",
+        "ContactParticles",
+        "Covered",
+        "ParticleRemover",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        },
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "countertop_tpuwys_0",
+      "category": "countertop",
+      "prim_path": "/World/scene_0/countertop_tpuwys_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dishwasher_xlmier_0",
+      "category": "dishwasher",
+      "prim_path": "/World/scene_0/dishwasher_xlmier_0",
+      "is_target_category": false,
+      "num_states": 20,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "door_ktydvs_0",
+      "category": "door",
+      "prim_path": "/World/scene_0/door_ktydvs_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "door_lvgliq_0",
+      "category": "door",
+      "prim_path": "/World/scene_0/door_lvgliq_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_0",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_1",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_1",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_2",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_2",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_3",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_3",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_4",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_4",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "electric_switch_wseglt_5",
+      "category": "electric_switch",
+      "prim_path": "/World/scene_0/electric_switch_wseglt_5",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fridge_xyejdx_0",
+      "category": "fridge",
+      "prim_path": "/World/scene_0/fridge_xyejdx_0",
+      "is_target_category": false,
+      "num_states": 20,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "furniture_sink_zexzrc_0",
+      "category": "furniture_sink",
+      "prim_path": "/World/scene_0/furniture_sink_zexzrc_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "microwave_abzvij_0",
+      "category": "microwave",
+      "prim_path": "/World/scene_0/microwave_abzvij_0",
+      "is_target_category": false,
+      "num_states": 21,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mirror_pevdqu_0",
+      "category": "mirror",
+      "prim_path": "/World/scene_0/mirror_pevdqu_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered",
+        "AttachedTo"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_0",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_1",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_1",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ithrgo_2",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ithrgo_2",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "openable_window_ulnafj_0",
+      "category": "openable_window",
+      "prim_path": "/World/scene_0/openable_window_ulnafj_0",
+      "is_target_category": false,
+      "num_states": 13,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "oven_wuinhm_0",
+      "category": "oven",
+      "prim_path": "/World/scene_0/oven_wuinhm_0",
+      "is_target_category": false,
+      "num_states": 21,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Open",
+        "ToggledOn",
+        "Inside",
+        "HeatSourceOrSink",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "pedestal_sink_ksecxq_0",
+      "category": "pedestal_sink",
+      "prim_path": "/World/scene_0/pedestal_sink_ksecxq_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "ToggledOn",
+        "Temperature",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_etixod_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_etixod_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_hhxttu_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_hhxttu_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "picture_jpfyrq_0",
+      "category": "picture",
+      "prim_path": "/World/scene_0/picture_jpfyrq_0",
+      "is_target_category": false,
+      "num_states": 14,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "OnTop",
+        "Inside",
+        "OnFire",
+        "HorizontalAdjacency",
+        "NextTo",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "OnFire",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "shower_stall_invgma_0",
+      "category": "shower_stall",
+      "prim_path": "/World/scene_0/shower_stall_invgma_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "toilet_vtqdev_0",
+      "category": "toilet",
+      "prim_path": "/World/scene_0/toilet_vtqdev_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_fqhdne_0",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_fqhdne_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_0",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_0",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_1",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_1",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_2",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_2",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "top_cabinet_lsyzkh_3",
+      "category": "top_cabinet",
+      "prim_path": "/World/scene_0/top_cabinet_lsyzkh_3",
+      "is_target_category": false,
+      "num_states": 19,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "Temperature",
+        "Open",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "Heated",
+        "Frozen",
+        "ContainedParticles",
+        "Filled",
+        "ContactParticles",
+        "Covered",
+        "Contains"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Open",
+          "value": {
+            "ok": true,
+            "value": false,
+            "type": "bool"
+          }
+        },
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "towel_rack_kqrmrh_0",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_0",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "towel_rack_kqrmrh_1",
+      "category": "towel_rack",
+      "prim_path": "/World/scene_0/towel_rack_kqrmrh_1",
+      "is_target_category": true,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_jfsbfp_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_jfsbfp_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_phrrml_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_phrrml_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_rhfker_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_rhfker_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_yimfml_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_yimfml_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceilings_zlhppj_0",
+      "category": "ceilings",
+      "prim_path": "/World/scene_0/ceilings_zlhppj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_avvnuv_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_avvnuv_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_gjemfr_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_gjemfr_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ifmioj_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ifmioj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ptwlei_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ptwlei_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "floors_ucjdgj_0",
+      "category": "floors",
+      "prim_path": "/World/scene_0/floors_ucjdgj_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_axhynp_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_axhynp_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_bcjmdz_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_bcjmdz_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_dekben_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_dekben_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_exiopd_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_exiopd_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_gxvfxw_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_gxvfxw_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_gxynpx_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_gxynpx_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    },
+    {
+      "name": "walls_xlgydu_0",
+      "category": "walls",
+      "prim_path": "/World/scene_0/walls_xlgydu_0",
+      "is_target_category": false,
+      "num_states": 12,
+      "state_names": [
+        "AABB",
+        "VerticalAdjacency",
+        "Pose",
+        "Joint",
+        "Under",
+        "Touching",
+        "OnTop",
+        "HorizontalAdjacency",
+        "NextTo",
+        "Inside",
+        "ContactParticles",
+        "Covered"
+      ],
+      "abnormal_like_states": [
+        {
+          "class_name": "Covered",
+          "value": {
+            "ok": false,
+            "reason": "get_value_requires_arguments_or_unsupported_signature",
+            "error": "TypeError(\"Covered._get_value() missing 1 required positional argument: 'system'\")"
+          }
+        }
+      ]
+    }
+  ]
+}
