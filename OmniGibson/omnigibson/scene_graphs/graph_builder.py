@@ -9,6 +9,7 @@ from omnigibson import object_states
 from omnigibson.object_states.factory import get_state_name
 from omnigibson.object_states.object_state_base import AbsoluteObjectState, BooleanStateMixin, RelativeObjectState
 from omnigibson.robots import Robot
+from omnigibson.scene_graphs.semantic_attrs import infer_object_edit_metadata
 from omnigibson.sensors import VisionSensor
 from omnigibson.utils import transform_utils as T
 from omnigibson.utils.numpy_utils import pil_to_tensor
@@ -141,7 +142,12 @@ class SceneGraphBuilder(object):
             robot_bbox_pose, robot_bbox_extent = _formatted_aabb(robot)
             robot_bbox_pose = world_to_desired_frame @ robot_bbox_pose
             self._G.add_node(
-                robot, pose=robot_pose, bbox_pose=robot_bbox_pose, bbox_extent=robot_bbox_extent, states={}
+                robot,
+                pose=robot_pose,
+                bbox_pose=robot_bbox_pose,
+                bbox_extent=robot_bbox_extent,
+                states={},
+                semantic={"interaction": {"kind": "agent", "confidence": "explicit", "reasons": ["robot"]}},
             )
 
         self._last_desired_frame_to_world = desired_frame_to_world
@@ -205,6 +211,7 @@ class SceneGraphBuilder(object):
 
             # Update the states of the object
             self._G.nodes[obj]["states"] = self._get_boolean_unary_states(obj)
+            self._G.nodes[obj]["semantic"] = infer_object_edit_metadata(obj, bbox_extent=bbox_extent)
 
         # Update the binary states for seen objects.
         self._G.remove_edges_from(list(itertools.product(objs_to_add, objs_to_add)))
