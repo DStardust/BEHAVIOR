@@ -95,7 +95,7 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
 
 **G.**  **(主动感知 + 输出感知)  场景异常检测**
 
-#### OmniGibson技术金字塔：
+### OmniGibson技术金字塔：
 
 ```jsx
 															[ 层级 4：数据管线层 ]
@@ -110,16 +110,16 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
 
                               [ 层级 2：场景语义层 ]
             ========================================================
-              3DSG拓扑读取 | 任务资产元数据库(兜底) | Delta SG 逆向物理实例化
+              ~~3DSG拓扑读取~~ | ~~任务资产元数据库(兜底)~~ | Delta SG 逆向物理实例化
             ========================================================
 
                               [ 层级 1：基础运行层 ]
        ==================================================================
-         OmniGibson Headless 引擎池 | 显存/进程生命周期管理 | 核心 API 桥接层
+         ~~OmniGibson Headless 引擎池 | 显存/进程生命周期管理 | 核心 API 桥接层~~
        ==================================================================
 ```
 
-**[层级 1：基础运行层]**
+### **[层级 1：基础运行层]**
 
 该阶段的目标是把OmniGibson彻底地在**我们的服务器(如3卡A6000 / 7卡4090-48G)**上跑起来，具体地，需要完成如下目标：
 
@@ -139,7 +139,7 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
 
 ---
 
-**[层级 2：场景语义层 ]**
+### **[层级 2：场景语义层 ]**
 
 该阶段主要目标是将OmniGibson中的初始场景转换为我们熟悉的**时空图结构**，并为依据预设任务编辑场景提供**物质条件**和**方法**。
 
@@ -163,412 +163,474 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
     
     [WebRTC配置](https://www.notion.so/WebRTC-34fa0c89137b800196bfea575275cd4f?pvs=21)
     
+3. **DeltaSG 逆向实例化**
 
-1. **DeltaSG逆向物理实例化：**
-    
-    ![image.png](attachment:4ac8675e-b6ca-48f2-95f1-d064f5d6b01c:image.png)
-    
-    参考Embodied-Reasoner，其训练集中包含9390条路径(from 120个初始环境) ↔ 64k图片，相当于每个环境需要生成70个任务场景
-    
-    由于OmniGibson本身推理场景较少，且一个任务场景可用于生成多种问题，因此上述指标仅供参考，但每个初始环境仍需要生成足够的任务场景，目标统计指标如下:
-    
-    | Task | Trajectory | QA Pairs | Data Source |  |
-    | --- | --- | --- | --- | --- |
-    | 64k+ | 10k+ | 128k+ |  |  |
-    
-    初始环境 ⇒ 从任务资产元数据库中采样用于编辑环境的物品 ⇒ LLM驱动的基于常识的环境布置 → 基于物理引擎的稳定性验证 → 基础任务环境(Env-A)
-    
-    基础任务环境(Env-A) ⇒ 固定机器人、摄像头与目标物品 → **纯粹场景感知任务 / 单视角指令遵循 / 协同指令遵循**
-    
-    ~~基础任务环境(Env-A) ⇒ 添加异常 → 基于物理引擎的稳定性验证 & LLM驱动的场景可解性验证 → 异常任务环境(Env-B) ⇒ 固定机器人、摄像头 → **协同主动响应 / 单视角主动响应 / 场景异常检测**~~
-    
-    ~~基础任务环境(Env-A) / 异常任务环境(Env-B) ⇒ 增加有歧义物品/挑战性场景 → 进阶任务环境(Env-C) → **多源信息消歧**~~ 
-    
-    为了方便大规模存储与问题实例化，我们需要保存任务环境与任务信息。任务环境可以保存为(初始环境名称) + (添加的任务资产) 
-    
-    任务信息需要保存: 任务类型 / 所有待操作的物品(Unique-id) / 自然语言格式的操作命令 / 目标物品是否直接可见 / 求解所需的
-    
-    ![image.png](attachment:f19de78a-6cbe-4588-892b-b9b0f3f9b725:image.png)
-    
-    为了确保问题的多样与可靠性，我设计了一个初步的Delta SG 生成引擎，伪代码如下:
-    
-    ```python
-    ===============================================================
-    ### Step0 函数定义
-    ===============================================================
-    	# 让LLM回答问题
-    	response = get_LLM_response(question)  
-    	# 编辑环境(重点)：将object放置在env的room房间中，返回object的坐标和其他有关信息
-    	object_message = add_object_to_env(env, Object_Meta_Database, object, room) 
-    
-    ===============================================================
-    ### Step1 启发式创造初始任务环境
-    ===============================================================
-    	target_objects = random.sample(Object_Meta_Database, 5) # 选定初始的五个用于编辑环境的物品
-    	
-    	additional_objects = []
-    	
-    	for object in task_objects:
-    		
-    		question = f"""
-    你是一个环境设计师，下面给出一个物品{object}, 从下面的物品中选择\
-    能和它发生动作联系的5个物品，并给出相应的动作:
-    {Object_Meta_Database.all_object_name()}
-    以"cup"为例，输出的格式如下:
-    related_objects = {{
-    "kettle": "Pour the water from the kettle into the cup.",
-    "sugar": "Add some sugar to the cup",
-    "fridge": "Put the cup into the fridge"
-    ...
-    }}
-    """
-    		response = get_LLM_response(question) # 由LLM确定有哪些可供拓展环境的物品.
-    		
-    		...合法性验证(数量合法、输出格式合法、输出的物品在元数据库中存在)...
-    		
-    		related_objects[object] = json.load(response)
-    		
-    		additional_objects.extend(related_objects[object].keys())
-    	
-    	additional_objects = unique(additional_objects)
-    	# 基于采样措施来决定哪些物品保留在环境中，避免环境过于杂乱
-    	sampled_objects = random.sample(additional_objects, 8)
-    	
-    	object_relations = {}
-    	# 确定哪些物品-关系对在采样得到的环境中
-    	for object in task_objects:
-    		
-    		object_relations[object] = {}
-    		
-    		for related_object in related_objects[object]:
-    		
-    			if related_object in sampled_objects:
-    				# 将采样后仍然保留下来，可用于设计问题的物品和响应的关系进行注册
-    				object_relations[object][related_object] = related_objects[object][related_object]
-    		
-    ===============================================================
-    ### Step2 合理的构造相应的任务环境
-    ===============================================================
-    		
-    	question = f"""
-    你是一个环境设计师，目标环境包含如下的几个空间：{env.rooms()}
-    为每个物品选择合适的房间，物品列表如下: {unique(sampled_objects + task_objects)}
-    你的回答格式应当如下:
-    {{
-    "object_name": room_id,
-    ...
-    }}
-    """
-    	response = get_LLM_response(question)
-    	
-    	...合法性验证(数量合法、输出格式合法、输出的房间存在)...
-    	
-    	object_with_room = json.load(response)
-    	
-    	additional_objects = {}
-    	
-    	env_a = env
-    	
-    	for object in object_with_room.keys()
-    		# <重点> 结合3DSG
-    		env_a, additional_objects["object"] = add_object_to_env(env_a, Object_Meta_Database, object, room)
-    
-    ===============================================================
-    ### Step3 根据构造好的环境设计问题
-    ===============================================================
-    	
-    	略
-    ```
-    
-    构造的问题应当有意义且准确无误：例如，针对问题”用水壶给杯子倒水”，在生成相应的问题时，要确保机器人视野/监控中能够看到水壶/杯子，且目标是唯一的，否则则需要给出辅助的自然语言描述，用于引导机器人，如”用水壶给餐厅的杯子倒水”(杯子不可见) / ”用红色的水壶给餐厅的杯子倒水”(有多个水壶)
-    
-    特别地，元数据的核心是能够方便地得到答案，在专家求解器获取答案过程中有重要意义. 对于上面的例子，如果机器人在卧室，杯子在客厅，壶在厨房，则在生成问题的同时最好生成拓扑路径(当然，留到专家求解器部分也行)
-    
-    问题的生成应当遵循以下路径，以保证良好的拓展性:
-    
-    [专题：不同类型问题实现路径](https://www.notion.so/364a0c89137b805890b5e2043051a7ad?pvs=21)
-    
-    针对环境B，首先要选择要添加的异常，对于异常的布置，有以下的伪代码:
-    
-    ```python
-    ===============================================================
-    ### Step0 函数/数据定义
-    ===============================================================
-    # 环境中目前的所有物品
-    all_objects = env.object() + sampled_objects + task_objects
-    
-    # 易作为火源的物品
-    all_fire_source_objects = [
-        "stove", "oven", "microwave", "toaster", "toaster_oven", 
-        "deep_fryer", "electric_kettle", "rice_cooker", "instant_pot", 
-        "pressure_cooker", "crock_pot", "coffee_maker", "espresso_machine", 
-        "waffle_maker", "flat_top_grill", "gas_fireplace", "wood_fireplace", 
-        "space_heater", "sauna_heater", "radiator", "charcoal_grill", 
-        "smoker", "lighter", "match", "match_box", "beeswax_candle", 
-        "dip_candle", "pillar_candle", "spirit_lamp", "sparkler", 
-        "cigar", "cigarette", "tobacco_pipe", "power_strip", "wall_socket", 
-        "clothes_dryer", "iron", "hair_dryer", "desktop_computer", 
-        "laptop", "bottle_of_lighter_fluid", "fuel_can", "spray_paint_can", 
-        "spray_can", "bottle_of_solvent", "bottle_of_paint_remover"
-    ]
-    
-    # 适合作为异常解决方案的物品
-    anomaly_resolution_map = # ==========================================
-    # 具身智能 Home-Care 异常解决图谱 (Recipe Paths 版)
-    # ==========================================
-    anomaly_resolution_map = {
-        
-        "Fire_Emergency": [
-            {
-                # 配方 A：使用灭火器
-                "path_name": "use_extinguisher",
-                "required_infrastructure": [], 
-                "spawnable_tools": ["fire_extinguisher"]
-            }
-        ],
-    
-        "Dirty_Dishes": [
-            {
-                # 配方 A：机洗流派 (完美解决你的痛点：有洗碗机则不生成任何工具)
-                "path_name": "machine_wash",
-                "required_infrastructure": ["dishwasher"], 
-                "spawnable_tools": [] # 保持空列表，底层循环自动跳过生成
-            },
-            {
-                # 配方 B：手洗流派 (必须同时拥有水槽和水龙头，且打包生成海绵和洗洁精)
-                "path_name": "hand_wash",
-                "required_infrastructure": ["sink", "faucet"], 
-                "spawnable_tools": ["sponge", "bottle_of_dish_soap"]
-            }
-        ],
-    
-        "Dirty_Clothes": [
-            {
-                # 配方 A：直接用洗衣机洗
-                "path_name": "machine_wash_clothes",
-                "required_infrastructure": ["washer"],
-                "spawnable_tools": []
-            },
-            {
-                # 配方 B：放入脏衣篓 (无需基建，动态生成 hamper)
-                "path_name": "put_in_hamper",
-                "required_infrastructure": [],
-                "spawnable_tools": ["hamper"]
-            },
-            {
-                # 配方 C：放在布毯上收集 (无需基建，动态生成 cloth_blanket)
-                "path_name": "put_on_cloth_basket",
-                "required_infrastructure": [],
-                "spawnable_tools": ["cloth_basket"]
-            }
-        ],
-    
-        "Broken_Object": [
-            {
-                # 配方 A：全套工具清扫 (三个工具必须打包一起生成，缺一不可)
-                "path_name": "sweep_up",
-                "required_infrastructure": [], 
-                "spawnable_tools": ["broom", "dustpan", "trash_can"]
-            }
-        ]
-    }
-    
-    ===============================================================
-    ### Step1 寻找可异常化的物品
-    ===============================================================
-    abnormal_obj_list = []
-    
-    for obj in all_objects:
-    	
-    	if obj.abnormal_state = True or obj in all_fire_source_objects:
-    	
-    		abnormal_obj_list.append(obj)
-    # 设置异常
-    for ab_obj in abnormal_obj_list:
-    	
-    	... 采样策略(防止数量爆炸) ...
-    	
-    	# 确保任务可解
-    	solution_obj = find_solution(anomaly_resolution_map, ab_obj)
-    	
-    	env_b = add_abnormal_to_env(env_a, ab_obj)
-    	
-    	if solution_obj: 
-    	
-    		env_b = add_resolution_to_env(env_b, solution_obj)
-    	
-    	
-    	
-    	... 根据异常布置机器人/摄像头，设计问题 ...
-    	
-    	... 储存问题 ...
-    ```
-    
-    **实例化的保存:**
-    
-    实例化的保存核心目标是保存一下内容：任务环境、任务内容、任务解决方案
-    
-    由此最为直观的方法是设计一个字典， 只保留五类ActionType：
-    
-    ```json
+![image.png](attachment:4ac8675e-b6ca-48f2-95f1-d064f5d6b01c:image.png)
+
+参考Embodied-Reasoner，其训练集中包含9390条路径(from 120个初始环境) ↔ 64k图片，相当于每个环境需要生成70个任务场景
+
+由于OmniGibson本身推理场景较少，且一个任务场景可用于生成多种问题，因此上述指标仅供参考，但每个初始环境仍需要生成足够的任务场景，目标统计指标如下:
+
+| Task | Trajectory | QA Pairs | Data Source |  |
+| --- | --- | --- | --- | --- |
+| 64k+ | 10k+ | 128k+ |  |  |
+
+初始环境 ⇒ 从任务资产元数据库中采样用于编辑环境的物品 ⇒ LLM驱动的基于常识的环境布置 → 基于物理引擎的稳定性验证 → 基础任务环境(Env-A)
+
+基础任务环境(Env-A) ⇒ 固定机器人、摄像头与目标物品 → **纯粹场景感知任务 / 单视角指令遵循 / 协同指令遵循**
+
+Env-A: 具身任务环境，考察”场景中有什么”
+
+基础任务环境(Env-A) ⇒ 添加异常 → 基于物理引擎的稳定性验证 & LLM驱动的场景可解性验证 → ***异常任务环境(Env-B)*** ⇒ 固定机器人、摄像头 → **协同主动响应 / 单视角主动响应 / 场景异常检测**
+
+Env-B: 事件语义环境，考察”场景中发生了什么”
+
+基础任务环境(Env-A) / 异常任务环境(Env-B) ⇒ 增加有歧义物品/挑战性场景 → ***进阶任务环境(Env-C)*** → **多源信息消歧** 
+
+Env-C: 认知语义环境，考察”应当如何决策”
+
+为了方便大规模存储与问题实例化，我们需要保存任务环境与任务信息。任务环境可以保存为(初始环境名称) + (添加的任务资产) 
+
+任务信息需要保存: 任务类型 / 所有待操作的物品(Unique-id) / 自然语言格式的操作命令 / 目标物品是否直接可见 / 求解所需的
+
+[专题：不同类型问题实现路径](https://www.notion.so/364a0c89137b805890b5e2043051a7ad?pvs=21)
+
+![image.png](attachment:f19de78a-6cbe-4588-892b-b9b0f3f9b725:image.png)
+
+#### Env A: 基础任务环境
+
+为了确保问题的多样与可靠性，我设计了一个初步的Delta SG 生成引擎(生成任务环境A)，伪代码如下:
+
+```python
+===============================================================
+### Step0 函数定义
+===============================================================
+	# 让LLM回答问题
+	response = get_LLM_response(question)  
+	# 编辑环境(重点)：将object放置在env的room房间中，修改后的3DSG和增加的物品信息
+	new_sg, object_message = add_object_to_env(env, sg, Object_Meta_Database, object, room) 
+
+===============================================================
+### Step1 启发式创造初始任务环境
+===============================================================
+	target_objects = random.sample(Object_Meta_Database, 5) # 选定初始的五个用于编辑环境的物品
+	
+	...合理性保证一下...
+	
+	additional_objects = []
+	
+	for object in task_objects:
+		
+		question = f"""
+你是一个环境设计师，下面给出一个物品{object}, 从下面的物品中选择\
+能和它发生动作联系的5个物品，并给出相应的动作:
+{Object_Meta_Database.all_object_name()}
+以"cup"为例，输出的格式如下:
+related_objects = {{
+"kettle": "Pour the water from the kettle into the cup.",
+"sugar": "Add some sugar to the cup",
+"fridge": "Put the cup into the fridge"
+...
+}}
+"""
+		response = get_LLM_response(question) # 由LLM确定有哪些可供拓展环境的物品.
+		
+		...合法性验证(数量合法、输出格式合法、输出的物品在元数据库中存在)...
+		
+		related_objects[object] = json.load(response)
+		
+		additional_objects.extend(related_objects[object].keys())
+	
+	additional_objects = unique(additional_objects)
+	# 基于采样措施来决定哪些物品保留在环境中，避免环境过于杂乱
+	sampled_objects = random.sample(additional_objects, 12)
+	
+	object_relations = {}
+	# 确定哪些物品-关系对在采样得到的环境中
+	for object in task_objects:
+		
+		object_relations[object] = {}
+		
+		for related_object in related_objects[object]:
+		
+			if related_object in sampled_objects:
+				# 将采样后仍然保留下来，可用于设计问题的物品和响应的关系进行注册
+				object_relations[object][related_object] = related_objects[object][related_object]
+		
+===============================================================
+### Step2 合理的构造相应的任务环境
+===============================================================
+		
+	question = f"""
+你是一个环境设计师，目标环境包含如下的几个空间：{env.rooms()}
+为每个物品选择合适的房间，物品列表如下: {unique(sampled_objects + task_objects)}
+你的回答格式应当如下:
+{{
+"object_name": room_id,
+...
+}}
+"""
+	response = get_LLM_response(question)
+	
+	...合法性验证(数量合法、输出格式合法、输出的房间存在)...
+	
+	object_with_room = json.load(response)
+	
+	additional_objects = {}
+	# 启动仿真环境
+	env = start_simulation()
+	
+	origial_env = env.save_state()
+	
+	
+	sg_a = sg
+	
+	for object in object_with_room.keys()
+		# <重点> 结合3DSG
+		# 注意，仿真环境env需要始终上卡保存
+		sg_a, additional_objects["object"] = add_object_to_env(env, sg_a, Object_Meta_Database, object, room)
+	
+	env_a = env.save_state()
+
+===============================================================
+### Step3 根据构造好的环境设计问题
+===============================================================
+	
+	略
+```
+
+环境的保存: 直接保存预编译好的.usd开销太高，因此我们采用“基础usd环境 + json的格式”
+
+```json
+{
+  "task_id": "clean_table_001",
+  "base_env_usd": "Rs_int.usd",
+  "added_objects": [
     {
-    "task_environment": "..." ,
-    "task_NL": "自然语言格式的任务"，
-    "task_objects": [
-    	{"object_name": "...", "object_position": "...", "object_id": "..."}
+      "name": "apple_1",
+      "path": "/assets/models/apple/apple.usd",
+      "position": [1.2, 0.5, 0.8],
+      "orientation": [0, 0, 0, 1]
+    },
+    {
+      "name": "sponge_1",
+      "path": "/assets/models/sponge/sponge.usd",
+      "position": [1.4, 0.6, 0.8],
+      "orientation": [0, 0.707, 0, 0.707]
+    }
+  ]
+}
+```
+
+构造的问题应当有意义且准确无误：例如，针对问题”用水壶给杯子倒水”，在生成相应的问题时，要确保机器人视野/监控中能够看到水壶/杯子，且目标是唯一的，否则则需要给出辅助的自然语言描述，用于引导机器人，如”用水壶给餐厅的杯子倒水”(杯子不可见) / ”用红色的水壶给餐厅的杯子倒水”(有多个水壶)
+
+特别地，元数据的核心是能够方便地得到答案，在专家求解器获取答案过程中有重要意义. 对于上面的例子，如果机器人在卧室，杯子在客厅，壶在厨房，则在生成问题的同时最好生成拓扑路径(当然，留到专家求解器部分也行)
+
+生成的实例的保存参考[**实例化的保存:**](https://www.notion.so/360a0c89137b8023b338df0b161e582c?pvs=21) 
+
+#### Env-B：事件任务环境
+
+针对环境B，首先要选择要添加的异常，对于异常的布置，有以下的伪代码:
+
+```python
+===============================================================
+### Step0 函数/数据定义
+===============================================================
+# 环境中目前的所有物品
+all_objects = env.object() + sampled_objects + task_objects
+
+# 易作为火源的物品
+all_fire_source_objects = [
+    "stove", "oven", "microwave", "toaster", "toaster_oven", 
+    "deep_fryer", "electric_kettle", "rice_cooker", "instant_pot", 
+    "pressure_cooker", "crock_pot", "coffee_maker", "espresso_machine", 
+    "waffle_maker", "flat_top_grill", "gas_fireplace", "wood_fireplace", 
+    "space_heater", "sauna_heater", "radiator", "charcoal_grill", 
+    "smoker", "lighter", "match", "match_box", "beeswax_candle", 
+    "dip_candle", "pillar_candle", "spirit_lamp", "sparkler", 
+    "cigar", "cigarette", "tobacco_pipe", "power_strip", "wall_socket", 
+    "clothes_dryer", "iron", "hair_dryer", "desktop_computer", 
+    "laptop", "bottle_of_lighter_fluid", "fuel_can", "spray_paint_can", 
+    "spray_can", "bottle_of_solvent", "bottle_of_paint_remover"
+]
+
+# 适合作为异常解决方案的物品
+anomaly_resolution_map = # ==========================================
+# 具身智能 Home-Care 异常解决图谱 (Recipe Paths 版)
+# ==========================================
+anomaly_resolution_map = {
+    
+    "Fire_Emergency": [
+        {
+            # 配方 A：使用灭火器
+            "path_name": "use_extinguisher",
+            "required_infrastructure": [], 
+            "spawnable_tools": ["fire_extinguisher"]
+        }
     ],
-    "task_solution": [
-    	{"position": "...", "action_type": "...", "action_information": ...},
-    	{"position": "...", "action_type": "...", "action_information": ...},
-    ] # 逐个step排布的列表(机器人每进入一个新的空间/进行一个新的操作算一个step)
+
+    "Dirty_Dishes": [
+        {
+            # 配方 A：有洗碗机则不生成任何工具
+            "path_name": "machine_wash",
+            "required_infrastructure": ["dishwasher"], 
+            "spawnable_tools": [] # 保持空列表，底层循环自动跳过生成
+        },
+        {
+            # 配方 B：手洗流派 (必须同时拥有水槽和水龙头，且打包生成海绵和洗洁精)
+            "path_name": "hand_wash",
+            "required_infrastructure": ["sink", "faucet"], 
+            "spawnable_tools": ["sponge", "bottle_of_dish_soap"]
+        }
+    ],
+
+    "Dirty_Clothes": [
+        {
+            # 配方 A：直接用洗衣机洗
+            "path_name": "machine_wash_clothes",
+            "required_infrastructure": ["washer"],
+            "spawnable_tools": []
+        },
+        {
+            # 配方 B：放入脏衣篓 (无需基建，动态生成 hamper)
+            "path_name": "put_in_hamper",
+            "required_infrastructure": [],
+            "spawnable_tools": ["hamper"]
+        },
+        {
+            # 配方 C：放在布毯上收集 (无需基建，动态生成 cloth_blanket)
+            "path_name": "put_on_cloth_basket",
+            "required_infrastructure": [],
+            "spawnable_tools": ["cloth_basket"]
+        }
+    ],
+
+    "Broken_Object": [
+        {
+            # 配方 A：全套工具清扫 (三个工具必须打包一起生成，缺一不可)
+            "path_name": "sweep_up",
+            "required_infrastructure": [], 
+            "spawnable_tools": ["broom", "dustpan", "trash_can"]
+        }
+    ]
+}
+
+===============================================================
+### Step1 寻找可异常化的物品
+===============================================================
+abnormal_obj_list = []
+
+for obj in all_objects:
+	
+	if obj.abnormal_state = True or obj in all_fire_source_objects:
+	
+		abnormal_obj_list.append(obj)
+# 设置异常
+for ab_obj in abnormal_obj_list:
+	
+	... 采样策略(防止数量爆炸) ...
+	
+	# 确保任务可解
+	solution_obj = find_solution(anomaly_resolution_map, ab_obj)
+	
+	env_b = add_abnormal_to_env(env_a, ab_obj)
+	
+	if solution_obj: 
+	
+		env_b = add_resolution_to_env(env_b, solution_obj)
+	
+	
+	
+	... 根据异常布置机器人/摄像头，设计问题 ...
+	
+	... 储存问题 ...
+```
+
+#### **实例化的保存:**
+
+实例化的保存核心目标是保存一下内容：任务环境、任务内容、任务解决方案
+
+由此最为直观的方法是设计一个字典， 只保留五类ActionType：
+MOVE / PICK / PLACE / INTERACT / WAIT
+
+```json
+{
+"task_environment": "..." ,
+"task_NL": "自然语言格式的任务"，
+"robot": {
+	...
+}, # 记录任务场景中使用的robot的初始信息
+"camera": [
+	...
+], # 记录环境中的摄像头信息
+"task_objects": [
+	{"object_name": "...", "object_position": "...", "object_id": "..."}
+],
+"task_solution": [
+	{"position": "...", "action_type": "...", "action_information": ...},
+	{"position": "...", "action_type": "...", "action_information": ...},
+] # 逐个step排布的列表(机器人每进入一个新的空间/进行一个新的操作算一个step)
+}
+```
+
+直观的图片形式如下：
+
+![ChatGPT Image 2026年5月26日 18_09_15.png](attachment:5e011d08-0ea0-4fa3-8561-7f52143c8dcb:ChatGPT_Image_2026年5月26日_18_09_15.png)
+
+具体地，移动到房间的话需要保存房间id，移动到目标点的话需要保存目标点id：
+
+```json
+{
+  "env_id": "Env-B_Fire",
+
+  // =====================================================
+  // Task Definition
+  // =====================================================
+
+  "task": {
+
+    "task_id": "fire_task_001",
+
+    "task_type": "...",
+
+    "instruction":
+      "Resolve the fire emergency using the extinguisher.",
+  },
+
+  // =====================================================
+  // Robot Initialization
+  // =====================================================
+
+  "robot": {
+
+    "robot_id": "robot_0",
+
+    "initial_room": "bedroom_0",
+
+    "pose": {
+      "position": [1.54, -2.10, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0]
     }
-    ```
-    
-    具体地，移动到房间的话需要保存房间id，移动到目标点的话需要保存目标点id，例如机器人从`bedroom_1`移动到客厅`living_room`并且拿起扫帚`broom`的`task_solution`字段如下
-    
-    ```json
+  },
+  
+  // =====================================================
+  // Camera Initialization
+  // =====================================================
+
+  "camera": [
+
     {
-      "env_id": "Env-B_Fire",
-    
-      // =====================================================
-      // Task Definition
-      // =====================================================
-    
-      "task": {
-    
-        "task_id": "fire_task_001",
-    
-        "task_type": "...",
-    
-        "instruction":
-          "Resolve the fire emergency using the extinguisher.",
-      },
-    
-      // =====================================================
-      // Robot Initialization
-      // =====================================================
-    
-      "robot": {
-    
-        "robot_id": "robot_0",
-    
-        "initial_room": "bedroom_0",
-    
-        "pose": {
-          "position": [1.54, -2.10, 0.0],
-          "rotation": [0.0, 0.0, 0.0, 1.0]
-        }
-      },
-    
-      // =====================================================
-      // Scene Objects
-      // =====================================================
-    
-      "objects": [
-    
-        {
-          "object_id": "fire_1",
-    
-          "object_name": "kitchen_fire",
-    
-          "category": "anomaly",
-    
-          "semantic_roles": [
-            "goal_target"
-          ],
-    
-          "states": {
-            "on_fire": true
-          },
-    
-          "room_id": "kitchen_0",
-    
-          "pose": {
-            "position": [5.10, 2.22, 0.0]
-          }
-        },
-    
-        {
-          "object_id": "ext_1",
-    
-          "object_name": "fire_extinguisher",
-    
-          "category": "tool",
-    
-          "semantic_roles": [
-            "interaction_tool"
-          ],
-    
-          "states": {},
-    
-          "room_id": "kitchen_0",
-    
-          "pose": {
-            "position": [4.25, 3.12, 0.85]
-          }
-        }
-      ],
-    
-      // =====================================================
-      // Executable Plan
-      // =====================================================
-    
-      "solution_plan": [
-    
-        {
-          "step_id": 1,
-    
-          "primitive": "MOVE",
-          
-          "nl": "MOVE to Extinguisher"
-          
-          "inventory": [],
-    
-          "target_object": "ext_1",
-        },
-    
-        {
-          "step_id": 2,
-    
-          "primitive": "PICK",
-          
-          "nl": "Pickup Extinguisher",
-          
-          "inventory": [],
-    
-          "target_object": "ext_1",
-    
-        },
-    
-        {
-          "step_id": 3,
-    
-          "primitive": "MOVE",
-          
-          "nl": "Move to Fireplace",
-          
-          "inventory": ["ext_1"],
-    
-          "target_object": "fire_1",
-        },
-    
-        {
-          "step_id": 4,
-    
-          "primitive": "INTERACT",
-    
-          "nl": "Extinguish Fire",
-          
-          "inventory": ["ext_1"],
-    
-          "tool_object": "ext_1",
-    
-          "target_object": "fire_1",
-        }
-      ]
+      "camera_id": "cam_kitchen",
+
+      "camera_type": "global_camera",
+
+      "room_id": "kitchen_0",
+
+      "pose": {
+        "position": [5.5, 2.5, 2.8],
+        "rotation": [0.0, 0.0, 0.0, 1.0]
+      }
+    },
+
+    {
+      "camera_id": "cam_bathroom",
+
+      "camera_type": "global_camera",
+
+      "room_id": "bathroom_0",
+
+      "pose": {
+        "position": [7.2, -1.0, 2.8],
+        "rotation": [0.0, 0.0, 0.0, 1.0]
+      }
     }
-    ```
-    
+  ],
+
+  // =====================================================
+  // Scene Objects
+  // =====================================================
+
+  "objects": [
+
+    {
+      "object_id": "fire_1",
+
+      "object_name": "kitchen_fire",
+
+      "category": "anomaly",
+
+      "semantic_roles": [
+        "goal_target"
+      ],
+
+      "states": {
+        "on_fire": true
+      },
+
+      "room_id": "kitchen_0",
+
+      "pose": {
+        "position": [5.10, 2.22, 0.0]
+      }
+    },
+
+    {
+      "object_id": "ext_1",
+
+      "object_name": "fire_extinguisher",
+
+      "category": "tool",
+
+      "semantic_roles": [
+        "interaction_tool"
+      ],
+
+      "states": {},
+
+      "room_id": "kitchen_0",
+
+      "pose": {
+        "position": [4.25, 3.12, 0.85]
+      }
+    }
+  ],
+  // =====================================================
+  // Executable Plan
+  // =====================================================
+  "solution_plan": [
+    {
+      "step_id": 1,
+      "primitive": "MOVE",
+      "nl": "MOVE to Extinguisher"
+      "inventory": [],
+      "target_object": "ext_1",
+    },
+    {
+      "step_id": 2,
+      "primitive": "PICK",
+      "nl": "Pickup Extinguisher",
+      "inventory": [],
+      "target_object": "ext_1",
+    },
+    {
+      "step_id": 3,
+      "primitive": "MOVE",
+      "nl": "Move to Fireplace",      
+      "inventory": ["ext_1"],
+      "target_object": "fire_1",
+    },
+
+    {
+      "step_id": 4,
+      "primitive": "INTERACT",
+      "nl": "Extinguish Fire",
+      "inventory": ["ext_1"],
+      "tool_object": "ext_1",
+      "target_object": "fire_1",
+    }
+  ]
+}
+```
 
 生成”solution plan”部分的prompt可参考一下内容:
 
@@ -602,9 +664,312 @@ Resolve the fire emergency using the extinguisher.
 },
 ```
 
+#### Env-C：Constraint-Semantic Environment（约束语义环境）
+
+Env-C 旨在考察模型在多视角、多候选项与隐式任务约束条件下的语义推理能力。区别于 Env-A 的基础任务执行与 Env-B 的事件异常理解，Env-C 更强调模型是否能够结合视觉信息、空间关系、物体 affordance 与世界常识，理解“为什么应该选择这个物体/方案”。
+
+Env-C 基于 Env-A / Env-B 的任务环境进行扩展，通过向场景中注入多个“合理但非最优”的候选项，构建富语义约束的任务空间。例如：在灭火场景中同时放置灭火器、水桶与玩具桶，要求模型选择“最快灭火”的工具；或在多个异常同时存在时（火灾、漏水、柜门未关），要求模型优先处理“最紧急”的异常。此类任务不再依赖显式视觉属性（颜色、位置），而常识性语义约束完成推理。
+
+```json
+{
+  "env_id": "Env-C_Fire_Disambiguation",
+
+  // =====================================================
+  // Task Definition
+  // =====================================================
+
+  "task": {
+
+    "task_id": "fire_semantic_task_001",
+
+    "task_type": "semantic_object_grounding",
+
+    "instruction":
+      "Quickly extinguish the kitchen fire using the most suitable tool.",
+
+    "semantic_constraints": [
+      "fastest_solution",
+      "fire_suppression_affordance"
+    ]
+  },
+
+  // =====================================================
+  // Robot Initialization
+  // =====================================================
+
+  "robot": {
+
+    "robot_id": "robot_0",
+
+    "initial_room": "living_room_0",
+
+    "pose": {
+      "position": [1.20, -1.85, 0.0],
+      "rotation": [0.0, 0.0, 0.0, 1.0]
+    }
+  },
+
+  // =====================================================
+  // Camera Initialization
+  // =====================================================
+
+  "camera": [
+
+    {
+      "camera_id": "cam_kitchen",
+
+      "camera_type": "global_camera",
+
+      "room_id": "kitchen_0",
+
+      "pose": {
+        "position": [5.5, 2.5, 2.8],
+        "rotation": [0.0, 0.0, 0.0, 1.0]
+      }
+    },
+
+    {
+      "camera_id": "cam_bathroom",
+
+      "camera_type": "global_camera",
+
+      "room_id": "bathroom_0",
+
+      "pose": {
+        "position": [7.2, -1.0, 2.8],
+        "rotation": [0.0, 0.0, 0.0, 1.0]
+      }
+    }
+  ],
+
+  // =====================================================
+  // Scene Objects
+  // =====================================================
+
+"objects": [
+
+  {
+    "object_id": "fire_1",
+
+    "object_name": "kitchen_fire",
+
+    "category": "anomaly",
+
+    "semantic_roles": [
+      "goal_target"
+    ],
+
+    "states": {
+      "on_fire": true
+    },
+
+    "visibility": {
+      "robot_initial_view": false,
+      "visible_from_cameras": ["cam_kitchen"],
+      "occluded": false
+    },
+
+    "room_id": "kitchen_0",
+
+    "pose": {
+      "position": [5.10, 2.22, 0.0]
+    }
+  },
+
+  {
+    "object_id": "ext_1",
+
+    "object_name": "fire_extinguisher",
+
+    "category": "tool",
+
+    "semantic_roles": [
+      "candidate_solution",
+      "optimal_solution"
+    ],
+
+    "semantic_affordance": [
+      "extinguish_fire"
+    ],
+
+    "utility_score": 1.0,
+
+    "states": {},
+
+    "visibility": {
+      "robot_initial_view": false,
+      "visible_from_cameras": ["cam_kitchen"],
+      "occluded": false
+    },
+
+    "room_id": "kitchen_0",
+
+    "pose": {
+      "position": [4.25, 3.12, 0.85]
+    }
+  },
+
+  {
+    "object_id": "bucket_1",
+
+    "object_name": "water_bucket",
+
+    "category": "tool",
+
+    "semantic_roles": [
+      "candidate_solution"
+    ],
+
+    "semantic_affordance": [
+      "carry_water",
+      "extinguish_fire"
+    ],
+
+    "utility_score": 0.45,
+
+    "states": {},
+
+    "visibility": {
+      "robot_initial_view": false,
+      "visible_from_cameras": ["cam_bathroom"],
+      "occluded": false
+    },
+
+    "room_id": "bathroom_0",
+
+    "pose": {
+      "position": [7.33, -1.02, 0.0]
+    }
+  },
+
+  {
+    "object_id": "toy_bucket_1",
+
+    "object_name": "toy_bucket",
+
+    "category": "distractor",
+
+    "semantic_roles": [
+      "semantic_distractor"
+    ],
+
+    "semantic_affordance": [],
+
+    "utility_score": 0.0,
+
+    "states": {},
+
+    "visibility": {
+      "robot_initial_view": true,
+      "visible_from_cameras": [],
+      "occluded": false
+    },
+
+    "room_id": "living_room_0",
+
+    "pose": {
+      "position": [2.02, 0.55, 0.0]
+    }
+  }
+]
+
+  // =====================================================
+  // Executable Plan
+  // =====================================================
+
+  "solution_plan": [
+
+    {
+      "step_id": 1,
+
+      "primitive": "MOVE",
+
+      "nl": "MOVE to Fire Extinguisher",
+
+      "inventory": [],
+
+      "target_object": "ext_1"
+    },
+
+    {
+      "step_id": 2,
+
+      "primitive": "PICK",
+
+      "nl": "Pickup Fire Extinguisher",
+
+      "inventory": [],
+
+      "target_object": "ext_1"
+    },
+
+    {
+      "step_id": 3,
+
+      "primitive": "MOVE",
+
+      "nl": "Move to Kitchen Fire",
+
+      "inventory": ["ext_1"],
+
+      "target_object": "fire_1"
+    },
+
+    {
+      "step_id": 4,
+
+      "primitive": "INTERACT",
+
+      "nl": "Extinguish Fire",
+
+      "inventory": ["ext_1"],
+
+      "tool_object": "ext_1",
+
+      "target_object": "fire_1"
+    }
+  ],
+
+  // =====================================================
+  // Semantic Reasoning Metadata
+  // =====================================================
+
+  "semantic_reasoning": {
+
+    "reasoning_type": [
+      "semantic_disambiguation",
+      "affordance_grounding",
+      "utility_reasoning"
+    ],
+
+    "ground_truth": {
+
+      "optimal_object": "ext_1",
+
+      "rejected_candidates": [
+
+        {
+          "object_id": "bucket_1",
+
+          "reason":
+            "valid_solution_but_lower_efficiency"
+        },
+
+        {
+          "object_id": "toy_bucket_1",
+
+          "reason":
+            "invalid_affordance"
+        }
+      ]
+    }
+  }
+}
+```
+
 ---
 
-**[层级 3：专家求解层 ]**
+### **[层级 3：专家求解层 ]**
 
 该层级的核心目标是专家求解器的设计，其目标是根据第二层级DeltaSG生成的solution_plan，实例化为机器人的操纵路径。其直接关联第四层级的采样、QRA化，是第四层级运行的基础。
 
