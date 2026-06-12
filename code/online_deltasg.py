@@ -26,6 +26,7 @@ import torch as th
 import omnigibson as og
 import omnigibson.lazy as lazy
 from omnigibson import object_states
+from omnigibson.utils.usd_utils import RigidContactAPI
 from omnigibson.objects import DatasetObject
 from omnigibson.utils.asset_utils import get_all_object_category_models
 from omnigibson.utils.constants import PrimType
@@ -148,6 +149,7 @@ class OnlineDeltaSGConfig:
     support_z_tolerance: float = 0.08
     seed: int = 0
     allow_cloth: bool = False
+    max_fallback_supports: int = 3
 
 
 class OnlineDeltaSGEngine:
@@ -166,6 +168,8 @@ class OnlineDeltaSGEngine:
         self.asset_db = TaskAssetDatabase.load(metadata_dir=metadata_dir or TaskAssetDatabase().metadata_dir)
         self._run_counter = 0
         self._category_models_cache = {}
+        self._placed_on_support = {}
+        self._placement_support_map = {}
 
     def snapshot(self):
         """Return a 3DSG-like graph built from the current live simulator state."""
@@ -242,6 +246,8 @@ class OnlineDeltaSGEngine:
         Returns a record containing the before graph, applied DeltaSG, validation
         report, and after graph. The current OmniGibson env remains edited.
         """
+        self._placed_on_support = {}
+        self._placement_support_map = {}
         before_graph = self.snapshot()
         selected_records = self._select_task_records(task)
         primary_task = task or self._choose_primary_task(selected_records)
@@ -334,6 +340,8 @@ class OnlineDeltaSGEngine:
         Create an Env-B event scene online by setting a live object on fire and
         spawning a fire extinguisher solution object.
         """
+        self._placed_on_support = {}
+        self._placement_support_map = {}
         before_graph = self.snapshot()
         target_room = target_room or self._choose_room_with_objects(before_graph)
         fire_target = self._choose_fire_target(before_graph, target_room)
@@ -526,16 +534,22 @@ class OnlineDeltaSGEngine:
         }
 
     def add_task_asset(self, record, object_name, target_room, semantic_role="task_object"):
-        """Add one task asset directly to the live OmniGibson scene."""
+        """Add one task asset directly to the live OmniGibson scene.
+
+        Uses a retry loop: tries the primary placement, up to
+        config.max_fallback_supports alternative supports, and a floor
+        placement as last resort.  Each attempt validates via AABB overlap
+        check and physics contact detection.  If all attempts fail, the
+        object is removed from the scene.
+        """
         category = self._choose_category(record)
-        placement = self._choose_live_placement(record, target_room)
         result = {
             "ok": False,
             "object_name": object_name,
             "category": category,
             "synset": record["synset"],
             "semantic_role": semantic_role,
-            "placement": placement,
+            "placement": None,
             "errors": [],
         }
 
@@ -551,22 +565,113 @@ class OnlineDeltaSGEngine:
             )
             self.env.scene.add_object(obj)
             self._clear_usd_selection()
-            obj.set_position_orientation(
-                position=th.tensor(placement["pose"]["position"], dtype=th.float32),
-                orientation=th.tensor(placement["pose"]["orientation_xyzw"], dtype=th.float32),
-            )
-            self._clear_usd_selection()
-            self._step(1)
 
-            relation = self._apply_relation(obj, placement)
-            self._clear_usd_selection()
-            self._step(5)
+            # Build candidate placement list: primary + fallbacks + floor
+            placement = self._choose_live_placement(record, target_room)
+            candidates = [placement]
+            for alt_support in placement.get("support_candidates", [])[:self.config.max_fallback_supports]:
+                alt_placement = self._build_placement_for_support(record, target_room, alt_support)
+                if alt_placement:
+                    candidates.append(alt_placement)
+            floor_placement = self._build_floor_placement(record, target_room)
+            if floor_placement:
+                candidates.append(floor_placement)
+
+            placed = False
+            chosen_placement = None
+            relation_result = None
+
+            for placement_attempt in candidates:
+                support_id = placement_attempt.get("support_object_id")
+                is_floor = support_id is None
+
+                obj.set_position_orientation(
+                    position=th.tensor(placement_attempt["pose"]["position"], dtype=th.float32),
+                    orientation=th.tensor(placement_attempt["pose"]["orientation_xyzw"], dtype=th.float32),
+                )
+                self._clear_usd_selection()
+                self._step(1)
+
+                if is_floor:
+                    # Floor placement: skip relation, just check AABB
+                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=0.02)
+                    if not overlapping:
+                        placed = True
+                        chosen_placement = placement_attempt
+                        relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement"}
+                        break
+                    else:
+                        result["errors"].append({
+                            "error": "aabb_overlap_floor",
+                            "overlapping_objects": overlapping,
+                        })
+                        continue
+
+                # Apply relation (OnTop/Inside) — has internal collision-aware sampling
+                relation_result = self._apply_relation(obj, placement_attempt)
+                self._clear_usd_selection()
+                self._step(5)
+
+                if not relation_result.get("ok"):
+                    result["errors"].append({
+                        "error": "relation_failed",
+                        "relation": relation_result,
+                        "support": support_id,
+                    })
+                    continue
+
+                # Verify with AABB overlap check
+                overlapping = self._check_aabb_overlap(
+                    obj, exclude_names={support_id} if support_id else None, margin=0.01,
+                )
+                if overlapping:
+                    result["errors"].append({
+                        "error": "aabb_overlap_after_placement",
+                        "overlapping_objects": overlapping,
+                        "support": support_id,
+                    })
+                    continue
+
+                # Verify with physics contact API
+                support_obj = self.env.scene.object_registry("name", support_id, None) if support_id else None
+                unexpected, unexpected_names = self._has_unexpected_contacts(
+                    obj, support_obj=support_obj, settle_steps=2,
+                )
+                if unexpected:
+                    result["errors"].append({
+                        "error": "unexpected_contact_after_relation",
+                        "contacting_objects": unexpected_names,
+                        "support": support_id,
+                    })
+                    continue
+
+                # All checks passed
+                placed = True
+                chosen_placement = placement_attempt
+                break
+
+            if not placed:
+                self._remove_object_safe(obj)
+                result["errors"].append({
+                    "error": "all_placement_attempts_failed",
+                    "num_attempts": len(candidates),
+                })
+                return result
+
+            # Track placement on support for crowding penalty
+            support_id = chosen_placement.get("support_object_id")
+            support_key = support_id or "__floor__"
+            self._placed_on_support[support_key] = self._placed_on_support.get(support_key, 0) + 1
+            if support_id:
+                self._placement_support_map[object_name] = support_id
+
             position, orientation = obj.get_position_orientation()
             result.update(
                 {
                     "ok": True,
                     "model": getattr(obj, "model", None),
-                    "relation": relation,
+                    "relation": relation_result,
+                    "placement": chosen_placement,
                     "final_pose_before_warmup": {
                         "position": self._to_list(position),
                         "orientation_xyzw": self._to_list(orientation),
@@ -580,11 +685,14 @@ class OnlineDeltaSGEngine:
                         "semantic_roles": [semantic_role],
                         "semantic": record.get("edit_metadata", {}),
                     },
-                    "delta_edges": self._delta_edges_for_added_object(object_name, target_room, placement, relation),
+                    "delta_edges": self._delta_edges_for_added_object(
+                        object_name, target_room, chosen_placement, relation_result,
+                    ),
                 }
             )
         except Exception as exc:
             result["errors"].append({"error": repr(exc), "traceback": traceback.format_exc()})
+            self._remove_object_safe_by_name(object_name)
 
         return result
 
@@ -761,6 +869,106 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None, None, None
 
+    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02):
+        """Check whether obj's AABB overlaps any other scene object's AABB.
+
+        Args:
+            obj: The object to check.
+            exclude_names: Set of object names to exclude (e.g. the support, the object itself).
+            margin: Extra padding (meters) added to each AABB side before intersection test.
+
+        Returns:
+            list[str]: Names of overlapping objects. Empty means no overlap.
+        """
+        exclude = set(exclude_names or [])
+        exclude.add(getattr(obj, "name", None))
+        obj_lo, obj_hi, _ = self._safe_aabb(obj)
+        if obj_lo is None or obj_hi is None:
+            return []
+        obj_lo = np.asarray(obj_lo, dtype=np.float32) - margin
+        obj_hi = np.asarray(obj_hi, dtype=np.float32) + margin
+        overlapping = []
+        for other in self._scene_objects():
+            other_name = getattr(other, "name", None)
+            if other_name in exclude:
+                continue
+            other_lo, other_hi, _ = self._safe_aabb(other)
+            if other_lo is None or other_hi is None:
+                continue
+            other_lo = np.asarray(other_lo, dtype=np.float32)
+            other_hi = np.asarray(other_hi, dtype=np.float32)
+            if (obj_lo[0] <= other_hi[0] and obj_hi[0] >= other_lo[0] and
+                    obj_lo[1] <= other_hi[1] and obj_hi[1] >= other_lo[1] and
+                    obj_lo[2] <= other_hi[2] and obj_hi[2] >= other_lo[2]):
+                overlapping.append(other_name)
+        return overlapping
+
+    def _has_unexpected_contacts(self, obj, support_obj=None, settle_steps=3):
+        """Check via RigidContactAPI whether obj contacts anything other than its support.
+
+        Returns:
+            tuple[bool, list[str]]: (has_unexpected, names_of_contacting_objects)
+        """
+        ignore_set = {obj}
+        if support_obj is not None:
+            ignore_set.add(support_obj)
+        self._step(settle_steps)
+        try:
+            in_contact = RigidContactAPI.is_in_contact(
+                scene_idx=self.env.scene.idx,
+                query_set=[obj],
+                with_set=None,
+                ignore_set=ignore_set,
+                current_only=True,
+            )
+        except Exception:
+            return False, []
+        if not in_contact:
+            return False, []
+        unexpected = []
+        for other in self._scene_objects():
+            if other is obj or other is support_obj:
+                continue
+            other_name = getattr(other, "name", None)
+            if other_name is None:
+                continue
+            try:
+                pair_contact = RigidContactAPI.is_in_contact(
+                    scene_idx=self.env.scene.idx,
+                    query_set=[obj],
+                    with_set=[other],
+                    ignore_set=None,
+                    current_only=True,
+                )
+            except Exception:
+                pair_contact = False
+            if pair_contact:
+                unexpected.append(other_name)
+        return bool(unexpected), unexpected
+
+    def _remove_object_safe(self, obj):
+        """Remove an object from the scene, swallowing errors."""
+        try:
+            self.env.scene.remove_object(obj)
+        except Exception:
+            pass
+
+    def _remove_object_safe_by_name(self, name):
+        """Remove an object from the scene by name, swallowing errors."""
+        try:
+            obj = self.env.scene.object_registry("name", name, None)
+            if obj is not None:
+                self.env.scene.remove_object(obj)
+        except Exception:
+            pass
+
+    def _find_support_for_object(self, object_name):
+        """Look up the intended support object for a placed object."""
+        support_id = self._placement_support_map.get(object_name)
+        if support_id is None:
+            return None
+        return self.env.scene.object_registry("name", support_id, None)
+
     def _rooms_for_obj(self, obj):
         rooms = []
         for attr in ("in_rooms", "rooms", "room_instance", "room_type"):
@@ -907,10 +1115,11 @@ class OnlineDeltaSGEngine:
 
     def _choose_live_placement(self, record, target_room):
         graph = self.snapshot()
-        support = self._choose_support_node(record, target_room, graph)
+        support_result = self._choose_support_node(record, target_room, graph)
+        support_node = support_result["node"] if support_result else None
         mode = "on_top"
-        if support:
-            receptacle = ((support.get("semantic") or {}).get("receptacle") or {})
+        if support_node:
+            receptacle = ((support_node.get("semantic") or {}).get("receptacle") or {})
             wants_inside = (record.get("edit_metadata", {}).get("receptacle") or {}).get("supports_inside")
             if wants_inside and receptacle.get("supports_inside"):
                 mode = "inside"
@@ -918,12 +1127,17 @@ class OnlineDeltaSGEngine:
                 mode = "on_top"
             elif receptacle.get("supports_inside"):
                 mode = "inside"
-        pose = self._pose_near_support(support, target_room, graph)
+        count_on_support = self._placed_on_support.get(
+            support_node["id"] if support_node else "__floor__", 0
+        )
+        pose = self._pose_near_support(support_node, target_room, graph,
+                                       placed_on_support_count=count_on_support)
         return {
             "room_id": target_room,
             "mode": mode,
-            "support_object_id": support["id"] if support else None,
-            "support_category": support.get("category") if support else None,
+            "support_object_id": support_node["id"] if support_node else None,
+            "support_category": support_node.get("category") if support_node else None,
+            "support_candidates": support_result.get("candidates", []) if support_result else [],
             "pose": {
                 "position": pose,
                 "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
@@ -931,7 +1145,16 @@ class OnlineDeltaSGEngine:
             "pose_source": "live_support_object",
         }
 
-    def _choose_support_node(self, record, target_room, graph):
+    def _choose_support_node(self, record, target_room, graph, top_n=4):
+        """Choose the best support node for placing an object.
+
+        Returns a dict with:
+            - "node": the best support node (or None if no candidates).
+            - "candidates": list of alternative support node dicts for fallback.
+
+        Applies a crowding penalty: each object already placed on a support
+        reduces its score by 2, encouraging spreading across supports.
+        """
         wants_inside = (record.get("edit_metadata", {}).get("receptacle") or {}).get("supports_inside")
         candidates = []
         for node in graph["nodes"]:
@@ -950,11 +1173,77 @@ class OnlineDeltaSGEngine:
             if receptacle.get("supports_inside"):
                 score += 2
             score += self._support_preference_score(node, target_room)
+            already_on = self._placed_on_support.get(node["id"], 0)
+            score -= already_on * 2
             candidates.append((score, node))
         if not candidates:
+            return {"node": None, "candidates": []}
+        candidates.sort(key=lambda item: (-item[0], item[1]["id"]))
+        best_score = candidates[0][0]
+        top_group = [node for score, node in candidates if score == best_score]
+        chosen = self.rng.choice(sorted(top_group, key=lambda n: n["id"]))
+        alt_candidates = [node for _, node in candidates[:top_n]]
+        alt_candidates = [n for n in alt_candidates if n["id"] != chosen["id"]]
+        return {"node": chosen, "candidates": alt_candidates}
+
+    def _build_placement_for_support(self, record, target_room, support_node):
+        """Build a placement dict for a specific fallback support node."""
+        try:
+            graph = self.snapshot()
+            mode = "on_top"
+            receptacle = ((support_node.get("semantic") or {}).get("receptacle") or {})
+            wants_inside = (record.get("edit_metadata", {}).get("receptacle") or {}).get("supports_inside")
+            if wants_inside and receptacle.get("supports_inside"):
+                mode = "inside"
+            elif receptacle.get("supports_on_top"):
+                mode = "on_top"
+            elif receptacle.get("supports_inside"):
+                mode = "inside"
+            count_on_support = self._placed_on_support.get(support_node["id"], 0)
+            pose = self._pose_near_support(support_node, target_room, graph,
+                                           placed_on_support_count=count_on_support)
+            return {
+                "room_id": target_room,
+                "mode": mode,
+                "support_object_id": support_node["id"],
+                "support_category": support_node.get("category"),
+                "support_candidates": [],
+                "pose": {
+                    "position": pose,
+                    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+                "pose_source": "fallback_support",
+            }
+        except Exception:
             return None
-        best_score = max(score for score, _ in candidates)
-        return self.rng.choice(sorted([node for score, node in candidates if score == best_score], key=lambda n: n["id"]))
+
+    def _build_floor_placement(self, record, target_room):
+        """Last-resort placement: on the floor in the target room."""
+        try:
+            graph = self.snapshot()
+            room_center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
+            if room_center:
+                pos = [
+                    float(room_center[0]) + self.rng.gauss(0, 0.3),
+                    float(room_center[1]) + self.rng.gauss(0, 0.3),
+                    0.5,
+                ]
+            else:
+                pos = [self.rng.gauss(0, 0.3), self.rng.gauss(0, 0.3), 0.5]
+            return {
+                "room_id": target_room,
+                "mode": "on_top",
+                "support_object_id": None,
+                "support_category": "floor",
+                "support_candidates": [],
+                "pose": {
+                    "position": pos,
+                    "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+                "pose_source": "floor_fallback",
+            }
+        except Exception:
+            return None
 
     def _apply_relation(self, obj, placement):
         support_id = placement.get("support_object_id")
@@ -992,8 +1281,18 @@ class OnlineDeltaSGEngine:
     def _collect_settling_report(self, object_names):
         before = {name: self._object_position(name) for name in object_names}
         self._step(self.config.settle_steps)
+
+        # Build lookup for contact checking
+        scene_objs_by_name = {}
+        for name in object_names:
+            obj = self.env.scene.object_registry("name", name, None)
+            if obj is not None:
+                scene_objs_by_name[name] = obj
+
         objects = []
         all_within = True
+        contact_issues = []
+
         for name, start in before.items():
             end = self._object_position(name)
             if start is None or end is None:
@@ -1003,20 +1302,64 @@ class OnlineDeltaSGEngine:
             displacement = float(np.linalg.norm(np.asarray(end) - np.asarray(start)))
             within = displacement <= self.config.settle_threshold
             all_within = all_within and within
-            objects.append(
-                {
-                    "object_name": name,
-                    "start_position": start,
-                    "end_position": end,
-                    "displacement": displacement,
-                    "within_threshold": within,
-                }
-            )
+
+            entry = {
+                "object_name": name,
+                "start_position": start,
+                "end_position": end,
+                "displacement": displacement,
+                "within_threshold": within,
+            }
+
+            # Check for unexpected contacts after settling
+            obj = scene_objs_by_name.get(name)
+            if obj is not None:
+                support_obj = self._find_support_for_object(name)
+                ignore_set = {obj}
+                if support_obj is not None:
+                    ignore_set.add(support_obj)
+                try:
+                    has_contact = RigidContactAPI.is_in_contact(
+                        scene_idx=self.env.scene.idx,
+                        query_set=[obj],
+                        with_set=None,
+                        ignore_set=ignore_set,
+                        current_only=True,
+                    )
+                except Exception:
+                    has_contact = False
+                if has_contact:
+                    entry["unexpected_contact"] = True
+                    all_within = False
+                    contact_issues.append(name)
+                    contacting = []
+                    for other_name, other_obj in scene_objs_by_name.items():
+                        if other_name == name:
+                            continue
+                        try:
+                            pair = RigidContactAPI.is_in_contact(
+                                scene_idx=self.env.scene.idx,
+                                query_set=[obj],
+                                with_set=[other_obj],
+                                ignore_set=None,
+                                current_only=True,
+                            )
+                        except Exception:
+                            pair = False
+                        if pair:
+                            contacting.append(other_name)
+                    entry["contacting_objects"] = contacting
+                else:
+                    entry["unexpected_contact"] = False
+
+            objects.append(entry)
+
         return {
             "settle_steps": self.config.settle_steps,
             "settle_threshold": self.config.settle_threshold,
             "all_within_threshold": all_within,
             "objects": objects,
+            "contact_issues": contact_issues,
         }
 
     def _build_task_instance(self, run_id, primary_task, target_room, created_objects):
@@ -1331,18 +1674,43 @@ class OnlineDeltaSGEngine:
             return record["synset"].split(".")[0].replace("__", "_")
         return self.rng.choice(sorted(categories))
 
-    def _pose_near_support(self, support, target_room, graph):
+    def _pose_near_support(self, support, target_room, graph, placed_on_support_count=0):
+        """Return a pose near the support surface with random XY jitter.
+
+        The jitter prevents multiple objects placed on the same support from
+        collapsing to identical coordinates.  Objects placed later get larger
+        jitter radii (spiral outward).
+        """
         if support:
             pos = (support.get("pose") or {}).get("position")
             bbox = support.get("bbox") or {}
-            if bbox.get("max"):
-                return [float(pos[0]), float(pos[1]), float(bbox["max"][2]) + 0.15]
+            extent = bbox.get("extent") or [0.5, 0.5, 0.5]
+            if pos and bbox.get("max"):
+                ex = float(extent[0]) if len(extent) > 0 else 0.5
+                ey = float(extent[1]) if len(extent) > 1 else 0.5
+                jitter_x_max = max(0.03, ex * 0.3)
+                jitter_y_max = max(0.03, ey * 0.3)
+                angle = self.rng.uniform(0, 2 * 3.14159265)
+                radius_scale = min(1.0, 0.3 + 0.25 * placed_on_support_count)
+                jx = radius_scale * jitter_x_max * np.cos(angle) + self.rng.gauss(0, 0.02)
+                jy = radius_scale * jitter_y_max * np.sin(angle) + self.rng.gauss(0, 0.02)
+                jx = float(np.clip(jx, -jitter_x_max, jitter_x_max))
+                jy = float(np.clip(jy, -jitter_y_max, jitter_y_max))
+                return [float(pos[0]) + jx, float(pos[1]) + jy, float(bbox["max"][2]) + 0.15]
             if pos:
-                return [float(pos[0]), float(pos[1]), float(pos[2]) + 0.3]
+                return [
+                    float(pos[0]) + self.rng.gauss(0, 0.05),
+                    float(pos[1]) + self.rng.gauss(0, 0.05),
+                    float(pos[2]) + 0.3,
+                ]
         room_center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
         if room_center:
-            return [float(room_center[0]), float(room_center[1]), 0.8]
-        return [0.0, 0.0, 0.8]
+            return [
+                float(room_center[0]) + self.rng.gauss(0, 0.1),
+                float(room_center[1]) + self.rng.gauss(0, 0.1),
+                0.8,
+            ]
+        return [self.rng.gauss(0, 0.1), self.rng.gauss(0, 0.1), 0.8]
 
     def _record_has_any_model(self, record):
         return any(self._category_has_models(category) for category in record.get("direct_categories", []))
