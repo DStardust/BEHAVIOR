@@ -1141,7 +1141,7 @@ class OnlineDeltaSGEngine:
 
                 # Verify with AABB overlap check (cheap)
                 overlapping = self._check_aabb_overlap(
-                    obj, exclude_names={support_id} if support_id else None, margin=0.01,
+                    obj, exclude_names={support_id} if support_id else None, margin=0.05,
                 )
                 if overlapping:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: AABB overlap ({overlapping[:2]})",
@@ -1154,7 +1154,20 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
-                # All checks passed (contact check deferred to settling report)
+                # Verify with contact check (catches objects resting on same surface)
+                has_contact, contact_names = self._has_unexpected_contacts(obj, support_obj, settle_steps=3)
+                if has_contact:
+                    print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: unexpected contact ({contact_names[:2]})",
+                          end="", flush=True)
+                    result["errors"].append({
+                        "error": "unexpected_contact_after_placement",
+                        "contact_objects": contact_names,
+                        "support": support_id,
+                    })
+                    self._failed_placement_cache.add((category, support_id))
+                    continue
+
+                # All checks passed
                 if attempt_idx > 0:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: OK",
                           flush=True)
@@ -2851,7 +2864,27 @@ class OnlineDeltaSGEngine:
                 "reason": "state_not_available",
             }
         try:
-            ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
+            # For OnTop, ensure the object lands on the TOP half of the support,
+            # not on a lower shelf or the floor below the support.
+            if state_cls is object_states.OnTop:
+                support_aabb = support_obj.aabb
+                support_mid_z = float((support_aabb[0][2] + support_aabb[1][2]) / 2.0)
+                ok = False
+                for _attempt in range(5):
+                    ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
+                    if not ok:
+                        break
+                    pos, _ = obj.get_position_orientation()
+                    if float(pos[2]) >= support_mid_z:
+                        break  # Object is on the top half of the support, good
+                    # Object ended up too low — reset and retry
+                    obj.reset()
+                if ok:
+                    pos, _ = obj.get_position_orientation()
+                    if float(pos[2]) < support_mid_z:
+                        ok = False  # All retries failed, object is still too low
+            else:
+                ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
             return {
                 "ok": ok,
                 "mode": placement.get("mode"),
@@ -3160,8 +3193,11 @@ class OnlineDeltaSGEngine:
                 "semantic_constraints": task_instance.get("semantic_constraints", []),
                 "plan_objects": task_instance.get("plan_objects", []),
             },
-            "robot": self._robot_record(target_room, graph),
-            "camera": self._camera_records(target_room, graph),
+            "robot": (robot_record := self._robot_record(target_room, graph)),
+            "camera": self._camera_records(
+                target_room, graph,
+                initial_room=robot_record.get("initial_room") if robot_record else None,
+            ),
             "added_objects": added_objects,
             "context_objects": [
                 ao for ao in added_objects
@@ -3274,7 +3310,7 @@ class OnlineDeltaSGEngine:
             "navigation_hint": self._room_path(graph, initial_room, target_room) if initial_room else None,
         }
 
-    def _camera_records(self, target_room, graph):
+    def _camera_records(self, target_room, graph, initial_room=None):
         cameras = []
         if getattr(self.env, "robots", None):
             robot = self.env.robots[0]
@@ -3301,22 +3337,38 @@ class OnlineDeltaSGEngine:
                     }
                 )
 
-        center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
-        if center:
+        # Global cameras for robot's initial room and task target room
+        room_centers = (graph.get("navigation") or {}).get("room_centers", {})
+        rooms_to_cover = []
+        if initial_room and initial_room != target_room:
+            rooms_to_cover.append(initial_room)
+        rooms_to_cover.append(target_room)
+
+        for room_id in rooms_to_cover:
+            if not room_id:
+                continue
+            center = room_centers.get(room_id)
+            if not center:
+                continue
+            cam_pos, orientation = self._compute_global_camera_pose(center)
+            camera_id = f"global_{room_id}"
             cameras.append(
                 {
-                    "camera_id": f"planned_global_{target_room}",
-                    "camera_type": "global_camera_plan",
-                    "room_id": target_room,
+                    "camera_id": camera_id,
+                    "camera_type": "global_camera",
+                    "room_id": room_id,
                     "pose": {
-                        "position": [float(center[0]), float(center[1]), 2.4],
-                        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                        "position": list(cam_pos),
+                        "orientation_xyzw": list(orientation),
                     },
                     "modalities": ["rgb", "depth", "seg_semantic"],
-                    "resolution": None,
-                    "status": "planned_not_spawned",
+                    "resolution": {"height": 480, "width": 640},
+                    "status": "active",
                 }
             )
+            # Spawn the camera in the simulation
+            self._spawn_global_camera(camera_id, room_id, list(cam_pos), list(orientation))
+
         return cameras
 
     def _object_pose_record(self, obj):
@@ -3347,6 +3399,116 @@ class OnlineDeltaSGEngine:
         if height is None or width is None:
             return None
         return {"height": int(height), "width": int(width)}
+
+    def _spawn_global_camera(self, camera_id, room_id, position, orientation_xyzw,
+                             resolution=None, modalities=None):
+        """Spawn a standalone VisionSensor in the scene at the given pose."""
+        from omnigibson.sensors import create_sensor
+        resolution = resolution or {"height": 480, "width": 640}
+        modalities = modalities or ["rgb", "depth", "seg_semantic"]
+        try:
+            sensor = create_sensor(
+                sensor_type="Camera",
+                relative_prim_path=f"/{camera_id}",
+                name=camera_id,
+                modalities=modalities,
+                enabled=True,
+                sensor_kwargs={
+                    "image_height": resolution["height"],
+                    "image_width": resolution["width"],
+                },
+            )
+            # Load sensor directly into the scene (bypass add_object which is for USDObject)
+            sensor.load(self.env.scene)
+            sensor.initialize()
+            sensor.set_position_orientation(
+                position=np.array(position, dtype=np.float32),
+                orientation=np.array(orientation_xyzw, dtype=np.float32),
+            )
+            return sensor
+        except Exception:
+            # If the camera already exists or spawn fails, skip silently
+            return None
+
+    def _compute_global_camera_pose(self, room_center):
+        """Compute camera position and orientation for a room overview.
+
+        Camera is placed slightly offset from the room center (at 2.4m height),
+        looking back at the room center. This gives a perspective angle that
+        shows room contents clearly.
+        """
+        cam_pos = np.array([
+            float(room_center[0]) + 0.5,
+            float(room_center[1]) + 0.5,
+            2.4,
+        ], dtype=np.float32)
+        look_at = np.array([
+            float(room_center[0]),
+            float(room_center[1]),
+            0.8,
+        ], dtype=np.float32)
+        orientation = self._look_at_quat(cam_pos, look_at)
+        return cam_pos, orientation
+        orientation = self._look_at_quat(cam_pos, look_at)
+        return cam_pos, orientation
+
+    @staticmethod
+    def _look_at_quat(cam_pos, look_at):
+        """Compute xyzw quaternion for camera at cam_pos looking at look_at.
+
+        When the camera is looking mostly downward (|dz| is large), uses
+        world +Y as the up vector to avoid the singularity and upside-down
+        orientation that occurs when the look direction is parallel to world +Z.
+        """
+        d = np.array(look_at) - np.array(cam_pos)
+        d_norm = np.linalg.norm(d)
+        if d_norm < 1e-8:
+            d = np.array([0.0, 0.0, -1.0])
+        else:
+            d = d / d_norm
+
+        # If looking mostly down, use world +Y as up to avoid the Z-cross-Z singularity
+        if abs(d[2]) > 0.9:
+            up = np.array([0.0, 1.0, 0.0])
+        else:
+            up = np.array([0.0, 0.0, 1.0])
+
+        right = np.cross(up, d)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 1e-8:
+            right = np.array([1.0, 0.0, 0.0])
+        else:
+            right = right / right_norm
+        up = np.cross(d, right)
+        up = up / np.linalg.norm(up)
+        R = np.column_stack([right, up, -d])
+        # Matrix to quaternion
+        t = R[0, 0] + R[1, 1] + R[2, 2]
+        if t > 0:
+            s = 0.5 / np.sqrt(t + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+        return np.array([x, y, z, w], dtype=np.float32)
 
     def _nearest_room(self, position, graph):
         if not position or len(position) < 2:

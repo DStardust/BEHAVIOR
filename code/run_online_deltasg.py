@@ -106,9 +106,9 @@ def build_dataset_outputs(output_dir, summary, runs):
     index_path = output_dir / "dataset_index.json"
     dataset_path = output_dir / "dataset.json"
     with index_path.open("w", encoding="utf-8") as f:
-        json.dump(dataset_index, f, ensure_ascii=False, indent=2)
+        json.dump(dataset_index, f, ensure_ascii=False, indent=2, default=str)
     with dataset_path.open("w", encoding="utf-8") as f:
-        json.dump(dataset, f, ensure_ascii=False, indent=2)
+        json.dump(dataset, f, ensure_ascii=False, indent=2, default=str)
     return index_path, dataset_path
 
 
@@ -414,7 +414,7 @@ def main():
 
         summary_path = Path(args.output_dir) / "summary.json"
         with summary_path.open("w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
+            json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
         index_path, dataset_path = build_dataset_outputs(args.output_dir, summary, runs)
         print(f"[online-deltasg] saved {summary_path}", flush=True)
         print(f"[online-deltasg] saved {index_path}", flush=True)
