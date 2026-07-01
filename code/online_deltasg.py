@@ -144,8 +144,8 @@ ROOM_KEYWORDS = {
 # ================================================================
 # Env-A Task Categories (from intro.md 2026/6/16)
 # ================================================================
-# Each category maps to a set of task templates. The LLM selects a
-# category first, then determines the minimal required objects.
+# Env-A focuses on Retrieval & Delivery and Open/Close only.
+# Other categories (anomaly, appliance, cleaning, etc.) go to Env-B/C.
 VALID_TASKS: dict[str, set[str]] = {
     # Retrieval & Delivery
     "retrieval_delivery": {
@@ -154,38 +154,15 @@ VALID_TASKS: dict[str, set[str]] = {
         "retrieve_food", "deliver_medicine", "deliver_food",
         "deliver_drink", "put_object_on_table", "put_object_in_container",
     },
-    # Anomaly Response
-    "anomaly_response": {
-        "fire_response", "spill_cleanup", "broken_dish_cleanup",
-        "broken_glass_cleanup", "knife_recovery",
-        "fallen_object_recovery", "trash_cleanup",
-    },
     # Open / Close
     "open_close": {
         "open_door", "close_door", "open_window", "close_window",
         "open_fridge", "close_fridge", "open_cabinet", "close_cabinet",
     },
-    # Appliance
+    # Appliance (switch on/off)
     "appliance": {
         "turn_on_light", "turn_off_light", "turn_on_tv",
         "turn_off_tv", "turn_on_stove", "turn_off_stove",
-    },
-    # Cleaning
-    "cleaning": {
-        "clean_table", "clean_floor", "clean_sink",
-    },
-    # Organization
-    "organization": {
-        "organize_books", "organize_medicine", "organize_food",
-    },
-    # Constraint
-    "constraint": {
-        "retrieve_nearest_object", "retrieve_largest_object",
-        "retrieve_smallest_object",
-    },
-    # Semantic
-    "semantic": {
-        "retrieve_correct_medicine", "retrieve_correct_cleaner",
     },
 }
 
@@ -197,8 +174,8 @@ ALL_VALID_TASK_NAMES: set[str] = {t for tasks in VALID_TASKS.values() for t in t
 class OnlineDeltaSGConfig:
     task_objects: int = 2
     context_objects: int = 3
-    warmup_steps: int = 50
-    settle_steps: int = 10
+    warmup_steps: int = 20
+    settle_steps: int = 5
     settle_threshold: float = 0.25
     near_distance: float = 1.25
     support_z_tolerance: float = 0.08
@@ -354,8 +331,9 @@ class OnlineDeltaSGEngine:
         self._placement_support_map = {}
         self._support_occupied_area = {}
         self._scene_categories_cache = None  # refresh scene categories
-        # Clean up objects from previous runs to prevent scene pollution
+        # Save full scene state so we can restore after this run
         self._cleanup_spawned_objects()
+        self._pre_run_state = og.sim.dump_state(serialized=False)
         before_graph = self.snapshot()
 
         # ---- Step 1: Select task category and required objects ----
@@ -369,7 +347,7 @@ class OnlineDeltaSGEngine:
         else:
             # New paradigm: pick category → pick task → find objects
             task_category, primary_task = self._select_task_and_category(
-                skip_tasks=skip_tasks
+                skip_tasks=skip_tasks, cached_graph=before_graph,
             )
             if not primary_task:
                 return self._build_llm_rejected_result(
@@ -541,6 +519,7 @@ class OnlineDeltaSGEngine:
                 object_name=obj_name,
                 target_room=target_room,
                 semantic_role=role,
+                cached_graph=before_graph,
             )
             elapsed = _time.time() - t0
             if add_result["ok"]:
@@ -740,6 +719,7 @@ class OnlineDeltaSGEngine:
         self._placed_on_support = {}
         self._placement_support_map = {}
         self._cleanup_spawned_objects()
+        self._pre_run_state = og.sim.dump_state(serialized=False)
         before_graph = self.snapshot()
         target_room = target_room or self._choose_room_with_objects(before_graph)
         fire_target = self._choose_fire_target(before_graph, target_room)
@@ -932,12 +912,15 @@ class OnlineDeltaSGEngine:
             },
         }
 
-    def add_task_asset(self, record, object_name, target_room, semantic_role="task_object"):
+    def add_task_asset(self, record, object_name, target_room, semantic_role="task_object", cached_graph=None):
         """Add one task asset directly to the live OmniGibson scene.
 
         Applies placement attempts with per-object timeout, placement cache
         checks, and pre-validation.  If all attempts fail, the object is
         removed from the scene with cleanup.
+
+        Args:
+            cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
         category = self._choose_category(record)
         result = {
@@ -995,8 +978,8 @@ class OnlineDeltaSGEngine:
             self._clear_usd_selection()
 
             # Build candidate placement list: primary + fallbacks + floor
-            # Use a single snapshot for all placement decisions (avoids expensive re-scans)
-            placement_graph = self.snapshot()
+            # Use cached graph from generate_env_a when available to avoid expensive re-scans
+            placement_graph = cached_graph or self.snapshot()
             placement = self._choose_live_placement(record, target_room, graph=placement_graph)
             candidates = [placement]
             for alt_support in placement.get("support_candidates", [])[:self.config.max_fallback_supports]:
@@ -1094,14 +1077,13 @@ class OnlineDeltaSGEngine:
                     position=th.tensor(placement_attempt["pose"]["position"], dtype=th.float32),
                     orientation=th.tensor(placement_attempt["pose"]["orientation_xyzw"], dtype=th.float32),
                 )
-                self._clear_usd_selection()
-                self._step(1)
 
                 if is_floor:
                     # Floor placement: skip relation, just check AABB
+                    self._step(1)
                     # For last resort, use zero margin (more lenient)
                     floor_margin = 0.0 if is_last_resort else 0.02
-                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=floor_margin)
+                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=floor_margin, target_room=target_room)
                     if not overlapping:
                         placed = True
                         chosen_placement = placement_attempt
@@ -1119,8 +1101,7 @@ class OnlineDeltaSGEngine:
                 rel_start = time.time()
                 relation_result = self._apply_relation(obj, placement_attempt)
                 rel_elapsed = time.time() - rel_start
-                self._clear_usd_selection()
-                self._step(3)
+                self._step(2)  # reduced from 3+1 to 2: relation set_value already handles positioning
 
                 if rel_elapsed > self.config.per_relation_attempt_timeout_sec:
                     print(f"\n[relation-timeout] {object_name} on {support_id}: "
@@ -1142,6 +1123,7 @@ class OnlineDeltaSGEngine:
                 # Verify with AABB overlap check (cheap)
                 overlapping = self._check_aabb_overlap(
                     obj, exclude_names={support_id} if support_id else None, margin=0.05,
+                    target_room=target_room,
                 )
                 if overlapping:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: AABB overlap ({overlapping[:2]})",
@@ -1554,13 +1536,14 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None, None, None
 
-    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02):
+    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02, target_room=None):
         """Check whether obj's AABB overlaps any other scene object's AABB.
 
         Args:
             obj: The object to check.
             exclude_names: Set of object names to exclude (e.g. the support, the object itself).
             margin: Extra padding (meters) added to each AABB side before intersection test.
+            target_room: Optional room filter — only check objects in this room.
 
         Returns:
             list[str]: Names of overlapping objects. Empty means no overlap.
@@ -1577,6 +1560,11 @@ class OnlineDeltaSGEngine:
             other_name = getattr(other, "name", None)
             if other_name in exclude:
                 continue
+            # Room filter: only check objects in the same room (fast pre-filter)
+            if target_room:
+                other_rooms = self._rooms_for_obj(other)
+                if target_room not in other_rooms:
+                    continue
             other_lo, other_hi, _ = self._safe_aabb(other)
             if other_lo is None or other_hi is None:
                 continue
@@ -1588,7 +1576,7 @@ class OnlineDeltaSGEngine:
                 overlapping.append(other_name)
         return overlapping
 
-    def _has_unexpected_contacts(self, obj, support_obj=None, settle_steps=3):
+    def _has_unexpected_contacts(self, obj, support_obj=None, settle_steps=2):
         """Check via RigidContactAPI whether obj contacts anything other than its support.
 
         Returns:
@@ -1736,7 +1724,31 @@ class OnlineDeltaSGEngine:
         return self.rng.choices(available, weights=weights, k=1)[0]
 
     def _cleanup_spawned_objects(self):
-        """Remove objects spawned in previous runs to prevent scene pollution."""
+        """Restore scene to pre-run state, fully reverting all changes.
+
+        Uses env.reset() as primary method (fully resets physics + object states).
+        Falls back to load_state then name-prefix removal if reset is unavailable.
+        """
+        # Primary: full env reset (restores physics, object poses, states)
+        if hasattr(self.env, 'reset'):
+            try:
+                self.env.reset()
+                self._step(5)
+                return
+            except Exception:
+                pass
+
+        # Fallback 1: load previously saved state
+        if hasattr(self, '_pre_run_state') and self._pre_run_state is not None:
+            try:
+                og.sim.load_state(self._pre_run_state, serialized=False)
+                self._pre_run_state = None
+                self._step(3)
+                return
+            except Exception as e:
+                print(f"[cleanup] load_state failed: {e}", flush=True)
+
+        # Fallback 2: remove spawned objects by name prefix
         spawned_prefix = "online_env_a_"
         removed = 0
         for obj in list(self._scene_objects()):
@@ -1749,16 +1761,19 @@ class OnlineDeltaSGEngine:
                     pass
         if removed:
             self._clear_usd_selection()
-            self._step(3)  # let physics settle after removal
+            self._step(3)
             print(f"[cleanup] removed {removed} objects from previous runs", flush=True)
 
-    def _select_task_and_category(self, skip_tasks: set[str] | None = None) -> tuple[str | None, str | None]:
+    def _select_task_and_category(self, skip_tasks: set[str] | None = None, cached_graph: dict | None = None) -> tuple[str | None, str | None]:
         """Select a task category and a specific task name.
 
         Returns (category, task_name) or (None, None) if no valid task found.
+
+        Args:
+            cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
         skip = (skip_tasks or set()) | self._rejected_task_cache
-        graph = self.snapshot()
+        graph = cached_graph or self.snapshot()
         scene_furniture = self._build_scene_furniture_dict(graph)
 
         # Track used task names to avoid repetition (at task level, not category)
@@ -2870,7 +2885,7 @@ class OnlineDeltaSGEngine:
                 support_aabb = support_obj.aabb
                 support_mid_z = float((support_aabb[0][2] + support_aabb[1][2]) / 2.0)
                 ok = False
-                for _attempt in range(5):
+                for _attempt in range(3):  # reduced from 5 to 3 retries
                     ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
                     if not ok:
                         break
@@ -3430,26 +3445,112 @@ class OnlineDeltaSGEngine:
             # If the camera already exists or spawn fails, skip silently
             return None
 
+    # Per-room camera configs from camera_config_guide.md
+    # (corner, v_angle_deg). kitchen_0 excluded — top cabinets block all angles.
+    ROOM_CAMERA_CONFIGS = {
+        "living_room_0": ("SW", 30),
+        "bedroom_0": ("SE", 45),
+        "bathroom_0": ("NE", 45),
+    }
+
     def _compute_global_camera_pose(self, room_center):
         """Compute camera position and orientation for a room overview.
 
-        Camera is placed slightly offset from the room center (at 2.4m height),
-        looking back at the room center. This gives a perspective angle that
-        shows room contents clearly.
+        Uses corner-based placement per camera_config_guide.md:
+        3D objects → seg_map pixel bbox → world corners → camera at corner + inward offset.
+        h_offset=0, v_angle per-room. Falls back to room_center-based if seg_map unavailable.
         """
+        try:
+            seg_map = self.env.scene.seg_map
+            # Find which room this center belongs to
+            target_room = None
+            for room_id, center in (
+                (self.snapshot().get("navigation") or {}).get("room_centers", {}) or {}
+            ).items():
+                if center and abs(center[0] - room_center[0]) < 0.5 and abs(center[1] - room_center[1]) < 0.5:
+                    target_room = room_id
+                    break
+
+            if target_room and target_room in self.ROOM_CAMERA_CONFIGS:
+                corner_name, v_angle = self.ROOM_CAMERA_CONFIGS[target_room]
+                # Get room corners via 3D objects → seg_map pixel mapping
+                corners = self._get_room_corners_from_objects(target_room)
+                if corners is None:
+                    raise ValueError(f"No objects found in {target_room}")
+                opposite_map = {"SW": "NE", "SE": "NW", "NW": "SE", "NE": "SW"}
+                corner = corners[corner_name]
+                opposite = corners[opposite_map[corner_name]]
+                return self._compute_corner_camera(corner, opposite, v_angle=v_angle)
+        except Exception:
+            pass
+
+        # Fallback: room_center-based placement
         cam_pos = np.array([
             float(room_center[0]) + 0.5,
             float(room_center[1]) + 0.5,
             2.4,
         ], dtype=np.float32)
-        look_at = np.array([
-            float(room_center[0]),
-            float(room_center[1]),
-            0.8,
+        look_at = np.array([float(room_center[0]), float(room_center[1]), 0.8], dtype=np.float32)
+        return cam_pos, self._look_at_quat(cam_pos, look_at)
+
+    def _get_room_corners_from_objects(self, room_name):
+        """Get SW/NE/NW/SE world corners for a room via 3D objects → seg_map pixel mapping."""
+        seg_map = self.env.scene.seg_map
+        positions = []
+        for obj in self._scene_objects():
+            try:
+                pos, _ = obj.get_position_orientation()
+                pos = np.array(pos)
+            except Exception:
+                continue
+            rooms = self._rooms_for_obj(obj)
+            if room_name not in rooms:
+                continue
+            positions.append(pos)
+        if not positions:
+            return None
+        pixels = []
+        for pos in positions:
+            px = seg_map.world_to_map(th.tensor([pos[0], pos[1]], dtype=th.float32))
+            pixels.append(px.numpy())
+        pixels = np.stack(pixels)
+        px_min = pixels.min(axis=0).astype(int)
+        px_max = pixels.max(axis=0).astype(int)
+        map_h, map_w = seg_map.room_ins_map.shape
+        px_min = np.clip(px_min, 0, [map_w - 1, map_h - 1])
+        px_max = np.clip(px_max, 0, [map_w - 1, map_h - 1])
+        sw = seg_map.map_to_world(th.tensor([px_min[0], px_min[1]], dtype=th.float32)).cpu().numpy()
+        ne = seg_map.map_to_world(th.tensor([px_max[0], px_max[1]], dtype=th.float32)).cpu().numpy()
+        return {
+            "SW": sw,
+            "NE": ne,
+            "NW": np.array([sw[0], ne[1]]),
+            "SE": np.array([ne[0], sw[1]]),
+        }
+
+    @staticmethod
+    def _compute_corner_camera(corner, opposite, v_angle=30.0, inward=0.3, height=2.4):
+        """Camera at room corner, looking inward along diagonal. h_offset=0."""
+        diagonal = np.array([opposite[0] - corner[0], opposite[1] - corner[1]])
+        diag_len = np.sqrt(diagonal[0]**2 + diagonal[1]**2)
+        cam_pos = np.array([
+            corner[0] + (diagonal[0] / diag_len) * inward,
+            corner[1] + (diagonal[1] / diag_len) * inward,
+            height,
         ], dtype=np.float32)
-        orientation = self._look_at_quat(cam_pos, look_at)
-        return cam_pos, orientation
-        orientation = self._look_at_quat(cam_pos, look_at)
+        diag_angle = np.degrees(np.arctan2(diagonal[1], diagonal[0]))
+        yaw = np.radians(diag_angle - 90.0)  # h_offset=0
+        pitch = np.radians(90.0 - v_angle)
+        cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+        cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+        q_pitch = np.array([sp, 0, 0, cp], dtype=np.float32)
+        q_yaw = np.array([0, 0, sy, cy], dtype=np.float32)
+        orientation = np.array([
+            q_yaw[3]*q_pitch[0] + q_yaw[0]*q_pitch[3] + q_yaw[1]*q_pitch[2] - q_yaw[2]*q_pitch[1],
+            q_yaw[3]*q_pitch[1] - q_yaw[0]*q_pitch[2] + q_yaw[1]*q_pitch[3] + q_yaw[2]*q_pitch[0],
+            q_yaw[3]*q_pitch[2] + q_yaw[0]*q_pitch[1] - q_yaw[1]*q_pitch[0] + q_yaw[2]*q_pitch[3],
+            q_yaw[3]*q_pitch[3] - q_yaw[0]*q_pitch[0] - q_yaw[1]*q_pitch[1] - q_yaw[2]*q_pitch[2],
+        ], dtype=np.float32)
         return cam_pos, orientation
 
     @staticmethod

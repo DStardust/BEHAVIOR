@@ -127,8 +127,8 @@ def main():
     parser.add_argument("--num-envs", type=int, default=1, help="Number of online DeltaSG edits to apply sequentially.")
     parser.add_argument("--task-objects", type=int, default=2)
     parser.add_argument("--context-objects", type=int, default=3)
-    parser.add_argument("--warmup-steps", type=int, default=50)
-    parser.add_argument("--settle-steps", type=int, default=10)
+    parser.add_argument("--warmup-steps", type=int, default=20)
+    parser.add_argument("--settle-steps", type=int, default=5)
     parser.add_argument("--settle-threshold", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=None, help="Random seed. None = random each run.")
     parser.add_argument(
