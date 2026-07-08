@@ -237,6 +237,7 @@ class OnlineDeltaSGEngine:
             "failed_placements": [],
             "successful_samples": [],
         }
+        self._enabled_categories: set[str] | None = None  # None = all categories
         self._llm_client = create_llm_client(
             api_key=self.config.llm_api_key,
             model=self.config.llm_model,
@@ -574,7 +575,27 @@ class OnlineDeltaSGEngine:
             "task": primary_task, "aborted": abort_task, "abort_reason": abort_reason,
         })
         t0 = _time.time()
-        self._step(self.config.warmup_steps)
+        # Keep all placed objects still, then release one by one to prevent clipping
+        placed_objs = []
+        for name in created_names:
+            obj = self.env.scene.object_registry("name", name, None)
+            if obj is not None:
+                try:
+                    obj.keep_still()
+                    placed_objs.append(obj)
+                except Exception:
+                    pass
+        # First half: all objects frozen, let scene settle
+        self._step(max(self.config.warmup_steps // 2, 5))
+        # Release objects one at a time with small gaps
+        for obj in placed_objs:
+            try:
+                obj.wake()
+            except Exception:
+                pass
+            self._step(2)  # 2 steps between each release to prevent collisions
+        # Final settling
+        self._step(3)
         print(f"[placement] warmup done [{_time.time()-t0:.1f}s]. Collecting settling report...", flush=True)
         t0 = _time.time()
         validation["settling"] = self._collect_settling_report(created_names)
@@ -986,19 +1007,14 @@ class OnlineDeltaSGEngine:
                 alt_placement = self._build_placement_for_support(record, target_room, alt_support, graph=placement_graph)
                 if alt_placement:
                     candidates.append(alt_placement)
-            # Only allow floor placement for categories that reasonably go on the floor
-            if category.lower() in self.FLOOR_OKAY:
-                floor_placement = self._build_floor_placement(record, target_room, graph=placement_graph)
-                if floor_placement:
-                    candidates.append(floor_placement)
-
-            # Last resort: floor for ALL objects (even if not in FLOOR_OKAY).
-            # This is a fallback so we don't lose the object entirely.
-            if category.lower() not in self.FLOOR_OKAY:
-                floor_placement = self._build_floor_placement(record, target_room, graph=placement_graph)
-                if floor_placement:
-                    floor_placement["_last_resort"] = True
-                    candidates.append(floor_placement)
+            # Only allow floor placement for categories that reasonably go on the floor.
+            # Do not use floor as a universal last resort: plates, food, knives, cups, etc.
+            # should fail placement rather than becoming invalid task data.
+            if self._category_allows_floor(category):
+                for _ in range(3):
+                    floor_placement = self._build_floor_placement(record, target_room, graph=placement_graph)
+                    if floor_placement:
+                        candidates.append(floor_placement)
 
             placed = False
             chosen_placement = None
@@ -1018,11 +1034,8 @@ class OnlineDeltaSGEngine:
 
                 support_id = placement_attempt.get("support_object_id")
                 is_floor = support_id is None
-                is_last_resort = placement_attempt.get("_last_resort", False)
                 mode = placement_attempt.get("mode", "?")
-                if is_floor and is_last_resort:
-                    attempt_label = "floor(last_resort)"
-                elif is_floor:
+                if is_floor:
                     attempt_label = "floor"
                 else:
                     attempt_label = f"{mode}({support_id})"
@@ -1081,13 +1094,22 @@ class OnlineDeltaSGEngine:
                 if is_floor:
                     # Floor placement: skip relation, just check AABB
                     self._step(1)
-                    # For last resort, use zero margin (more lenient)
-                    floor_margin = 0.0 if is_last_resort else 0.02
-                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=floor_margin, target_room=target_room)
+                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=0.02, target_room=target_room)
                     if not overlapping:
+                        # Keep still to prevent floor impact
+                        try:
+                            obj.keep_still()
+                        except Exception:
+                            pass
+                        self._step(3)
+                        try:
+                            obj.wake()
+                        except Exception:
+                            pass
+                        self._step(2)
                         placed = True
                         chosen_placement = placement_attempt
-                        relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement" + ("_last_resort" if is_last_resort else "")}
+                        relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement"}
                         break
                     else:
                         result["errors"].append({
@@ -1120,9 +1142,22 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
+                if placement_attempt.get("mode") == "on_top" and support_obj is not None:
+                    pose_check = self._validate_on_top_pose(obj, support_obj)
+                    if not pose_check.get("ok"):
+                        print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: invalid support pose ({pose_check.get('reason')})",
+                              end="", flush=True)
+                        result["errors"].append({
+                            "error": "invalid_support_pose_after_placement",
+                            "pose_check": pose_check,
+                            "support": support_id,
+                        })
+                        self._failed_placement_cache.add((category, support_id))
+                        continue
+
                 # Verify with AABB overlap check (cheap)
                 overlapping = self._check_aabb_overlap(
-                    obj, exclude_names={support_id} if support_id else None, margin=0.05,
+                    obj, exclude_names={support_id} if support_id else None, margin=0.02,
                     target_room=target_room,
                 )
                 if overlapping:
@@ -1447,6 +1482,44 @@ class OnlineDeltaSGEngine:
         "umbrella", "walking_stick", "cane",
     }
 
+    @classmethod
+    def _category_allows_floor(cls, category: str) -> bool:
+        """Return whether a spawned object category is reasonable on the floor."""
+        cat = (category or "").lower().replace("__", "_")
+        if cat in cls.FLOOR_OKAY:
+            return True
+        tokens = set(re.split(r"[_\W]+", cat))
+        floor_tokens = {
+            "bag", "basket", "bin", "box", "bucket", "carpet", "crate", "hamper",
+            "mat", "mop", "pillow", "plant", "rug", "shoe", "suitcase", "trash",
+            "umbrella", "vacuum",
+        }
+        return bool(tokens & floor_tokens)
+
+    @classmethod
+    def _has_explicit_support_affinity(cls, obj_category: str) -> bool:
+        return any(
+            cls._category_matches_affinity_key(obj_category, key)
+            for key in cls.OBJECT_SUPPORT_AFFINITY
+        )
+
+    @staticmethod
+    def _category_matches_affinity_key(obj_category: str, key: str) -> bool:
+        obj_lower = (obj_category or "").lower().replace("__", "_")
+        key_lower = (key or "").lower().replace("__", "_")
+        if not obj_lower or not key_lower:
+            return False
+        if obj_lower == key_lower:
+            return True
+        obj_tokens = set(re.split(r"[_\W]+", obj_lower))
+        key_tokens = set(re.split(r"[_\W]+", key_lower))
+        return key_lower in obj_tokens or obj_lower in key_tokens
+
+    @staticmethod
+    def _record_category_for_affinity(record) -> str:
+        categories = record.get("direct_categories") or []
+        return categories[0] if categories else record.get("synset", "").split(".")[0].replace("__", "_")
+
     def _get_scene_categories(self):
         """Return the set of all object categories currently in the scene (cached)."""
         if self._scene_categories_cache is None:
@@ -1560,6 +1633,10 @@ class OnlineDeltaSGEngine:
             other_name = getattr(other, "name", None)
             if other_name in exclude:
                 continue
+            other_category = getattr(other, "category", "") or ""
+            other_tokens = self._tokens(other_category)
+            if other_tokens & {"floor", "floors"}:
+                continue
             # Room filter: only check objects in the same room (fast pre-filter)
             if target_room:
                 other_rooms = self._rooms_for_obj(other)
@@ -1570,9 +1647,9 @@ class OnlineDeltaSGEngine:
                 continue
             other_lo = np.asarray(other_lo, dtype=np.float32)
             other_hi = np.asarray(other_hi, dtype=np.float32)
-            if (obj_lo[0] <= other_hi[0] and obj_hi[0] >= other_lo[0] and
-                    obj_lo[1] <= other_hi[1] and obj_hi[1] >= other_lo[1] and
-                    obj_lo[2] <= other_hi[2] and obj_hi[2] >= other_lo[2]):
+            if (obj_lo[0] < other_hi[0] and obj_hi[0] > other_lo[0] and
+                    obj_lo[1] < other_hi[1] and obj_hi[1] > other_lo[1] and
+                    obj_lo[2] < other_hi[2] and obj_hi[2] > other_lo[2]):
                 overlapping.append(other_name)
         return overlapping
 
@@ -1715,7 +1792,7 @@ class OnlineDeltaSGEngine:
     def _pick_task_from_category(self, category: str, skip_tasks: set[str] | None = None, used_task_names: set[str] | None = None) -> str | None:
         """Pick a random un-skipped task from a category, preferring unused ones."""
         skip = skip_tasks or set()
-        available = [t for t in VALID_TASKS.get(category, set()) if t not in skip]
+        available = [t for t in self._get_active_categories().get(category, set()) if t not in skip]
         if not available:
             return None
         # Prefer tasks not used yet (2x weight), but don't exclude used ones
@@ -1764,6 +1841,16 @@ class OnlineDeltaSGEngine:
             self._step(3)
             print(f"[cleanup] removed {removed} objects from previous runs", flush=True)
 
+    def set_enabled_categories(self, categories: set[str]):
+        """Filter task categories to only include the given set."""
+        self._enabled_categories = categories & set(VALID_TASKS.keys())
+
+    def _get_active_categories(self) -> dict[str, set[str]]:
+        """Return the currently active task categories dict."""
+        if self._enabled_categories is None:
+            return VALID_TASKS
+        return {k: v for k, v in VALID_TASKS.items() if k in self._enabled_categories}
+
     def _select_task_and_category(self, skip_tasks: set[str] | None = None, cached_graph: dict | None = None) -> tuple[str | None, str | None]:
         """Select a task category and a specific task name.
 
@@ -1775,6 +1862,7 @@ class OnlineDeltaSGEngine:
         skip = (skip_tasks or set()) | self._rejected_task_cache
         graph = cached_graph or self.snapshot()
         scene_furniture = self._build_scene_furniture_dict(graph)
+        active_tasks = self._get_active_categories()
 
         # Track used task names to avoid repetition (at task level, not category)
         used_task_names = {s.get("task", "") for s in self._checkpoint.get("successful_samples", [])}
@@ -1788,7 +1876,7 @@ class OnlineDeltaSGEngine:
                 scene_furniture=scene_furniture,
                 used_categories=used_categories,
             )
-            if result and result.get("selected_category") in VALID_TASKS:
+            if result and result.get("selected_category") in active_tasks:
                 category = result["selected_category"]
                 reason = result.get("reason", "")
                 print(f"[llm] task category: {category} — {reason}")
@@ -1796,7 +1884,7 @@ class OnlineDeltaSGEngine:
         # Fallback: weighted random, slightly preferring unused categories
         if not category:
             available_cats = [
-                c for c, tasks in VALID_TASKS.items()
+                c for c, tasks in active_tasks.items()
                 if any(t not in skip for t in tasks)
             ]
             if not available_cats:
@@ -1809,7 +1897,7 @@ class OnlineDeltaSGEngine:
         task_name = self._pick_task_from_category(category, skip, used_task_names)
         if not task_name:
             # Try other categories
-            for alt_cat in sorted(VALID_TASKS):
+            for alt_cat in sorted(active_tasks):
                 if alt_cat == category:
                     continue
                 task_name = self._pick_task_from_category(alt_cat, skip, used_task_names)
@@ -2710,28 +2798,35 @@ class OnlineDeltaSGEngine:
         """Return a compatibility score (0.0–1.0) for placing obj on support."""
         obj_lower = obj_category.lower().replace("__", "_")
         support_lower = support_category.lower().replace("__", "_")
+        food_keywords = {"food", "fruit", "vegetable", "meat", "fish", "egg", "cheese", "bread", "chicken", "beef", "pork", "bacon", "sausage", "lettuce", "tomato", "onion", "carrot", "strawberry", "blueberry", "peach", "apple", "banana", "orange", "lemon", "milk", "butter", "yogurt", "cream", "flour", "sugar", "salt", "pepper", "oil", "sauce", "coffee", "tea", "water", "juice", "wine", "beer", "soda", "chocolate", "candy", "snack", "cereal", "pasta", "rice", "noodle", "soup"}
+
+        def generic_food_score() -> float:
+            if support_lower in {"countertop", "counter", "table", "dining_table", "plate", "bowl", "pot", "pan", "cutting_board", "refrigerator", "fridge", "freezer", "electric_refrigerator"}:
+                return 0.7
+            if support_lower in {"cabinet", "bottom_cabinet", "shelf"}:
+                return 0.45
+            if support_lower in {"sink", "furniture_sink", "stove", "oven"}:
+                return 0.25
+            return 0.1
 
         # Direct match from affinity table
         for key, preferred in cls.OBJECT_SUPPORT_AFFINITY.items():
-            if key in obj_lower or obj_lower in key:
+            if cls._category_matches_affinity_key(obj_lower, key):
                 if support_lower in preferred:
                     return 0.8
                 # Check partial matches
                 for pref in preferred:
                     if pref in support_lower or support_lower in pref:
                         return 0.6
+                if any(kw in obj_lower for kw in food_keywords):
+                    return generic_food_score()
                 return 0.1  # this object type, but wrong support
 
         # General heuristics
         # Food items prefer kitchen surfaces
-        food_keywords = {"food", "fruit", "vegetable", "meat", "fish", "egg", "cheese", "bread", "chicken", "beef", "pork", "bacon", "sausage", "lettuce", "tomato", "onion", "carrot", "strawberry", "blueberry", "peach", "apple", "banana", "orange", "lemon", "milk", "butter", "yogurt", "cream", "flour", "sugar", "salt", "pepper", "oil", "sauce", "coffee", "tea", "water", "juice", "wine", "beer", "soda", "chocolate", "candy", "snack", "cereal", "pasta", "rice", "noodle", "soup"}
         is_food = any(kw in obj_lower for kw in food_keywords)
         if is_food:
-            if support_lower in {"countertop", "counter", "table", "dining_table", "plate", "bowl", "pot", "pan", "cutting_board", "refrigerator", "fridge", "freezer", "electric_refrigerator"}:
-                return 0.7
-            if support_lower in {"shelf", "cabinet", "sink", "stove", "oven"}:
-                return 0.4
-            return 0.1
+            return generic_food_score()
 
         # Default: prefer horizontal surfaces
         if support_lower in {"countertop", "counter", "table", "dining_table", "desk", "coffee_table", "breakfast_table", "nightstand", "dresser", "shelf", "bookcase", "cabinet", "stove", "oven", "dishwasher", "washer", "dryer"}:
@@ -2775,6 +2870,15 @@ class OnlineDeltaSGEngine:
             if fill_ratio > 0.8:
                 continue  # support is too full
 
+            obj_cat = self._record_category_for_affinity(record)
+            support_cat = node.get("category", "")
+            affinity = self._object_support_affinity_score(obj_cat, support_cat)
+            support_tokens = self._tokens(support_cat)
+            if "floor" in support_tokens and not self._category_allows_floor(obj_cat):
+                continue
+            if self._has_explicit_support_affinity(obj_cat) and affinity <= 0.15:
+                continue
+
             score = 0
             if wants_inside and receptacle.get("supports_inside"):
                 score += 4
@@ -2785,11 +2889,14 @@ class OnlineDeltaSGEngine:
             score += self._support_preference_score(node, target_room)
 
             # Object-support affinity score: prefer semantically compatible supports
-            obj_cat = (record.get("direct_categories") or [""])[0]
-            affinity = self._object_support_affinity_score(obj_cat, node.get("category", ""))
-            score += affinity * 10  # scale to be comparable with other scores
+            score += affinity * 10
 
-            # Area-based crowding penalty (stronger as support fills up)
+            # Surface area bonus: prefer larger tables/counters (not floor)
+            is_floor = node.get("category", "").lower() in {"floors", "floor"}
+            if not is_floor:
+                score += min(support_area * 3, 15)
+
+            # Area-based crowding penalty
             score -= fill_ratio * 15
 
             candidates.append((score, node))
@@ -2879,26 +2986,114 @@ class OnlineDeltaSGEngine:
                 "reason": "state_not_available",
             }
         try:
-            # For OnTop, ensure the object lands on the TOP half of the support,
-            # not on a lower shelf or the floor below the support.
             if state_cls is object_states.OnTop:
                 support_aabb = support_obj.aabb
-                support_mid_z = float((support_aabb[0][2] + support_aabb[1][2]) / 2.0)
-                ok = False
-                for _attempt in range(3):  # reduced from 5 to 3 retries
-                    ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
-                    if not ok:
+                sup_x_min = float(support_aabb[0][0])
+                sup_x_max = float(support_aabb[1][0])
+                sup_y_min = float(support_aabb[0][1])
+                sup_y_max = float(support_aabb[1][1])
+                sup_z_top = float(support_aabb[1][2])
+
+                obj_aabb = obj.aabb
+                obj_w = max(float(obj_aabb[1][0] - obj_aabb[0][0]), 0.06)
+                obj_d = max(float(obj_aabb[1][1] - obj_aabb[0][1]), 0.06)
+                margin = 0.03
+
+                # Collect obstacles: objects ON the support + objects NEAR the support
+                obstacles = []
+                for other in self._scene_objects():
+                    other_name = getattr(other, "name", "")
+                    if other is obj or other_name == support_id:
+                        continue
+                    other_aabb = other.aabb
+                    ox_min = float(other_aabb[0][0]); ox_max = float(other_aabb[1][0])
+                    oy_min = float(other_aabb[0][1]); oy_max = float(other_aabb[1][1])
+                    oz_min = float(other_aabb[0][2]); oz_max = float(other_aabb[1][2])
+                    # Include if: on the support, OR AABB overlaps support XY and near support height
+                    is_obstacle = False
+                    try:
+                        if other.states[state_cls].get_value(support_obj):
+                            is_obstacle = True
+                    except Exception:
+                        pass
+                    if not is_obstacle:
+                        # Check if object is near the support (within 0.5m above or 0.2m below)
+                        if (ox_min < sup_x_max and ox_max > sup_x_min and
+                            oy_min < sup_y_max and oy_max > sup_y_min and
+                            oz_min < sup_z_top + 0.5 and oz_max > sup_z_top - 0.2):
+                            is_obstacle = True
+                    if is_obstacle:
+                        obstacles.append({
+                            "x_min": ox_min, "x_max": ox_max,
+                            "y_min": oy_min, "y_max": oy_max,
+                        })
+
+                # Grid-scan for a clear spot
+                sw = sup_x_min + margin + obj_w/2
+                ew = sup_x_max - margin - obj_w/2
+                sd = sup_y_min + margin + obj_d/2
+                ed = sup_y_max - margin - obj_d/2
+                if ew <= sw or ed <= sd:
+                    return {
+                        "ok": False,
+                        "mode": placement.get("mode"),
+                        "support": support_id,
+                        "state": state_cls.__name__,
+                        "reason": "support_surface_too_small",
+                        "object_footprint": [obj_w, obj_d],
+                        "support_bounds": [sup_x_max - sup_x_min, sup_y_max - sup_y_min],
+                    }
+                w_range = ew - sw
+                d_range = ed - sd
+
+                n_steps = 10
+                best_cx, best_cy = None, None
+                for ix in range(n_steps):
+                    for iy in range(n_steps):
+                        cx = sw + w_range * (ix + 0.5) / n_steps
+                        cy = sd + d_range * (iy + 0.5) / n_steps
+                        ok_spot = True
+                        for obs in obstacles:
+                            if (cx - obj_w/2 - margin < obs["x_max"] and
+                                cx + obj_w/2 + margin > obs["x_min"] and
+                                cy - obj_d/2 - margin < obs["y_max"] and
+                                cy + obj_d/2 + margin > obs["y_min"]):
+                                ok_spot = False
+                                break
+                        if ok_spot:
+                            best_cx, best_cy = cx, cy
+                            break
+                    if best_cx is not None:
                         break
-                    pos, _ = obj.get_position_orientation()
-                    if float(pos[2]) >= support_mid_z:
-                        break  # Object is on the top half of the support, good
-                    # Object ended up too low — reset and retry
-                    obj.reset()
-                if ok:
-                    pos, _ = obj.get_position_orientation()
-                    if float(pos[2]) < support_mid_z:
-                        ok = False  # All retries failed, object is still too low
+
+                if best_cx is None:
+                    return {
+                        "ok": False,
+                        "mode": placement.get("mode"),
+                        "support": support_id,
+                        "state": state_cls.__name__,
+                        "reason": "support_surface_occupied",
+                        "num_obstacles": len(obstacles),
+                    }
+
+                drop_z = sup_z_top + 0.02
+                obj.set_position_orientation(
+                    position=th.tensor([best_cx, best_cy, drop_z], dtype=th.float32),
+                    orientation=th.tensor([0.0, 0.0, 0.0, 1.0], dtype=th.float32),
+                )
+                try:
+                    obj.keep_still()
+                except Exception:
+                    pass
+                self._step(5)
+                try:
+                    obj.wake()
+                except Exception:
+                    pass
+                self._step(3)
+                ok = bool(obj.states[state_cls].get_value(support_obj))
             else:
+                # Inside: use set_value with sampling (only option for inside placement)
                 ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
             return {
                 "ok": ok,
@@ -2914,6 +3109,55 @@ class OnlineDeltaSGEngine:
                 "state": state_cls.__name__,
                 "error": repr(exc),
             }
+
+    def _validate_on_top_pose(self, obj, support_obj):
+        """Validate that an OnTop sample is physically on the support surface."""
+        try:
+            obj_aabb = obj.aabb
+            sup_aabb = support_obj.aabb
+            ox_min, oy_min, oz_min = [float(v) for v in obj_aabb[0][:3]]
+            ox_max, oy_max, oz_max = [float(v) for v in obj_aabb[1][:3]]
+            sx_min, sy_min, _ = [float(v) for v in sup_aabb[0][:3]]
+            sx_max, sy_max, sz_top = [float(v) for v in sup_aabb[1][:3]]
+
+            obj_w = ox_max - ox_min
+            obj_d = oy_max - oy_min
+            sup_w = sx_max - sx_min
+            sup_d = sy_max - sy_min
+            clearance = 0.015
+
+            if obj_w + 2 * clearance > sup_w or obj_d + 2 * clearance > sup_d:
+                return {
+                    "ok": False,
+                    "reason": "object_larger_than_support_surface",
+                    "object_footprint": [obj_w, obj_d],
+                    "support_bounds": [sup_w, sup_d],
+                }
+            if (
+                ox_min < sx_min - clearance
+                or ox_max > sx_max + clearance
+                or oy_min < sy_min - clearance
+                or oy_max > sy_max + clearance
+            ):
+                return {
+                    "ok": False,
+                    "reason": "object_footprint_outside_support",
+                    "object_bounds": [ox_min, oy_min, ox_max, oy_max],
+                    "support_bounds": [sx_min, sy_min, sx_max, sy_max],
+                }
+
+            z_gap = oz_min - sz_top
+            max_gap = max(0.18, min(0.35, (oz_max - oz_min) * 0.75))
+            if z_gap < -0.04 or z_gap > max_gap:
+                return {
+                    "ok": False,
+                    "reason": "object_not_on_support_height",
+                    "z_gap": z_gap,
+                    "allowed": [-0.04, max_gap],
+                }
+            return {"ok": True, "z_gap": z_gap}
+        except Exception as exc:
+            return {"ok": False, "reason": "support_pose_check_failed", "error": repr(exc)}
 
     def _collect_settling_report(self, object_names):
         before = {name: self._object_position(name) for name in object_names}
@@ -3241,12 +3485,13 @@ class OnlineDeltaSGEngine:
         settled_by_name = {item.get("object_name"): item for item in settling}
         added = []
         for item in created_objects:
+            object_name = item.get("object_name") or item.get("name") or item.get("object_id")
             pose = item.get("final_pose_before_warmup") or {}
-            settled = settled_by_name.get(item.get("object_name"), {})
+            settled = settled_by_name.get(object_name, {})
             added.append(
                 {
-                    "object_id": item.get("object_name"),
-                    "object_name": item.get("object_name"),
+                    "object_id": object_name,
+                    "object_name": object_name,
                     "category": item.get("category"),
                     "synset": item.get("synset"),
                     "model": item.get("model"),
@@ -3259,6 +3504,7 @@ class OnlineDeltaSGEngine:
                         "pose": (item.get("placement") or {}).get("pose"),
                         "pose_source": (item.get("placement") or {}).get("pose_source"),
                     },
+                    "final_pose_before_warmup": pose,
                     "pose": {
                         "position": settled.get("end_position") or pose.get("position"),
                         "orientation_xyzw": pose.get("orientation_xyzw"),
@@ -3365,7 +3611,7 @@ class OnlineDeltaSGEngine:
             center = room_centers.get(room_id)
             if not center:
                 continue
-            cam_pos, orientation = self._compute_global_camera_pose(center)
+            cam_pos, orientation = self._compute_global_camera_pose(room_id, center)
             camera_id = f"global_{room_id}"
             cameras.append(
                 {
@@ -3445,42 +3691,37 @@ class OnlineDeltaSGEngine:
             # If the camera already exists or spawn fails, skip silently
             return None
 
-    # Per-room camera configs from camera_config_guide.md
-    # (corner, v_angle_deg). kitchen_0 excluded — top cabinets block all angles.
+    # Per-room camera configs from camera_config_guide.md.
+    # Rooms not listed use the official size rule: wall-center for small rooms,
+    # corner camera for large rooms.
     ROOM_CAMERA_CONFIGS = {
         "living_room_0": ("SW", 30),
         "bedroom_0": ("SE", 45),
         "bathroom_0": ("NE", 45),
     }
 
-    def _compute_global_camera_pose(self, room_center):
+    def _compute_global_camera_pose(self, room_id, room_center):
         """Compute camera position and orientation for a room overview.
 
         Uses corner-based placement per camera_config_guide.md:
-        3D objects → seg_map pixel bbox → world corners → camera at corner + inward offset.
-        h_offset=0, v_angle per-room. Falls back to room_center-based if seg_map unavailable.
+        3D objects → seg_map pixel bbox → world corners.
+        Large rooms use corner placement; small rooms use wall-center placement.
+        h_offset=0. Falls back to room_center-based only if seg_map/corners fail.
         """
         try:
-            seg_map = self.env.scene.seg_map
-            # Find which room this center belongs to
-            target_room = None
-            for room_id, center in (
-                (self.snapshot().get("navigation") or {}).get("room_centers", {}) or {}
-            ).items():
-                if center and abs(center[0] - room_center[0]) < 0.5 and abs(center[1] - room_center[1]) < 0.5:
-                    target_room = room_id
-                    break
-
-            if target_room and target_room in self.ROOM_CAMERA_CONFIGS:
-                corner_name, v_angle = self.ROOM_CAMERA_CONFIGS[target_room]
-                # Get room corners via 3D objects → seg_map pixel mapping
-                corners = self._get_room_corners_from_objects(target_room)
-                if corners is None:
-                    raise ValueError(f"No objects found in {target_room}")
+            corners = self._get_room_corners_from_objects(room_id)
+            if corners is None:
+                raise ValueError(f"No objects found in {room_id}")
+            diag = float(np.linalg.norm(corners["NE"][:2] - corners["SW"][:2]))
+            if diag <= 3.0:
+                return self._compute_wall_center_camera(corners)
+            if room_id in self.ROOM_CAMERA_CONFIGS:
+                corner_name, v_angle = self.ROOM_CAMERA_CONFIGS[room_id]
                 opposite_map = {"SW": "NE", "SE": "NW", "NW": "SE", "NE": "SW"}
                 corner = corners[corner_name]
                 opposite = corners[opposite_map[corner_name]]
                 return self._compute_corner_camera(corner, opposite, v_angle=v_angle)
+            return self._compute_corner_camera(corners["SW"], corners["NE"], v_angle=30)
         except Exception:
             pass
 
@@ -3540,6 +3781,43 @@ class OnlineDeltaSGEngine:
         ], dtype=np.float32)
         diag_angle = np.degrees(np.arctan2(diagonal[1], diagonal[0]))
         yaw = np.radians(diag_angle - 90.0)  # h_offset=0
+        pitch = np.radians(90.0 - v_angle)
+        cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+        cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+        q_pitch = np.array([sp, 0, 0, cp], dtype=np.float32)
+        q_yaw = np.array([0, 0, sy, cy], dtype=np.float32)
+        orientation = np.array([
+            q_yaw[3]*q_pitch[0] + q_yaw[0]*q_pitch[3] + q_yaw[1]*q_pitch[2] - q_yaw[2]*q_pitch[1],
+            q_yaw[3]*q_pitch[1] - q_yaw[0]*q_pitch[2] + q_yaw[1]*q_pitch[3] + q_yaw[2]*q_pitch[0],
+            q_yaw[3]*q_pitch[2] + q_yaw[0]*q_pitch[1] - q_yaw[1]*q_pitch[0] + q_yaw[2]*q_pitch[3],
+            q_yaw[3]*q_pitch[3] - q_yaw[0]*q_pitch[0] - q_yaw[1]*q_pitch[1] - q_yaw[2]*q_pitch[2],
+        ], dtype=np.float32)
+        return cam_pos, orientation
+
+    @staticmethod
+    def _compute_wall_center_camera(corners, v_angle=45.0, inward=0.2, height=2.2):
+        """Camera at the center of the shortest wall, looking inward. h_offset=0."""
+        walls = [
+            (corners["SW"], corners["SE"]),
+            (corners["SE"], corners["NE"]),
+            (corners["NE"], corners["NW"]),
+            (corners["NW"], corners["SW"]),
+        ]
+        c1, c2 = min(walls, key=lambda wall: np.linalg.norm(wall[1][:2] - wall[0][:2]))
+        wall_center = np.array([(c1[0] + c2[0]) * 0.5, (c1[1] + c2[1]) * 0.5], dtype=np.float32)
+        wall_dir = np.array([c2[0] - c1[0], c2[1] - c1[1]], dtype=np.float32)
+        wall_len = float(np.linalg.norm(wall_dir))
+        if wall_len < 1e-6:
+            raise ValueError("invalid wall length")
+        wall_dir = wall_dir / wall_len
+        normal = np.array([-wall_dir[1], wall_dir[0]], dtype=np.float32)
+        cam_pos = np.array([
+            wall_center[0] + normal[0] * inward,
+            wall_center[1] + normal[1] * inward,
+            height,
+        ], dtype=np.float32)
+        normal_angle = np.degrees(np.arctan2(normal[1], normal[0]))
+        yaw = np.radians(normal_angle - 90.0)
         pitch = np.radians(90.0 - v_angle)
         cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
         cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
@@ -3747,6 +4025,9 @@ class OnlineDeltaSGEngine:
         if max(x, y) < 0.18:
             return False
         if float(pos[2]) > 1.8:
+            return False
+        bbox_max = bbox.get("max")
+        if bbox_max and len(bbox_max) >= 3 and float(bbox_max[2]) > 1.45:
             return False
         room_type = str(target_room).rsplit("_", 1)[0]
         preferred = GOOD_SUPPORT_TOKENS.get(room_type, set())

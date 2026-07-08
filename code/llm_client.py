@@ -879,5 +879,7 @@ def create_llm_client(
 
     Returns None if the client cannot be initialised.
     """
+    if model and str(model).strip().lower() in {"none", "off", "disabled", "false", "0"}:
+        return None
     client = LLMClient(api_key=api_key, model=model, base_url=base_url)
     return client if client.available else None
