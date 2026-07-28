@@ -135,7 +135,7 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
 2. 在初始场景的基础上添加机器人 / 摄像头，并从机器人本身视角和摄像头视角读取画面，画面包括RGB 图、深度图以及**语义分割掩码.**
 3. 读取地板/墙壁/天花板/家具的具体信息，包括坐标、物品类型、物体尺寸、房间信息以及物理信息.
 
-[demo by jd](https://www.notion.so/demo-by-jd-34ba0c89137b803b9e1ec8684eab9e4b?pvs=21)
+[demo by jd](https://app.notion.com/p/demo-by-jd-34ba0c89137b803b9e1ec8684eab9e4b?pvs=21)
 
 ---
 
@@ -150,7 +150,7 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
         
         - none /  manipulable(可搬运操作) / articulable(可改变结构 eg. 有铰链) / controllable (可控制 eg. 开关、切换模式) 
         
-        [Pseudo Code](https://www.notion.so/Pseudo-Code-34ba0c89137b8082b28aeacd1bf28ea7?pvs=21)
+        [Pseudo Code](https://app.notion.com/p/Pseudo-Code-34ba0c89137b8082b28aeacd1bf28ea7?pvs=21)
         
     4. 异常状态：对于杯子、毛巾、衣服，其可能具备污损、破碎的状态，且在仿真环境内有相对应的资源，即本身是有异常状态的。与之相对，对于具备异常状态，但仿真环境内没有相应资源，或是本身没有可转化的异常状态，则具备无异常状态性。如果技术上可行，则应当具体的分为其可能的异常形态(eg. 破损/燃烧/污损)， 同时对于有异常状态的物品，则需要标注其现在是否处于异常状态，以一个杯子为例:
     `{object: cup, abnormal_states: [broken, dirty, …], current_abnormal_states: None}` 
@@ -161,7 +161,7 @@ eg.  [机器人视角包含任务空间/干扰项][第三视角包含干扰项/�
     
     **特别地，对于异常状态建模（如火灾），OmniGibson 中的 `OnFire` object state 已提供标准化实现(见`BEHAVIOR-1K/OmniGibson/omnigibson/object_states/on_fire.py`)，可用于触发视觉与语义层面的状态变化，但如何应用需要进一步调研**
     
-    [WebRTC配置](https://www.notion.so/WebRTC-34fa0c89137b800196bfea575275cd4f?pvs=21)
+    [WebRTC配置](https://app.notion.com/p/WebRTC-34fa0c89137b800196bfea575275cd4f?pvs=21)
     
 3. **DeltaSG 逆向实例化**
 
@@ -193,7 +193,7 @@ Env-C: 认知语义环境，考察”应当如何决策”
 
 任务信息需要保存: 任务类型 / 所有待操作的物品(Unique-id) / 自然语言格式的操作命令 / 目标物品是否直接可见 / 求解所需的
 
-[专题：不同类型问题实现路径](https://www.notion.so/364a0c89137b805890b5e2043051a7ad?pvs=21)
+[专题：不同类型问题实现路径](https://app.notion.com/p/364a0c89137b805890b5e2043051a7ad?pvs=21)
 
 ![image.png](attachment:f19de78a-6cbe-4588-892b-b9b0f3f9b725:image.png)
 
@@ -326,7 +326,7 @@ related_objects = {{
 
 特别地，元数据的核心是能够方便地得到答案，在专家求解器获取答案过程中有重要意义. 对于上面的例子，如果机器人在卧室，杯子在客厅，壶在厨房，则在生成问题的同时最好生成拓扑路径(当然，留到专家求解器部分也行)
 
-生成的实例的保存参考[**实例化的保存:**](https://www.notion.so/360a0c89137b8023b338df0b161e582c?pvs=21) 
+生成的实例的保存参考[**实例化的保存:**](https://app.notion.com/p/360a0c89137b8023b338df0b161e582c?pvs=21) 
 
 #### Env-B：事件任务环境
 

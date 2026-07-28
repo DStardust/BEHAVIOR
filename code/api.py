@@ -1,5 +1,7 @@
 import os
 import json
+import math
+import random
 import traceback
 
 import numpy as np
@@ -265,8 +267,8 @@ def build_base_cfg(scene_model: str):
     }
 
 
-def build_robot_cfg(robot_model: str):
-    return {
+def build_robot_cfg(robot_model: str, obs_modalities=None):
+    cfg = {
         "model": robot_model,
         "position": [0.0, 0.0, 0.0],
         "orientation": [0.0, 0.0, 0.0, 1.0],
@@ -280,13 +282,153 @@ def build_robot_cfg(robot_model: str):
             }
         },
     }
+    if obs_modalities is not None:
+        cfg["obs_modalities"] = list(obs_modalities)
+    return cfg
 
 
-def create_env(scene_model: str = "Rs_int", robot_model: str | None = "fetch"):
+def create_env(
+    scene_model: str = "Rs_int",
+    robot_model: str | None = "fetch",
+    robot_obs_modalities=None,
+):
     cfg = build_base_cfg(scene_model)
     if robot_model is not None:
-        cfg["robots"] = [build_robot_cfg(robot_model)]
+        cfg["robots"] = [build_robot_cfg(robot_model, obs_modalities=robot_obs_modalities)]
     return og.Environment(configs=cfg)
+
+
+def stabilize_robot_spawn(env, seed, max_attempts=16, warmup_steps=30, native_displacement_limit=0.05):
+    """Place the robot on the official traversability map and persist that reset pose."""
+    if not getattr(env, "robots", None):
+        for _ in range(warmup_steps):
+            og.sim.step()
+        return None
+
+    robot = env.robots[0]
+    rng = random.Random(seed)
+    pinned_native_names = set()
+    jointed_native_names = set()
+    furniture_tokens = {
+        "armchair", "bed", "bookcase", "cabinet", "chair", "counter", "countertop",
+        "desk", "dresser", "island", "lamp", "ottoman", "shelf", "sofa", "table",
+        "wardrobe",
+    }
+    # Environment.reset() restores the scene RNG in some OG scenes. Sampling
+    # after every reset therefore returns the same bad traversability point and
+    # makes retries ineffective. Build a genuinely diverse candidate list first.
+    spawn_candidates = []
+    for _ in range(max_attempts):
+        floor = rng.randrange(int(env.scene.n_floors))
+        _, position = env.scene.get_random_point(floor=floor, robot=robot)
+        yaw = rng.uniform(-math.pi, math.pi)
+        spawn_candidates.append((position.clone(), yaw))
+    scene_objects = {getattr(obj, "name", ""): obj for obj in get_all_scene_objects(env.scene)}
+    native_baseline = {}
+    for name, obj in scene_objects.items():
+        if obj is robot or name.startswith("online_env_"):
+            continue
+        try:
+            position, orientation = obj.get_position_orientation()
+            native_baseline[name] = (position.clone(), orientation.clone())
+        except Exception:
+            continue
+    for attempt in range(1, max_attempts + 1):
+        # Fetch is a holonomic-base robot. Setting its pose while physics is
+        # running teleports six base joints and can invalidate PhysX broadphase.
+        # Pose it while stopped, then rebuild the simulation view via play().
+        if og.sim.is_playing():
+            og.sim.stop()
+        # Raw env.reset() destabilizes native rigid bodies in several scenes.
+        # Restore their original poses directly between spawn candidates.
+        if attempt > 1:
+            for name, (position, orientation) in native_baseline.items():
+                obj = scene_objects.get(name)
+                if obj is None:
+                    continue
+                obj.set_position_orientation(position=position, orientation=orientation)
+                try:
+                    obj.keep_still()
+                except Exception:
+                    pass
+        for name in pinned_native_names:
+            if name in jointed_native_names:
+                continue
+            obj = scene_objects.get(name)
+            if obj is None:
+                continue
+            try:
+                from omnigibson.utils.usd_utils import create_joint
+
+                create_joint(
+                    prim_path=f"{obj.prim_path}/deltasg_root_joint",
+                    joint_type="FixedJoint",
+                    body1=obj.root_link.prim_path,
+                )
+                jointed_native_names.add(name)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to pin unstable native furniture {name}: {exc}") from exc
+        position, yaw = spawn_candidates[attempt - 1]
+        orientation = [0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)]
+        robot.set_position_orientation(position=position, orientation=orientation, frame="scene")
+        og.sim.play()
+        robot.keep_still()
+        start, _ = robot.get_position_orientation()
+        native_start = {name: pose[0] for name, pose in native_baseline.items()}
+        for _ in range(warmup_steps):
+            og.sim.step()
+        end, end_quat = robot.get_position_orientation()
+        displacement = float(((end - start) ** 2).sum() ** 0.5)
+        tilt = float((end_quat[0] ** 2 + end_quat[1] ** 2) ** 0.5)
+        moved_native = []
+        moved_objects = {}
+        for obj in get_all_scene_objects(env.scene):
+            name = getattr(obj, "name", "")
+            if name not in native_start:
+                continue
+            try:
+                current = obj.get_position_orientation()[0]
+                moved = float(((current - native_start[name]) ** 2).sum() ** 0.5)
+            except Exception:
+                continue
+            if moved > native_displacement_limit:
+                moved_native.append((name, moved))
+                moved_objects[name] = obj
+        native_max = max((moved for _, moved in moved_native), default=0.0)
+        if displacement <= 0.10 and tilt <= 0.15 and not moved_native:
+            print(
+                f"[robot-spawn] stable traversable pose attempt={attempt} "
+                f"displacement={displacement:.3f} tilt={tilt:.3f} native_max={native_max:.3f}",
+                flush=True,
+            )
+            return {
+                "attempt": attempt,
+                "displacement": displacement,
+                "tilt": tilt,
+                "native_max_displacement": native_max,
+                "pinned_native_objects": sorted(pinned_native_names),
+            }
+        newly_pinned = []
+        for name, _ in moved_native:
+            obj = moved_objects.get(name)
+            category = str(getattr(obj, "category", "") or "").lower()
+            is_furniture = any(token in category for token in furniture_tokens)
+            if is_furniture and name not in pinned_native_names:
+                pinned_native_names.add(name)
+                newly_pinned.append(name)
+        moved_preview = ",".join(f"{name}:{moved:.3f}" for name, moved in moved_native[:3]) or "none"
+        print(
+            f"[robot-spawn] rejected pose attempt={attempt} "
+            f"displacement={displacement:.3f} tilt={tilt:.3f} "
+            f"native_max={native_max:.3f} moved={moved_preview}",
+            flush=True,
+        )
+        if newly_pinned:
+            print(
+                f"[robot-spawn] pinning unstable native furniture at original pose: {sorted(newly_pinned)}",
+                flush=True,
+            )
+    raise RuntimeError(f"Could not find a stable robot spawn after {max_attempts} attempts")
 
 
 # =========================

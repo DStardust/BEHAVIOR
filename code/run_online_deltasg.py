@@ -10,6 +10,7 @@ conda run -n behavior python code/run_online_deltasg.py --scene Rs_int --robot f
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -30,8 +31,143 @@ gm.GUI_VIEWPORT_ONLY = True
 import omnigibson as og
 import omnigibson.lazy as lazy
 
-from api import create_env, ensure_dir
+from api import create_env, ensure_dir, stabilize_robot_spawn
 from online_deltasg import OnlineDeltaSGConfig, OnlineDeltaSGEngine
+
+
+def _round_pose(position):
+    if not isinstance(position, (list, tuple)):
+        return None
+    return [round(float(value), 3) for value in position[:3]]
+
+
+def sample_fingerprint(run):
+    """Stable identity excluding generated run IDs, but retaining placement."""
+    te = run.get("task_environment") or {}
+    task = te.get("task") or run.get("task") or {}
+    objects = []
+    for item in te.get("added_objects") or []:
+        placement = item.get("placement") or {}
+        pose = item.get("pose") or placement.get("pose") or {}
+        objects.append({
+            "category": item.get("category"),
+            "roles": sorted(item.get("semantic_roles") or []),
+            "room": item.get("room_id"),
+            "mode": placement.get("mode"),
+            "support": placement.get("support_object_id"),
+            "position": _round_pose(pose.get("position")),
+        })
+    plan_objects = [
+        {
+            "id": item.get("object_id"), "category": item.get("category"),
+            "roles": sorted(item.get("semantic_roles") or [item.get("semantic_role")]),
+            "room": item.get("room") or item.get("room_id"),
+        }
+        for item in task.get("plan_objects") or []
+    ]
+    payload = {
+        "scene": ((te.get("base_scene") or {}).get("scene_model")),
+        "env_type": te.get("env_type"),
+        "primary_task": task.get("primary_behavior_task"),
+        "task_type": task.get("task_type"),
+        "target_room": task.get("target_room"),
+        "objects": sorted(objects, key=lambda item: json.dumps(item, sort_keys=True)),
+        "plan_objects": sorted(plan_objects, key=lambda item: json.dumps(item, sort_keys=True)),
+        "state_changes": sorted(
+            (item.get("object_id"), sorted((item.get("states") or {}).items()))
+            for item in te.get("state_changed_objects") or []
+        ),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), payload
+
+
+def sample_diversity_record(run):
+    """Persist the sampling dimensions used to balance future batch rounds."""
+    te = run.get("task_environment") or {}
+    task = te.get("task") or {}
+    objects = te.get("added_objects") or []
+    plan_objects = task.get("plan_objects") or []
+    categories = [item.get("category") for item in objects if item.get("category")]
+    if not categories:
+        categories = [item.get("category") for item in plan_objects if item.get("category")]
+    supports = [
+        (item.get("placement") or {}).get("support_category")
+        for item in objects if (item.get("placement") or {}).get("support_category")
+    ]
+    source_rooms = sorted(set(item.get("room_id") for item in objects if item.get("room_id")))
+    position_bins = []
+    for item in objects:
+        position = ((item.get("pose") or {}).get("position"))
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            position_bins.append([round(float(position[0]) / 0.25), round(float(position[1]) / 0.25)])
+    return {
+        "env_type": te.get("env_type"),
+        "task_family": task.get("task_type"),
+        "primary_task": task.get("primary_behavior_task"),
+        "target_room": task.get("target_room"),
+        "source_rooms": source_rooms,
+        "target_categories": sorted(set(categories)),
+        "support_categories": sorted(set(supports)),
+        "position_bins_25cm": sorted(position_bins),
+    }
+
+
+def load_existing_fingerprints(output_dir):
+    fingerprints = set()
+    for path in Path(output_dir).glob("online_env*.json"):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if run.get("ok"):
+            fingerprints.add(sample_fingerprint(run)[0])
+    return fingerprints
+
+
+def scene_integrity(before_graph, after_graph, max_displacement=0.05):
+    """Reject a sample when a source-scene object is missing or displaced."""
+    before = {
+        node.get("id"): node for node in (before_graph or {}).get("nodes", [])
+        if node.get("type") == "object" and not str(node.get("id", "")).startswith("online_env_")
+    }
+    after = {
+        node.get("id"): node for node in (after_graph or {}).get("nodes", [])
+        if node.get("type") == "object"
+    }
+    missing = []
+    moved = []
+    for object_id, node in before.items():
+        after_node = after.get(object_id)
+        if after_node is None:
+            missing.append(object_id)
+            continue
+        start = ((node.get("pose") or {}).get("position"))
+        end = ((after_node.get("pose") or {}).get("position"))
+        if not isinstance(start, (list, tuple)) or not isinstance(end, (list, tuple)):
+            continue
+        displacement = sum((float(a) - float(b)) ** 2 for a, b in zip(start[:3], end[:3])) ** 0.5
+        if displacement > max_displacement:
+            moved.append({"object_id": object_id, "displacement": round(displacement, 6)})
+    return {
+        "ok": not missing and not moved,
+        "max_displacement": max_displacement,
+        "missing_source_objects": missing,
+        "moved_source_objects": moved,
+    }
+
+
+def enforce_run_quality(run):
+    validation = run.setdefault("validation", {})
+    integrity = scene_integrity(run.get("before_graph"), run.get("after_graph"))
+    validation["scene_integrity"] = integrity
+    te_validation = ((run.get("task_environment") or {}).setdefault("validation", {}))
+    te_validation["scene_integrity"] = integrity
+    if not integrity["ok"]:
+        validation["ok"] = False
+        te_validation["ok"] = False
+        run["ok"] = False
+    return integrity
 
 
 def hard_exit(code=0):
@@ -120,10 +256,21 @@ def main():
         "--env-type",
         choices=["A", "B", "C"],
         default="A",
-        help="DeltaSG environment type: A=basic task, B=fire anomaly, C=fire disambiguation.",
+        help="DeltaSG environment type: A=basic task, B=fire anomaly, C=constraint semantic tasks.",
     )
     parser.add_argument("--task", default=None, help="Optional BEHAVIOR task name for Env-A, e.g. cook_eggplant-0")
     parser.add_argument("--target-room", default=None, help="Optional room id, e.g. kitchen_0")
+    parser.add_argument(
+        "--task-categories",
+        default=None,
+        help="Comma-separated task categories to use. Default: all. "
+             "Options: retrieval_delivery, open_close, appliance",
+    )
+    parser.add_argument(
+        "--env-c-types",
+        default=None,
+        help="Comma-separated Env-C themes. Default: retrieval_delivery,open_close,appliance,fire.",
+    )
     parser.add_argument("--num-envs", type=int, default=1, help="Number of online DeltaSG edits to apply sequentially.")
     parser.add_argument("--task-objects", type=int, default=2)
     parser.add_argument("--context-objects", type=int, default=3)
@@ -153,8 +300,8 @@ def main():
     )
     parser.add_argument(
         "--llm-model",
-        default=None,
-        help="LLM model name (default: qwen-plus via DASHSCOPE_API_KEY env var).",
+        default="qwen3.7-max",
+        help="Required LLM model name.",
     )
     parser.add_argument(
         "--llm-base-url",
@@ -226,6 +373,21 @@ def main():
         action="store_true",
         help="Continue placing context objects even after task abort.",
     )
+    parser.add_argument(
+        "--unsafe-fast-env-a-cleanup",
+        action="store_true",
+        help="Unsafe optimization: remove spawned objects instead of resetting. Do not use for dataset generation.",
+    )
+    parser.add_argument(
+        "--no-cache-base-graph",
+        action="store_true",
+        help="Rebuild the base scene graph for every Env-A sample.",
+    )
+    parser.add_argument(
+        "--allow-repeat-tasks",
+        action="store_true",
+        help="Allow repeated primary task names across samples. Useful for large Env-A batches.",
+    )
     # ---- Checkpoint ----
     parser.add_argument(
         "--resume",
@@ -246,11 +408,16 @@ def main():
     try:
         with gm.unlocked():
             gm.ENABLE_TRANSITION_RULES = args.enable_transition_rules
-        env = create_env(scene_model=args.scene, robot_model=robot_model)
-        env.reset()
+        # Online generation records robot state but does not consume camera pixels.
+        # Deferring visual sensors prevents Replicator graph crashes in large scenes;
+        # capture scripts still use create_env's visual-sensor defaults.
+        env = create_env(
+            scene_model=args.scene,
+            robot_model=robot_model,
+            robot_obs_modalities=[],
+        )
         harden_headless_kit()
-        for _ in range(30):
-            og.sim.step()
+        stabilize_robot_spawn(env, seed=args.seed)
 
         config = OnlineDeltaSGConfig(
             task_objects=args.task_objects,
@@ -272,8 +439,25 @@ def main():
             max_total_placement_time_sec=args.max_total_placement_time,
             abort_on_task_object_failure=not args.no_abort_on_task_failure,
             skip_context_on_failure=not args.no_skip_context_on_failure,
+            fast_env_a_cleanup=args.unsafe_fast_env_a_cleanup,
+            cache_base_graph=not args.no_cache_base_graph,
+            allow_repeat_tasks=args.allow_repeat_tasks,
         )
         engine = OnlineDeltaSGEngine(env=env, metadata_dir=args.metadata_dir, config=config)
+
+        # Parse task category filter
+        if args.task_categories:
+            enabled_categories = set(c.strip() for c in args.task_categories.split(","))
+            from online_deltasg import VALID_TASKS
+            invalid = enabled_categories - set(VALID_TASKS.keys())
+            if invalid:
+                print(f"ERROR: unknown categories: {invalid}. Valid: {sorted(VALID_TASKS.keys())}")
+                hard_exit(1)
+            engine.set_enabled_categories(enabled_categories)
+            print(f"[online-deltasg] task categories: {sorted(enabled_categories)}")
+        else:
+            from online_deltasg import VALID_TASKS
+            print(f"[online-deltasg] task categories: all {sorted(VALID_TASKS.keys())}")
 
         summary = {
             "ok": True,
@@ -284,9 +468,12 @@ def main():
         }
         runs = []
         skip_tasks = set()
+        fingerprints = load_existing_fingerprints(args.output_dir)
+        print(f"[quality] loaded {len(fingerprints)} existing sample fingerprints", flush=True)
         # Resume from checkpoint if requested
         if args.resume:
-            skip_tasks = engine.load_checkpoint(args.output_dir)
+            loaded_skip_tasks = engine.load_checkpoint(args.output_dir)
+            skip_tasks = set() if args.allow_repeat_tasks else loaded_skip_tasks
 
         for idx in range(args.num_envs):
             print(f"[online-deltasg] run {idx + 1}/{args.num_envs}", flush=True)
@@ -317,7 +504,36 @@ def main():
                 elif args.env_type == "B":
                     run = engine.generate_env_b_fire(target_room=args.target_room)
                 else:
-                    run = engine.generate_env_c_fire_disambiguation(target_room=args.target_room)
+                    env_c_types = None
+                    if args.env_c_types:
+                        env_c_types = [item.strip() for item in args.env_c_types.split(",") if item.strip()]
+                    run = engine.generate_env_c(
+                        target_room=args.target_room,
+                        env_c_types=env_c_types,
+                        skip_tasks=skip_tasks,
+                    )
+
+                integrity = enforce_run_quality(run)
+                if not integrity["ok"]:
+                    print(f"[quality] rejected scene integrity failure: "
+                          f"missing={len(integrity['missing_source_objects'])} "
+                          f"moved={len(integrity['moved_source_objects'])}", flush=True)
+                if run.get("ok"):
+                    fingerprint, _ = sample_fingerprint(run)
+                    if fingerprint in fingerprints:
+                        run["ok"] = False
+                        run.setdefault("validation", {})["ok"] = False
+                        run["validation"]["duplicate_sample"] = True
+                        te_validation = ((run.get("task_environment") or {}).setdefault("validation", {}))
+                        te_validation["ok"] = False
+                        te_validation["duplicate_sample"] = True
+                        print("[quality] rejected exact duplicate sample", flush=True)
+                    else:
+                        run.setdefault("validation", {})["sample_fingerprint"] = fingerprint
+                        ((run.get("task_environment") or {}).setdefault("validation", {}))["sample_fingerprint"] = fingerprint
+                        diversity = sample_diversity_record(run)
+                        run["diversity"] = diversity
+                        (run.get("task_environment") or {})["diversity"] = diversity
 
                 # Retry conditions:
                 # 1. LLM rejected the task setup (not feasible / not linear)
@@ -330,15 +546,18 @@ def main():
                 )
                 should_retry = llm_rejected or no_task_objects
 
-                # Don't retry hard rejects
+                # Hard rejects should not retry the same task, but the sample slot
+                # can still be recovered by asking the LLM for a different task.
                 if should_retry and hard_reject:
+                    rejected_task = (run.get("task") or {}).get("primary_behavior_task", "")
+                    if rejected_task and rejected_task != "unknown":
+                        skip_tasks.add(rejected_task)
                     print(f"[hard-reject] task is fundamentally unsuitable, "
-                          f"not retrying the same task", flush=True)
-                    should_retry = False
+                          f"skipping it and selecting another task", flush=True)
 
                 # Check if we should stop (success or retry limit reached)
                 if not should_retry:
-                    break  # success or hard reject
+                    break
 
                 run_llm_retries += 1
                 attempt += 1
@@ -348,8 +567,9 @@ def main():
                     break
 
                 rejected_task = (run.get("task") or {}).get("primary_behavior_task", "")
-                if rejected_task:
-                    skip_tasks.add(rejected_task)
+                if rejected_task and rejected_task != "unknown":
+                    if hard_reject or not args.allow_repeat_tasks:
+                        skip_tasks.add(rejected_task)
                     # Track per-task retry count
                     task_retry_count[rejected_task] = task_retry_count.get(rejected_task, 0) + 1
                     if task_retry_count[rejected_task] > config.max_retries_per_task:
@@ -374,15 +594,18 @@ def main():
             engine.save_run(run, run_path)
             # Track successfully generated tasks to prevent duplicates (even if failed)
             task_name = (run.get("task") or {}).get("primary_behavior_task", "")
-            if task_name:
+            if task_name and task_name != "unknown" and not args.allow_repeat_tasks:
                 skip_tasks.add(task_name)
                 print(f"[online-deltasg] added '{task_name}' to skip_tasks (now {len(skip_tasks)} total)", flush=True)
             # Only include successful runs in dataset
             if run.get("ok"):
                 runs.append(run)
+                fingerprints.add(sample_fingerprint(run)[0])
+                diversity = run.get("diversity") or sample_diversity_record(run)
                 engine._checkpoint["successful_samples"].append({
                     "run_id": run["run_id"],
                     "task": task_name,
+                    "diversity": diversity,
                 })
             else:
                 print(f"[online-deltasg] run {idx + 1} excluded from dataset (ok=False)", flush=True)

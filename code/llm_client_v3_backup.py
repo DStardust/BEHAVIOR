@@ -17,7 +17,6 @@ Usage:
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -102,7 +101,6 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.timeout = timeout
-        self._cache: dict[tuple[str, str, bool, float, str], dict] = {}
 
         resolved_key = api_key or os.environ.get("DASHSCOPE_API_KEY") or DEFAULT_API_KEY
         resolved_url = base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL)
@@ -155,10 +153,6 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
         temp = temperature if temperature is not None else self.temperature
-        cache_key = (system_prompt, user_prompt, json_mode, float(temp), self.model)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return copy.deepcopy(cached)
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -171,16 +165,15 @@ class LLMClient:
                 if json_mode:
                     kwargs["response_format"] = {"type": "json_object"}
 
-                # Disable thinking mode for Qwen3 reasoning models to avoid timeout.
+                # Disable thinking mode for Qwen3 reasoning models to avoid timeout
                 if "qwen3" in self.model.lower():
-                    kwargs["extra_body"] = {"enable_thinking": False}
+                    kwargs["extra_body"] = {"enable_thinking": True}
 
                 response = self._client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
 
                 result = _extract_json(content)
                 if result is not None:
-                    self._cache[cache_key] = copy.deepcopy(result)
                     return result
 
                 logger.warning(
@@ -513,22 +506,23 @@ You must respond in valid JSON format. Default to feasible=True, confidence=0.9 
 # Prompt: Generate Natural Language Instruction
 # ======================================================================
 _SYSTEM_INSTRUCTION = """\
-You are a robot task instruction writer. Write a short, mechanical instruction with exactly TWO actions: pick up and place.
+You are a robot task instruction writer. Write a short, mechanical instruction. State exactly what to do and where using the actual object names from the provided list.
 
 Rules:
-- Always include both a source and a destination: "Pick up the X from the Y. Place it on the Z."
-- Use the actual placed_on info from the object list as the source location.
-- Choose a reasonable destination from the scene furniture.
+- Use the actual object names and support surface names from the list. Don't use generic terms like "table" when the actual support is "coffee table".
+- For objects that are already in the scene (reused/reference_only), do NOT claim a specific source location. Just say "Pick up the X" without "from the Y".
 - Never add reasons or explanations.
-- Never use raw object IDs.
 
-Examples:
-"Pick up the medicine bottle from the coffee table. Place it on the bookcase."
-"Pick up the apple from the bottom cabinet. Place it on the countertop."
-
-For appliance/open_close tasks (no objects to pick up):
+Format examples:
+"Pick up the medicine bottle. Place it on the bookcase."
+"Pick up the water bottle from the countertop. Place it on the coffee table."
 "Open the bottom cabinet in the kitchen."
 "Turn off the standing TV in the living room."
+
+Bad examples:
+"Pick up the laptop from the coffee table." (laptop is scene-native, don't claim source location)
+"Place it on the living room table." (vague — use actual support name like "coffee table")
+"Open the door to let in fresh air." (added reason)
 
 You must respond in valid JSON format."""
 
@@ -886,7 +880,5 @@ def create_llm_client(
 
     Returns None if the client cannot be initialised.
     """
-    if model and str(model).strip().lower() in {"none", "off", "disabled", "false", "0"}:
-        return None
     client = LLMClient(api_key=api_key, model=model, base_url=base_url)
     return client if client.available else None

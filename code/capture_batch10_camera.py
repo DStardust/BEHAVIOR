@@ -31,12 +31,17 @@ from online_deltasg import OnlineDeltaSGEngine
 
 
 # Per-room config from camera_config_guide.md
+# Per-room config from camera_config_guide.md (for Rs_int)
+# For other scenes, corners are computed dynamically from 3D objects → seg_map
 ROOM_CAMERA_CONFIGS = {
     "living_room_0": ("SW", 30),
     "bedroom_0": ("SE", 45),
     "bathroom_0": ("NE", 45),
     # kitchen_0 excluded — top cabinets block all angles
 }
+# Default fallback for rooms not in ROOM_CAMERA_CONFIGS
+DEFAULT_CORNER = "SW"
+DEFAULT_V_ANGLE = 30
 OPPOSITE_MAP = {"SW": "NE", "SE": "NW", "NW": "SE", "NE": "SW"}
 INWARD, HEIGHT = 0.3, 2.4
 
@@ -98,9 +103,11 @@ def compute_corner_camera(corner, opposite, v_angle=30.0):
     """Camera at room corner, looking inward along diagonal. h_offset=0."""
     diagonal = np.array([opposite[0] - corner[0], opposite[1] - corner[1]])
     diag_len = np.sqrt(diagonal[0]**2 + diagonal[1]**2)
+    # Use smaller inward for small rooms
+    inward = min(INWARD, diag_len * 0.1)
     cam_pos = np.array([
-        corner[0] + (diagonal[0] / diag_len) * INWARD,
-        corner[1] + (diagonal[1] / diag_len) * INWARD,
+        corner[0] + (diagonal[0] / diag_len) * inward,
+        corner[1] + (diagonal[1] / diag_len) * inward,
         HEIGHT,
     ], dtype=np.float32)
     diag_angle = math.degrees(math.atan2(diagonal[1], diagonal[0]))
@@ -129,10 +136,18 @@ def capture_at_pose(viewer, position, orientation, path):
 
 
 def main():
-    data_dir = Path("code/outputs/batch10_living")
-    out_dir = Path("code/outputs/batch10_camera")
+    data_dir = Path("/home2/daiyang/BEHAVIOR/code/outputs/Rs_int_test")
+    out_dir = Path("/home2/daiyang/BEHAVIOR/code/outputs/Rs_int_camera")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect scene_model from dataset
     scene_model = "Rs_int"
+    dataset_path = data_dir / "dataset.json"
+    if dataset_path.exists():
+        import json
+        with open(dataset_path) as f:
+            ds = json.load(f)
+        scene_model = ds.get("scene", scene_model)
 
     print(f"=== Camera Capture for {scene_model} ===")
     env = create_env(scene_model=scene_model, robot_model="fetch")
@@ -148,15 +163,28 @@ def main():
 
     robot = env.robots[0]
 
-    # Pre-compute room corners for all configured rooms
+    # Pre-compute room corners for all rooms in the scene
     room_corners_cache = {}
-    for room_name in ROOM_CAMERA_CONFIGS:
+    all_rooms = set()
+    for obj in get_all_scene_objects(env.scene):
+        rooms = getattr(obj, "in_rooms", None)
+        if not rooms:
+            continue
+        if isinstance(rooms, str):
+            rooms = [rooms]
+        all_rooms.update(rooms)
+
+    for room_name in sorted(all_rooms):
         corners = compute_room_corners(env, room_name)
-        if corners:
-            room_corners_cache[room_name] = corners
-            corner_name, v_angle = ROOM_CAMERA_CONFIGS[room_name]
-            cam_pos, _ = compute_corner_camera(corners[corner_name], corners[OPPOSITE_MAP[corner_name]], v_angle)
-            print(f"  {room_name}: {corner_name} v={v_angle}° cam={cam_pos.round(2)}")
+        if corners is None:
+            continue
+        if np.allclose(corners["SW"][:2], corners["NE"][:2]):
+            continue  # single-point room, skip
+        room_corners_cache[room_name] = corners
+        # Use known config or default
+        corner_name, v_angle = ROOM_CAMERA_CONFIGS.get(room_name, (DEFAULT_CORNER, DEFAULT_V_ANGLE))
+        cam_pos, _ = compute_corner_camera(corners[corner_name], corners[OPPOSITE_MAP[corner_name]], v_angle)
+        print(f"  {room_name}: {corner_name} v={v_angle}° cam={cam_pos.round(2)}")
 
     samples = sorted(data_dir.glob("online_env_a_*.json"))
     for fpath in samples:
@@ -174,7 +202,7 @@ def main():
         # Determine rooms to cover (only those with camera configs)
         rooms_to_cover = []
         for room_id in (target_room, robot_room):
-            if room_id and room_id in ROOM_CAMERA_CONFIGS and room_id not in rooms_to_cover:
+            if room_id and room_id in room_corners_cache and room_id not in rooms_to_cover:
                 rooms_to_cover.append(room_id)
 
         # 1. Robot cameras (before)
@@ -193,9 +221,9 @@ def main():
         # 2. Global cameras (before)
         for room_id in rooms_to_cover:
             corners = room_corners_cache.get(room_id)
-            corner_name, v_angle = ROOM_CAMERA_CONFIGS[room_id]
             if corners is None:
                 continue
+            corner_name, v_angle = ROOM_CAMERA_CONFIGS.get(room_id, (DEFAULT_CORNER, DEFAULT_V_ANGLE))
             cam_pos, cam_ori = compute_corner_camera(
                 corners[corner_name], corners[OPPOSITE_MAP[corner_name]], v_angle
             )
@@ -240,9 +268,9 @@ def main():
         # 5. Global cameras (after)
         for room_id in rooms_to_cover:
             corners = room_corners_cache.get(room_id)
-            corner_name, v_angle = ROOM_CAMERA_CONFIGS[room_id]
             if corners is None:
                 continue
+            corner_name, v_angle = ROOM_CAMERA_CONFIGS.get(room_id, (DEFAULT_CORNER, DEFAULT_V_ANGLE))
             cam_pos, cam_ori = compute_corner_camera(
                 corners[corner_name], corners[OPPOSITE_MAP[corner_name]], v_angle
             )

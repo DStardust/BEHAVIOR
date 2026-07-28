@@ -17,7 +17,6 @@ Usage:
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -102,7 +101,6 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.timeout = timeout
-        self._cache: dict[tuple[str, str, bool, float, str], dict] = {}
 
         resolved_key = api_key or os.environ.get("DASHSCOPE_API_KEY") or DEFAULT_API_KEY
         resolved_url = base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL)
@@ -155,10 +153,6 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
         temp = temperature if temperature is not None else self.temperature
-        cache_key = (system_prompt, user_prompt, json_mode, float(temp), self.model)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return copy.deepcopy(cached)
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -171,16 +165,15 @@ class LLMClient:
                 if json_mode:
                     kwargs["response_format"] = {"type": "json_object"}
 
-                # Disable thinking mode for Qwen3 reasoning models to avoid timeout.
+                # Disable thinking mode for Qwen3 reasoning models to avoid timeout
                 if "qwen3" in self.model.lower():
-                    kwargs["extra_body"] = {"enable_thinking": False}
+                    kwargs["extra_body"] = {"enable_thinking": True}
 
                 response = self._client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
 
                 result = _extract_json(content)
                 if result is not None:
-                    self._cache[cache_key] = copy.deepcopy(result)
                     return result
 
                 logger.warning(
@@ -513,22 +506,23 @@ You must respond in valid JSON format. Default to feasible=True, confidence=0.9 
 # Prompt: Generate Natural Language Instruction
 # ======================================================================
 _SYSTEM_INSTRUCTION = """\
-You are a robot task instruction writer. Write a short, mechanical instruction with exactly TWO actions: pick up and place.
+You are a robot task instruction writer. Write a short, mechanical instruction. State exactly what to do and where. No descriptions, no explanations, no fluff.
 
 Rules:
-- Always include both a source and a destination: "Pick up the X from the Y. Place it on the Z."
-- Use the actual placed_on info from the object list as the source location.
-- Choose a reasonable destination from the scene furniture.
-- Never add reasons or explanations.
-- Never use raw object IDs.
+- Use this format: "Pick up the X from the Y. Place it on the Z." or "Open the X in the Y." or "Turn on the X in the Y."
+- Never add reasons ("to let in fresh air", "so we can watch TV", "for cooking")
+- Never add objects not in the provided list
+- Be specific about the destination
 
-Examples:
-"Pick up the medicine bottle from the coffee table. Place it on the bookcase."
-"Pick up the apple from the bottom cabinet. Place it on the countertop."
-
-For appliance/open_close tasks (no objects to pick up):
+Good examples:
+"Pick up the medicine bottle from the bathroom counter. Place it on the nightstand."
 "Open the bottom cabinet in the kitchen."
-"Turn off the standing TV in the living room."
+"Turn on the living room TV."
+
+Bad examples:
+"Open the door to let in fresh air." (added reason)
+"Pick up the book and place it somewhere appropriate." (vague destination)
+"Place both items on the table." (batch operation)
 
 You must respond in valid JSON format."""
 
@@ -585,7 +579,7 @@ Target room: {target_room}{category_note}{scene_section}
 Objects placed in the scene:
 {objects_str}
 
-Write a short mechanical instruction. Use actual object names from the list. For scene-native objects, don't claim a source location.
+Write a short mechanical instruction. State exactly what to do. No reasons, no descriptions.
 Output JSON:
 {{"instruction": "the instruction", "task_description": "one-line summary"}}"""
 
@@ -792,7 +786,7 @@ Categories:
 - **constraint**: retrieve based on a property (nearest, largest, smallest)
 - **semantic**: retrieve the correct object based on context
 
-Pick a category that fits the scene furniture. Slightly prefer variety — the given recently used categories can still be chosen but are less preferred.
+Pick a category that fits the scene furniture. Prioritize variety — avoid the given recently used categories.
 
 Respond in JSON: {"selected_category": "category_name", "reason": "one sentence"}"""
 
@@ -816,13 +810,13 @@ def select_task_category(
 
     avoid_note = ""
     if used_categories:
-        avoid_note = f"\nRecently used categories (slightly less preferred): {', '.join(sorted(used_categories))}"
+        avoid_note = f"\nRecently used categories (avoid these): {', '.join(sorted(used_categories))}"
 
     user_prompt = f"""\
 Scene furniture:
 {chr(10).join(furniture_lines)}{avoid_note}
 
-Pick a category. Slightly prefer variety but don't force it. Output JSON:
+Pick a category. Avoid recently used ones. Output JSON:
 {{"selected_category": "category_name", "reason": "one sentence"}}"""
 
     return client.call(_SYSTEM_TASK_CATEGORY, user_prompt)
@@ -886,7 +880,5 @@ def create_llm_client(
 
     Returns None if the client cannot be initialised.
     """
-    if model and str(model).strip().lower() in {"none", "off", "disabled", "false", "0"}:
-        return None
     client = LLMClient(api_key=api_key, model=model, base_url=base_url)
     return client if client.available else None

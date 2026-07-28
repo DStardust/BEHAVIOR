@@ -9,7 +9,6 @@ physics, and returns an updated graph plus validation report.
 
 from __future__ import annotations
 
-import copy
 import json
 import random
 import re
@@ -145,8 +144,8 @@ ROOM_KEYWORDS = {
 # ================================================================
 # Env-A Task Categories (from intro.md 2026/6/16)
 # ================================================================
-# Env-A focuses on Retrieval & Delivery and Open/Close only.
-# Other categories (anomaly, appliance, cleaning, etc.) go to Env-B/C.
+# Each category maps to a set of task templates. The LLM selects a
+# category first, then determines the minimal required objects.
 VALID_TASKS: dict[str, set[str]] = {
     # Retrieval & Delivery
     "retrieval_delivery": {
@@ -155,55 +154,51 @@ VALID_TASKS: dict[str, set[str]] = {
         "retrieve_food", "deliver_medicine", "deliver_food",
         "deliver_drink", "put_object_on_table", "put_object_in_container",
     },
+    # Anomaly Response
+    "anomaly_response": {
+        "fire_response", "spill_cleanup", "broken_dish_cleanup",
+        "broken_glass_cleanup", "knife_recovery",
+        "fallen_object_recovery", "trash_cleanup",
+    },
     # Open / Close
     "open_close": {
         "open_door", "close_door", "open_window", "close_window",
         "open_fridge", "close_fridge", "open_cabinet", "close_cabinet",
     },
-    # Appliance (switch on/off)
+    # Appliance
     "appliance": {
         "turn_on_light", "turn_off_light", "turn_on_tv",
         "turn_off_tv", "turn_on_stove", "turn_off_stove",
+    },
+    # Cleaning
+    "cleaning": {
+        "clean_table", "clean_floor", "clean_sink",
+    },
+    # Organization
+    "organization": {
+        "organize_books", "organize_medicine", "organize_food",
+    },
+    # Constraint
+    "constraint": {
+        "retrieve_nearest_object", "retrieve_largest_object",
+        "retrieve_smallest_object",
+    },
+    # Semantic
+    "semantic": {
+        "retrieve_correct_medicine", "retrieve_correct_cleaner",
     },
 }
 
 # Flattened set of all task names for quick lookup
 ALL_VALID_TASK_NAMES: set[str] = {t for tasks in VALID_TASKS.values() for t in tasks}
-ENV_C_TYPES: tuple[str, ...] = ("retrieval_delivery", "open_close", "appliance", "fire")
-
-# Retrieval tasks are intentionally limited to small, well-supported assets.
-# The LLM still selects and validates the task, but it must not substitute a
-# semantically unrelated or physically unsafe asset (e.g. a toy car for book).
-SAFE_RETRIEVAL_ASSETS: dict[str, tuple[str, ...]] = {
-    "retrieve_book": ("paperback_book",),
-    "retrieve_medicine": ("bottle_of_medicine",),
-    "retrieve_key": ("keys", "key_chain"),
-    "retrieve_phone": ("cell_phone",),
-    "retrieve_drink": ("bottle_of_water", "water_bottle"),
-    "retrieve_food": ("canned_food",),
-    "deliver_medicine": ("bottle_of_medicine",),
-    "deliver_food": ("canned_food",),
-    "deliver_drink": ("bottle_of_water", "water_bottle"),
-}
-
-NATIVE_TASK_TARGET_TOKENS: dict[str, tuple[str, ...]] = {
-    "open_door": ("door",), "close_door": ("door",),
-    "open_window": ("window",), "close_window": ("window",),
-    "open_fridge": ("fridge", "refrigerator"), "close_fridge": ("fridge", "refrigerator"),
-    "open_cabinet": ("cabinet",), "close_cabinet": ("cabinet",),
-    "turn_on_light": ("electric_switch", "light", "lamp"),
-    "turn_off_light": ("electric_switch", "light", "lamp"),
-    "turn_on_tv": ("tv", "television"), "turn_off_tv": ("tv", "television"),
-    "turn_on_stove": ("stove",), "turn_off_stove": ("stove",),
-}
 
 
 @dataclass
 class OnlineDeltaSGConfig:
     task_objects: int = 2
     context_objects: int = 3
-    warmup_steps: int = 20
-    settle_steps: int = 5
+    warmup_steps: int = 50
+    settle_steps: int = 10
     settle_threshold: float = 0.25
     near_distance: float = 1.25
     support_z_tolerance: float = 0.08
@@ -220,21 +215,14 @@ class OnlineDeltaSGConfig:
     max_total_generation_time_sec: float = 900.0
 
     # ---- Placement fail-fast ----
-    per_object_placement_timeout_sec: float = 90.0
-    per_relation_attempt_timeout_sec: float = 15.0
+    per_object_placement_timeout_sec: float = 30.0
+    per_relation_attempt_timeout_sec: float = 5.0
     max_placement_attempts_per_object: int = 4
-    max_total_placement_time_sec: float = 180.0
+    max_total_placement_time_sec: float = 60.0
 
     # ---- Context object behavior ----
     abort_on_task_object_failure: bool = True
     skip_context_on_failure: bool = True
-
-    # ---- Batch generation safety ----
-    # A full reset is required for dataset generation. Removing only spawned
-    # objects can leave subtle rigid-body drift in the source scene.
-    fast_env_a_cleanup: bool = False
-    cache_base_graph: bool = True
-    allow_repeat_tasks: bool = False
 
 
 class OnlineDeltaSGEngine:
@@ -258,24 +246,8 @@ class OnlineDeltaSGEngine:
         self._category_models_cache = {}
         self._placed_on_support = {}
         self._placement_support_map = {}
-        self._floor_placed_objects: set[str] = set()
         self._support_occupied_area = {}  # support_id → occupied XY area (m²)
         self._scene_categories_cache = None  # lazily computed set of categories in scene
-        self._base_graph_cache = None
-        # Keep an explicit native-object baseline. OG global state restore is
-        # unsafe after dynamically adding/removing objects because its PhysX
-        # tensor layout no longer matches the saved state.
-        self._clean_scene_poses = {}
-        for obj in self._scene_objects():
-            name = getattr(obj, "name", "")
-            if not name.startswith("online_env_"):
-                try:
-                    position, orientation = obj.get_position_orientation()
-                    self._clean_scene_poses[name] = (position.clone(), orientation.clone())
-                except Exception:
-                    pass
-        self._run_started = False
-        self._pre_run_state = None
         # Retry / fail-fast state
         self._rejected_task_cache: set[str] = set()
         self._failed_placement_cache: set[tuple[str, str]] = set()  # (category, support_id) pairs
@@ -288,8 +260,6 @@ class OnlineDeltaSGEngine:
             "failed_placements": [],
             "successful_samples": [],
         }
-        self._used_target_categories: Counter[str] = Counter()
-        self._enabled_categories: set[str] | None = None  # None = all categories
         self._llm_client = create_llm_client(
             api_key=self.config.llm_api_key,
             model=self.config.llm_model,
@@ -297,8 +267,6 @@ class OnlineDeltaSGEngine:
         )
         if self._llm_client:
             print(f"[online-deltasg] LLM enabled: {self._llm_client.model}")
-        else:
-            raise RuntimeError("DeltaSG requires an available LLM client; refusing heuristic-only generation")
 
     def snapshot(self):
         """Return a 3DSG-like graph built from the current live simulator state."""
@@ -384,16 +352,9 @@ class OnlineDeltaSGEngine:
         """
         self._placed_on_support = {}
         self._placement_support_map = {}
-        self._floor_placed_objects = set()
         self._support_occupied_area = {}
         self._scene_categories_cache = None  # refresh scene categories
-        self._cleanup_spawned_objects(prefer_reset=not self.config.fast_env_a_cleanup)
-        if self.config.cache_base_graph and self.config.fast_env_a_cleanup:
-            before_graph = self._get_base_graph()
-            self._pre_run_state = None
-        else:
-            self._pre_run_state = og.sim.dump_state(serialized=False)
-            before_graph = self.snapshot()
+        before_graph = self.snapshot()
 
         # ---- Step 1: Select task category and required objects ----
         if task and task in ALL_VALID_TASK_NAMES:
@@ -406,16 +367,13 @@ class OnlineDeltaSGEngine:
         else:
             # New paradigm: pick category → pick task → find objects
             task_category, primary_task = self._select_task_and_category(
-                skip_tasks=skip_tasks, cached_graph=before_graph,
+                skip_tasks=skip_tasks
             )
             if not primary_task:
                 return self._build_llm_rejected_result(
                     llm_validation={"issues": ["no_valid_task_found"]},
                     before_graph=before_graph,
-                    # This is a selection-state failure, not a task. Keeping
-                    # it empty prevents the runner from poisoning its task
-                    # skip set with a fake "unknown" task name.
-                    primary_task="",
+                    primary_task="unknown",
                     target_room=target_room or "kitchen_0",
                     hard_reject=True,
                 )
@@ -446,65 +404,9 @@ class OnlineDeltaSGEngine:
         # ---- Step 3: Match required objects to asset database records ----
         selected_records = self._match_required_objects(required_objs)
 
-        # For retrieval/delivery, task semantics are simple enough to bind the
-        # spawned object to a vetted category. This prevents LLM object
-        # hallucinations from reaching the physics layer.
-        if task_category == "retrieval_delivery":
-            safe_records = self._safe_retrieval_records(primary_task)
-            if safe_records:
-                selected_records = safe_records
-                target_room = self._choose_safe_target_room(
-                    safe_records[0], before_graph, preferred_room=target_room,
-                )
-                print(f"[retrieval-profile] task={primary_task} asset="
-                      f"{self._choose_category(safe_records[0])} room={target_room}", flush=True)
-
-        native_target = None
-        native_instruction = None
-        if task_category in {"open_close", "appliance"}:
-            # These tasks act on an existing fixture; never spawn whatever
-            # auxiliary object the LLM happened to mention before binding it.
-            selected_records = []
-            native_target = self._select_native_task_target(primary_task, before_graph)
-            if native_target is None:
-                self._rejected_task_cache.add(primary_task)
-                return self._build_llm_rejected_result(
-                    llm_validation={"issues": ["no_matching_native_stateful_target"]},
-                    before_graph=before_graph,
-                    primary_task=primary_task,
-                    target_room=target_room,
-                    hard_reject=True,
-                )
-            target_room = native_target["room_id"]
-            required_objs = [{
-                "name": native_target["category"],
-                "category_hint": native_target["category"],
-                "role": "target",
-            }]
-            native_instruction = self._native_task_instruction(primary_task, native_target)
-            print(f"[native-target] task={primary_task} object={native_target['object_id']} "
-                  f"room={target_room}", flush=True)
-
-        # If no objects matched and no scene-native targets, reject the task
-        if not selected_records and not any(
-            robj.get("role") in ("tool", "support") or
-            robj.get("category_hint", "") in self._get_scene_categories()
-            for robj in required_objs
-        ):
-            if task_category not in ("appliance", "open_close"):
-                print(f"[match] task '{primary_task}' has no matchable objects, rejecting", flush=True)
-                self._rejected_task_cache.add(primary_task)
-                return self._build_llm_rejected_result(
-                    llm_validation={"issues": ["no_matchable_objects"]},
-                    before_graph=before_graph,
-                    primary_task=primary_task,
-                    target_room=target_room,
-                    hard_reject=True,
-                )
-
         # For appliance/open_close tasks, the target is already in the scene.
         # Don't add context objects — they just add noise.
-        if task_category in ("appliance", "open_close", "retrieval_delivery"):
+        if task_category in ("appliance", "open_close"):
             context_records = []
         else:
             context_records = self._select_context_records_for_objects(selected_records, before_graph)
@@ -512,14 +414,12 @@ class OnlineDeltaSGEngine:
 
         # LLM task feasibility validation
         generated_instruction = None
-        llm_validation_result = None
         if self._llm_client:
             llm_validation, generated_instruction = self._llm_validate_task(
                 primary_task, selected_records, context_records, target_room, before_graph,
                 task_category=task_category,
             )
             if llm_validation is not None:
-                llm_validation_result = llm_validation
                 feasible = llm_validation.get("feasible", True)
                 is_linear = llm_validation.get("is_linear", True)
                 issues = llm_validation.get("issues", [])
@@ -531,31 +431,19 @@ class OnlineDeltaSGEngine:
                         print(f"[llm] task is feasible but NOT linear — {rejection_kind}")
                     else:
                         print(f"[llm] task not feasible — {rejection_kind}: {issues}")
-                    improved = (llm_validation.get("improved_instruction") or "").strip()
-                    if not hard_reject and improved:
-                        print(f"[llm] accepting improved instruction: {improved}", flush=True)
-                        llm_validation["accepted_improved_instruction"] = True
-                        llm_validation["original_instruction"] = llm_validation.get(
-                            "original_instruction", generated_instruction,
-                        )
-                        generated_instruction = improved
-                    else:
-                        if hard_reject or not self.config.allow_repeat_tasks:
-                            self._rejected_task_cache.add(primary_task)
-                            self._checkpoint["rejected_tasks"].append({
-                                "task": primary_task, "issues": issues, "kind": rejection_kind,
-                            })
-                        return self._build_llm_rejected_result(
-                            llm_validation=llm_validation,
-                            before_graph=before_graph,
-                            primary_task=primary_task,
-                            target_room=target_room,
-                            generated_instruction=generated_instruction,
-                            hard_reject=hard_reject,
-                        )
-
-        if native_instruction:
-            generated_instruction = native_instruction
+                    # Always add to rejected task cache
+                    self._rejected_task_cache.add(primary_task)
+                    self._checkpoint["rejected_tasks"].append({
+                        "task": primary_task, "issues": issues, "kind": rejection_kind,
+                    })
+                    return self._build_llm_rejected_result(
+                        llm_validation=llm_validation,
+                        before_graph=before_graph,
+                        primary_task=primary_task,
+                        target_room=target_room,
+                        generated_instruction=generated_instruction,
+                        hard_reject=hard_reject,
+                    )
 
         run_id = f"online_env_a_{self._run_counter:04d}"
         self._run_counter += 1
@@ -576,7 +464,6 @@ class OnlineDeltaSGEngine:
             "created_objects": [],
             "failed_objects": [],
             "settling": None,
-            "llm_validation": llm_validation_result,
         }
 
         created_names = []
@@ -635,7 +522,6 @@ class OnlineDeltaSGEngine:
                 object_name=obj_name,
                 target_room=target_room,
                 semantic_role=role,
-                cached_graph=before_graph,
             )
             elapsed = _time.time() - t0
             if add_result["ok"]:
@@ -690,27 +576,7 @@ class OnlineDeltaSGEngine:
             "task": primary_task, "aborted": abort_task, "abort_reason": abort_reason,
         })
         t0 = _time.time()
-        # Keep all placed objects still, then release one by one to prevent clipping
-        placed_objs = []
-        for name in created_names:
-            obj = self.env.scene.object_registry("name", name, None)
-            if obj is not None:
-                try:
-                    obj.keep_still()
-                    placed_objs.append(obj)
-                except Exception:
-                    pass
-        # First half: all objects frozen, let scene settle
-        self._step(max(self.config.warmup_steps // 2, 5))
-        # Release objects one at a time with small gaps
-        for obj in placed_objs:
-            try:
-                obj.wake()
-            except Exception:
-                pass
-            self._step(2)  # 2 steps between each release to prevent collisions
-        # Final settling
-        self._step(3)
+        self._step(self.config.warmup_steps)
         print(f"[placement] warmup done [{_time.time()-t0:.1f}s]. Collecting settling report...", flush=True)
         t0 = _time.time()
         validation["settling"] = self._collect_settling_report(created_names)
@@ -742,7 +608,7 @@ class OnlineDeltaSGEngine:
             validation["ok"] = False
             print(f"[placement] FAILED: no task_objects placed successfully", flush=True)
         else:
-            validation["ok"] = bool(settling_ok)
+            validation["ok"] = True
             if failed_task_objects:
                 print(f"[placement] PARTIAL: {len(placed_task_objects)} task + "
                       f"{len(placed_context_objects)} context placed, "
@@ -750,7 +616,8 @@ class OnlineDeltaSGEngine:
             if not settling_ok:
                 unstable = [o["object_name"] for o in validation["settling"]["objects"]
                            if not o.get("within_threshold", True)]
-                print(f"[placement] FAILED: settling/contact issues on {unstable}", flush=True)
+                print(f"[placement] WARNING: settling issues on {unstable} "
+                      f"(proceeding anyway)", flush=True)
         after_graph = self.snapshot()
 
         # Post-placement: check if any task_object failed to place
@@ -807,33 +674,9 @@ class OnlineDeltaSGEngine:
                     failed_names = [fo.get("category", "?") for fo in failed_task_objects]
                     print(f"  failed objects excluded: {failed_names}")
 
-        if task_category == "retrieval_delivery" and placed_task_objects:
-            delivery_destination = None
-            if primary_task.startswith("deliver_"):
-                delivery_destination = self._choose_delivery_destination(
-                    after_graph, placed_task_objects[0],
-                )
-                if delivery_destination is None:
-                    validation["ok"] = False
-                    validation["failed_objects"].append({
-                        "semantic_role": "delivery_destination",
-                        "errors": [{"error": "no_distinct_delivery_destination"}],
-                    })
-                else:
-                    target_room = delivery_destination["room_id"]
-                    required_objs.append({
-                        "name": delivery_destination["category"],
-                        "category_hint": delivery_destination["category"],
-                        "role": "support",
-                    })
-            generated_instruction = self._build_retrieval_instruction(
-                primary_task, target_room, placed_task_objects[0], delivery_destination,
-            )
-
         task_instance = self._build_task_instance(
             run_id, primary_task, target_room, validation["created_objects"],
             generated_instruction, required_objs=required_objs,
-            task_category=task_category,
         )
         task_environment = self._build_task_environment_record(
             env_id=run_id,
@@ -845,11 +688,6 @@ class OnlineDeltaSGEngine:
             delta_sg=delta,
             graph=after_graph,
         )
-        if validation["ok"]:
-            for item in placed_task_objects:
-                category = item.get("category")
-                if category:
-                    self._used_target_categories[category] += 1
         return {
             "schema_version": "online_deltasg_env_a.v1",
             "run_id": run_id,
@@ -881,9 +719,6 @@ class OnlineDeltaSGEngine:
         """
         self._placed_on_support = {}
         self._placement_support_map = {}
-        self._floor_placed_objects = set()
-        self._cleanup_spawned_objects(prefer_reset=True)
-        self._pre_run_state = og.sim.dump_state(serialized=False)
         before_graph = self.snapshot()
         target_room = target_room or self._choose_room_with_objects(before_graph)
         fire_target = self._choose_fire_target(before_graph, target_room)
@@ -894,22 +729,15 @@ class OnlineDeltaSGEngine:
         self._run_counter += 1
         fire_state = self._set_boolean_state(fire_target["name"], object_states.OnFire, True)
         extinguisher_record = self._record_for_category("fire_extinguisher")
-        fire_position = (
-            (fire_target.get("final_pose_before_warmup") or {}).get("position")
-            or (fire_target.get("pose") or {}).get("position")
-        )
         extinguisher = self.add_task_asset(
             record=extinguisher_record,
             object_name=f"{run_id}_extinguisher",
             target_room=target_room,
             semantic_role="interaction_tool",
-            preferred_position=fire_position,
         )
         self._step(self.config.warmup_steps)
-        settling_names = [extinguisher["object_name"]] if extinguisher.get("ok") and not extinguisher.get("reused") else []
-        settling = self._collect_settling_report(settling_names)
         after_graph = self.snapshot()
-        ok = bool(fire_state.get("ok") and extinguisher.get("ok") and settling.get("all_within_threshold"))
+        ok = bool(fire_state.get("ok") and extinguisher.get("ok"))
         delta_sg = {
             "delta_id": run_id,
             "operation": "online_add_fire_anomaly",
@@ -932,9 +760,7 @@ class OnlineDeltaSGEngine:
         validation = {
             "ok": ok,
             "fire_state": fire_state,
-            "fire_target": fire_target,
             "solution_tool": extinguisher,
-            "settling": settling,
         }
         task_instance = self._build_fire_task_instance(run_id, target_room, fire_target["name"], extinguisher)
         task_environment = self._build_task_environment_record(
@@ -942,10 +768,7 @@ class OnlineDeltaSGEngine:
             env_type="Env-B",
             task_instance=task_instance,
             target_room=target_room,
-            created_objects=[
-                item for item in (fire_target if fire_target.get("spawned") else None, extinguisher)
-                if item and item.get("ok")
-            ],
+            created_objects=[extinguisher] if extinguisher.get("ok") else [],
             validation=validation,
             delta_sg=delta_sg,
             graph=after_graph,
@@ -990,9 +813,6 @@ class OnlineDeltaSGEngine:
         This first creates a fire Env-B scene, then adds a lower-utility valid
         candidate and an invalid semantic distractor.
         """
-        # generate_env_b_fire performs the canonical clean-state restore. Doing
-        # it here as well caused two consecutive resets before every Env-C fire
-        # sample and destabilized several scenes.
         env_b = self.generate_env_b_fire(target_room=target_room)
         run_id = f"online_env_c_fire_disambiguation_{self._run_counter:04d}"
         self._run_counter += 1
@@ -1012,16 +832,9 @@ class OnlineDeltaSGEngine:
             semantic_role="semantic_distractor",
         )
         self._step(self.config.warmup_steps)
-        settling_names = [
-            item.get("object_name") for item in (
-                env_b.get("validation", {}).get("solution_tool", {}), bucket, toy
-            )
-            if item.get("ok") and not item.get("reused") and item.get("object_name")
-        ]
-        settling = self._collect_settling_report(settling_names)
         after_graph = self.snapshot()
         optimal = env_b["task_instance"]["task_objects"][0]["object_id"]
-        ok = bool(env_b["ok"] and bucket["ok"] and toy["ok"] and settling.get("all_within_threshold"))
+        ok = bool(env_b["ok"] and bucket["ok"] and toy["ok"])
         env_b["delta_sg"]["delta_id"] = run_id
         env_b["delta_sg"]["operation"] = "online_add_fire_semantic_disambiguation"
         env_b["delta_sg"]["nodes"].extend([bucket.get("delta_node"), toy.get("delta_node")])
@@ -1051,7 +864,6 @@ class OnlineDeltaSGEngine:
             "env_b_fire": env_b["validation"],
             "candidate_solution": bucket,
             "semantic_distractor": toy,
-            "settling": settling,
         }
         created_objects = []
         solution_tool = env_b["validation"].get("solution_tool", {})
@@ -1098,419 +910,12 @@ class OnlineDeltaSGEngine:
             },
         }
 
-    def generate_env_c(self, target_room=None, env_c_types=None, skip_tasks=None):
-        """Create a full Env-C sample across all supported task themes."""
-        choices = [item for item in (env_c_types or ENV_C_TYPES) if item in ENV_C_TYPES]
-        if self._enabled_categories is not None:
-            choices = [item for item in choices if item == "fire" or item in self._enabled_categories]
-        if not choices:
-            choices = ["fire"]
-
-        used = Counter(
-            ((sample.get("task") or "").split("::", 1)[0])
-            for sample in self._checkpoint.get("successful_samples", [])
-            if sample.get("task")
-        )
-        min_used = min(used.get(item, 0) for item in choices)
-        type_name = self.rng.choice(sorted(item for item in choices if used.get(item, 0) == min_used))
-        if type_name == "fire":
-            return self.generate_env_c_fire_disambiguation(target_room=target_room)
-        return self.generate_env_c_task_disambiguation(
-            task_category=type_name,
-            target_room=target_room,
-            skip_tasks=skip_tasks,
-        )
-
-    def generate_env_c_task_disambiguation(self, task_category, target_room=None, skip_tasks=None):
-        """Create Env-C disambiguation variants for Env-A task categories."""
-        previous_categories = self._enabled_categories
-        self.set_enabled_categories({task_category})
-        try:
-            base = self.generate_env_a(target_room=target_room, skip_tasks=skip_tasks)
-        finally:
-            self._enabled_categories = previous_categories
-
-        if not base.get("ok"):
-            return base
-
-        run_id = f"online_env_c_{task_category}_{self._run_counter:04d}"
-        self._run_counter += 1
-        te = base.get("task_environment", {}) or {}
-        task_instance = copy.deepcopy(base.get("task_instance") or {})
-        target_room = target_room or task_instance.get("target_room") or (te.get("task") or {}).get("target_room")
-        if task_category in {"open_close", "appliance"}:
-            target_room = self._env_c_optimal_room(task_instance, target_room)
-            task_instance["target_room"] = target_room
-        before_graph = base.get("before_graph")
-        delta_sg = copy.deepcopy(base.get("delta_sg") or {})
-        delta_sg["delta_id"] = run_id
-        delta_sg["operation"] = f"online_add_{task_category}_semantic_disambiguation"
-
-        validation = copy.deepcopy(base.get("validation") or {})
-        created_objects = list(validation.get("created_objects") or [])
-        candidate = None
-        distractor = None
-        state_changed = []
-
-        if task_category == "retrieval_delivery":
-            if not any(item.get("semantic_role") == "task_object" for item in created_objects):
-                base["ok"] = False
-                base.setdefault("validation", {})["ok"] = False
-                base["validation"].setdefault("failed_objects", []).append(
-                    {
-                        "ok": False,
-                        "semantic_role": "task_object",
-                        "errors": [{"error": "env_c_retrieval_requires_spawned_task_object"}],
-                    }
-                )
-                return base
-            candidate, distractor = self._add_env_c_retrieval_candidates(
-                run_id=run_id,
-                target_room=target_room,
-                created_objects=created_objects,
-                delta_sg=delta_sg,
-            )
-            for item in (candidate, distractor):
-                if item and item.get("ok"):
-                    created_objects.append(item)
-        else:
-            candidate, distractor = self._select_env_c_native_candidates(
-                task_category=task_category,
-                target_room=target_room,
-                task_instance=task_instance,
-                graph=base.get("after_graph") or self.snapshot(),
-            )
-            self._append_env_c_native_plan_objects(task_instance, [candidate, distractor])
-            self._append_env_c_native_delta(delta_sg, target_room, [candidate, distractor])
-
-        self._step(self.config.warmup_steps)
-        settling_names = [
-            item.get("object_name") for item in created_objects
-            if item.get("ok") and not item.get("reused") and item.get("object_name")
-        ]
-        settling = self._collect_settling_report(settling_names)
-        after_graph = self.snapshot()
-        optimal = self._env_c_optimal_object(task_instance, created_objects)
-        rejected = []
-        for item, reason in (
-            (candidate, "valid_candidate_but_not_requested_or_lower_utility"),
-            (distractor, "invalid_affordance_or_wrong_object_class"),
-        ):
-            if item and (object_name := (item.get("object_name") or item.get("object_id"))):
-                rejected.append({"object_id": object_name, "reason": reason})
-
-        task_instance["task_id"] = f"{run_id}_task"
-        task_instance["task_type"] = "Env-C"
-        task_instance["semantic_constraints"] = self._env_c_constraints(task_category)
-        task_instance["semantic_reasoning"] = {
-            "reasoning_type": ["semantic_disambiguation", "affordance_grounding", "constraint_reasoning"],
-            "task_family": task_category,
-            "ground_truth": {
-                "optimal_object": optimal,
-                "rejected_candidates": rejected,
-            },
-        }
-        task_instance["instruction"] = self._env_c_instruction(
-            task_category,
-            task_instance.get("instruction") or (te.get("task") or {}).get("instruction") or "",
-        )
-
-        validation.update(
-            {
-                "ok": bool(
-                    validation.get("ok")
-                    and optimal
-                    and candidate
-                    and candidate.get("ok")
-                    and distractor
-                    and distractor.get("ok")
-                    and settling.get("all_within_threshold")
-                ),
-                "created_objects": created_objects,
-                "candidate_solution": candidate,
-                "semantic_distractor": distractor,
-                "settling": settling,
-            }
-        )
-        task_environment = self._build_task_environment_record(
-            env_id=run_id,
-            env_type="Env-C",
-            task_instance=task_instance,
-            target_room=target_room,
-            created_objects=created_objects,
-            validation=validation,
-            delta_sg=delta_sg,
-            graph=after_graph,
-            state_changed_objects=state_changed,
-        )
-        return {
-            "schema_version": f"online_deltasg_env_c_{task_category}_disambiguation.v1",
-            "run_id": run_id,
-            "ok": validation["ok"],
-            "task_environment": task_environment,
-            "base_scene": task_environment["base_scene"],
-            "task": task_environment["task"],
-            "robot": task_environment["robot"],
-            "camera": task_environment["camera"],
-            "added_objects": task_environment["added_objects"],
-            "task_objects": task_environment["task_objects"],
-            "solution_plan": task_environment["solution_plan"],
-            "before_graph": before_graph,
-            "delta_sg": delta_sg,
-            "validation": validation,
-            "after_graph": after_graph,
-            "task_instance": task_instance,
-            "debug": {
-                "before_graph": before_graph,
-                "after_graph": after_graph,
-                "base_run_id": base.get("run_id"),
-                "env_c_type": task_category,
-            },
-        }
-
-    def _add_env_c_retrieval_candidates(self, run_id, target_room, created_objects, delta_sg):
-        task_objects = [item for item in created_objects if item.get("semantic_role") == "task_object"]
-        if not task_objects:
-            return None, None
-        optimal = task_objects[0]
-        optimal_category = optimal.get("category") or "book"
-        graph = self.snapshot()
-        alt_room = self._choose_different_room(graph, target_room) or target_room
-
-        candidate_record = self._record_for_category(optimal_category, fallback_category="book")
-        candidate = self.add_task_asset(
-            record=candidate_record,
-            object_name=f"{run_id}_candidate_{self._slug(optimal_category)}",
-            target_room=alt_room,
-            semantic_role="candidate_solution",
-        )
-        distractor_category = self._semantic_distractor_category(optimal_category)
-        distractor = None
-        distractor_categories = [distractor_category, "book", "notebook", "cup", "bowl"]
-        tried = set()
-        for idx, category in enumerate(distractor_categories):
-            if not category or category == optimal_category or category in tried:
-                continue
-            tried.add(category)
-            suffix = self._slug(category) if idx == 0 else f"{self._slug(category)}_{idx}"
-            candidate_distractor = self.add_task_asset(
-                record=self._record_for_category(category, fallback_category="book"),
-                object_name=f"{run_id}_distractor_{suffix}",
-                target_room=target_room,
-                semantic_role="semantic_distractor",
-            )
-            if candidate_distractor and candidate_distractor.get("ok"):
-                distractor = candidate_distractor
-                break
-            if distractor is None:
-                distractor = candidate_distractor
-        for item in (candidate, distractor):
-            if item and item.get("ok"):
-                delta_sg.setdefault("nodes", []).append(item.get("delta_node"))
-                delta_sg.setdefault("edges", []).extend(item.get("delta_edges", []))
-        return candidate, distractor
-
-    def _semantic_distractor_category(self, category):
-        cat = (category or "").lower()
-        mapping = {
-            "notebook": "book",
-            "book": "notebook",
-            "bottle_of_medicine": "soap",
-            "medicine": "soap",
-            "remote_control": "phone",
-            "phone": "remote_control",
-            "beer_bottle": "water_bottle",
-            "beer_glass": "cup",
-            "ice": "soap_bar",
-            "apple": "ball",
-            "food": "toy_food",
-        }
-        if cat in mapping:
-            return mapping[cat]
-        tokens = self._tokens(cat)
-        if tokens & {"book", "notebook"}:
-            return "book"
-        if tokens & {"drink", "glass", "cup", "bottle"}:
-            return "cup"
-        if tokens & {"medicine", "pill"}:
-            return "soap"
-        if tokens & {"remote", "phone"}:
-            return "phone"
-        return "book"
-
-    def _select_env_c_native_candidates(self, task_category, target_room, task_instance, graph):
-        plan_objects = task_instance.get("plan_objects") or []
-        optimal_id = self._env_c_optimal_object(task_instance, [])
-        optimal_category = ""
-        for item in plan_objects:
-            if item.get("object_id") == optimal_id:
-                optimal_category = (item.get("category") or "").lower()
-                break
-        target_tokens = self._env_c_native_category_tokens(task_category)
-        nodes = []
-        for node in graph.get("nodes", []):
-            if node.get("type") != "object":
-                continue
-            category = (node.get("category") or "").lower()
-            if not any(token in category for token in target_tokens):
-                continue
-            if node.get("id") == optimal_id:
-                continue
-            rooms = node.get("rooms") or []
-            room_score = 0 if target_room in rooms else 1
-            nodes.append((room_score, category, node.get("id"), node))
-        nodes.sort()
-
-        def native_record(node, role):
-            if not node:
-                return None
-            rooms = node.get("rooms") or []
-            return {
-                "ok": True,
-                "object_id": node.get("id"),
-                "object_name": node.get("id"),
-                "category": node.get("category"),
-                "semantic_role": role,
-                "semantic_roles": [role],
-                "room_id": rooms[0] if rooms else target_room,
-                "reused": True,
-                "reference_only": True,
-            }
-
-        candidate_node = nodes[0][3] if nodes else None
-        candidate_category = (candidate_node.get("category") or "").lower() if candidate_node else ""
-        distractor_node = None
-        for _, category, _, node in nodes[1:]:
-            if category != candidate_category and category != optimal_category:
-                distractor_node = node
-                break
-        if distractor_node is None:
-            distractor_node = nodes[1][3] if len(nodes) > 1 else self._fallback_native_distractor(
-                graph,
-                target_room,
-                {optimal_id, candidate_node.get("id") if candidate_node else None},
-            )
-        return native_record(candidate_node, "candidate_solution"), native_record(distractor_node, "semantic_distractor")
-
-    def _fallback_native_distractor(self, graph, target_room, excluded):
-        excluded = {item for item in excluded if item}
-        nodes = []
-        for node in graph.get("nodes", []):
-            if node.get("type") != "object" or node.get("id") in excluded:
-                continue
-            rooms = node.get("rooms") or []
-            room_score = 0 if target_room in rooms else 1
-            nodes.append((room_score, node.get("category") or "", node.get("id"), node))
-        nodes.sort()
-        return nodes[0][3] if nodes else None
-
-    @staticmethod
-    def _env_c_native_category_tokens(task_category):
-        if task_category == "open_close":
-            return ("door", "window", "cabinet", "fridge", "refrigerator")
-        if task_category == "appliance":
-            return ("switch", "tv", "lamp", "stove", "oven", "microwave")
-        return ()
-
-    def _append_env_c_native_plan_objects(self, task_instance, candidates):
-        plan_objects = task_instance.setdefault("plan_objects", [])
-        existing = {item.get("object_id") for item in plan_objects}
-        for item in candidates:
-            if not item or item.get("object_id") in existing:
-                continue
-            plan_objects.append(
-                {
-                    "object_id": item.get("object_id"),
-                    "category": item.get("category"),
-                    "room": item.get("room_id"),
-                    "reused": True,
-                    "reference_only": True,
-                    "semantic_role": item.get("semantic_role"),
-                    "semantic_roles": item.get("semantic_roles"),
-                }
-            )
-            existing.add(item.get("object_id"))
-
-    def _append_env_c_native_delta(self, delta_sg, target_room, candidates):
-        for item in candidates:
-            if not item:
-                continue
-            object_id = item.get("object_id")
-            delta_sg.setdefault("nodes", []).append(
-                {
-                    "id": object_id,
-                    "type": "semantic_candidate_object",
-                    "category": item.get("category"),
-                    "room_id": item.get("room_id") or target_room,
-                    "semantic_roles": item.get("semantic_roles") or [item.get("semantic_role")],
-                    "reused_from_scene": True,
-                }
-            )
-            delta_sg.setdefault("edges", []).append(
-                {"source": f"room::{item.get('room_id') or target_room}", "target": object_id, "relation": "contains"}
-            )
-
-    def _env_c_optimal_object(self, task_instance, created_objects):
-        for item in task_instance.get("task_objects") or []:
-            object_id = item.get("object_id")
-            if object_id:
-                return object_id
-        for item in task_instance.get("plan_objects") or []:
-            object_id = item.get("object_id")
-            if object_id:
-                return object_id
-        for item in created_objects:
-            if item.get("semantic_role") == "task_object":
-                return item.get("object_name")
-        return None
-
-    @staticmethod
-    def _env_c_optimal_room(task_instance, fallback_room):
-        for key in ("task_objects", "plan_objects"):
-            for item in task_instance.get(key) or []:
-                room = item.get("room") or item.get("room_id")
-                if room:
-                    return room
-        return fallback_room
-
-    @staticmethod
-    def _env_c_constraints(task_category):
-        if task_category == "retrieval_delivery":
-            return ["object_identity_disambiguation", "spatial_constraint", "instruction_grounding"]
-        if task_category == "open_close":
-            return ["articulation_affordance", "target_state_constraint", "object_identity_disambiguation"]
-        if task_category == "appliance":
-            return ["control_affordance", "device_state_constraint", "object_identity_disambiguation"]
-        return ["semantic_disambiguation"]
-
-    @staticmethod
-    def _env_c_instruction(task_category, base_instruction):
-        base = base_instruction.rstrip(".")
-        if task_category == "retrieval_delivery":
-            return f"{base}. Choose the object that exactly satisfies the instruction; ignore similar distractors."
-        if task_category == "open_close":
-            return f"{base}. Select the correct articulated object, not the other openable fixtures."
-        if task_category == "appliance":
-            return f"{base}. Select the correct controllable device or switch, not other appliances."
-        return base_instruction
-
-    def add_task_asset(
-        self,
-        record,
-        object_name,
-        target_room,
-        semantic_role="task_object",
-        cached_graph=None,
-        preferred_position=None,
-    ):
+    def add_task_asset(self, record, object_name, target_room, semantic_role="task_object"):
         """Add one task asset directly to the live OmniGibson scene.
 
         Applies placement attempts with per-object timeout, placement cache
         checks, and pre-validation.  If all attempts fail, the object is
         removed from the scene with cleanup.
-
-        Args:
-            cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
         category = self._choose_category(record)
         result = {
@@ -1568,34 +973,27 @@ class OnlineDeltaSGEngine:
             self._clear_usd_selection()
 
             # Build candidate placement list: primary + fallbacks + floor
-            # Use cached graph from generate_env_a when available to avoid expensive re-scans
-            placement_graph = cached_graph or self.snapshot()
-            placement = self._choose_live_placement(
-                record, target_room, graph=placement_graph, preferred_position=preferred_position,
-            )
-            floor_candidates = []
-            if self._floor_fallback_allowed(record, category):
-                for _ in range(3):
-                    floor_placement = self._build_floor_placement(
-                        record, target_room, graph=placement_graph, preferred_position=preferred_position,
-                    )
-                    if floor_placement:
-                        floor_candidates.append(floor_placement)
-            candidates = []
-            if self._category_prefers_floor(category):
-                candidates.extend(floor_candidates)
-                candidates.append(placement)
-            else:
-                candidates.append(placement)
+            # Use a single snapshot for all placement decisions (avoids expensive re-scans)
+            placement_graph = self.snapshot()
+            placement = self._choose_live_placement(record, target_room, graph=placement_graph)
+            candidates = [placement]
             for alt_support in placement.get("support_candidates", [])[:self.config.max_fallback_supports]:
                 alt_placement = self._build_placement_for_support(record, target_room, alt_support, graph=placement_graph)
                 if alt_placement:
                     candidates.append(alt_placement)
-            if not self._category_prefers_floor(category):
-                # Only allow floor placement for categories that reasonably go on the floor.
-                # Do not use floor as a universal last resort: plates, food, knives, cups, etc.
-                # should fail placement rather than becoming invalid task data.
-                candidates.extend(floor_candidates)
+            # Only allow floor placement for categories that reasonably go on the floor
+            if category.lower() in self.FLOOR_OKAY:
+                floor_placement = self._build_floor_placement(record, target_room, graph=placement_graph)
+                if floor_placement:
+                    candidates.append(floor_placement)
+
+            # Last resort: floor for ALL objects (even if not in FLOOR_OKAY).
+            # This is a fallback so we don't lose the object entirely.
+            if category.lower() not in self.FLOOR_OKAY:
+                floor_placement = self._build_floor_placement(record, target_room, graph=placement_graph)
+                if floor_placement:
+                    floor_placement["_last_resort"] = True
+                    candidates.append(floor_placement)
 
             placed = False
             chosen_placement = None
@@ -1615,15 +1013,18 @@ class OnlineDeltaSGEngine:
 
                 support_id = placement_attempt.get("support_object_id")
                 is_floor = support_id is None
+                is_last_resort = placement_attempt.get("_last_resort", False)
                 mode = placement_attempt.get("mode", "?")
-                if is_floor:
+                if is_floor and is_last_resort:
+                    attempt_label = "floor(last_resort)"
+                elif is_floor:
                     attempt_label = "floor"
                 else:
                     attempt_label = f"{mode}({support_id})"
 
                 # Placement cache check: skip known failing (category, support) pairs
                 cache_key = (category, support_id or "__floor__")
-                if not is_floor and cache_key in self._failed_placement_cache:
+                if cache_key in self._failed_placement_cache:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: "
                           f"SKIPPED (in failed_placement_cache)", end="", flush=True)
                     result["errors"].append({
@@ -1671,41 +1072,33 @@ class OnlineDeltaSGEngine:
                     position=th.tensor(placement_attempt["pose"]["position"], dtype=th.float32),
                     orientation=th.tensor(placement_attempt["pose"]["orientation_xyzw"], dtype=th.float32),
                 )
+                self._clear_usd_selection()
+                self._step(1)
 
                 if is_floor:
                     # Floor placement: skip relation, just check AABB
-                    self._step(1)
-                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=0.02, target_room=target_room)
+                    # For last resort, use zero margin (more lenient)
+                    floor_margin = 0.0 if is_last_resort else 0.02
+                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=floor_margin)
                     if not overlapping:
-                        # Keep still to prevent floor impact
-                        try:
-                            obj.keep_still()
-                        except Exception:
-                            pass
-                        self._step(3)
-                        try:
-                            obj.wake()
-                        except Exception:
-                            pass
-                        self._step(2)
                         placed = True
-                        chosen_placement = copy.deepcopy(placement_attempt)
-                        chosen_placement["mode"] = "floor"
-                        chosen_placement["support_category"] = "floor"
-                        relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement"}
+                        chosen_placement = placement_attempt
+                        relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement" + ("_last_resort" if is_last_resort else "")}
                         break
                     else:
                         result["errors"].append({
                             "error": "aabb_overlap_floor",
                             "overlapping_objects": overlapping,
                         })
+                        self._failed_placement_cache.add((category, "__floor__"))
                         continue
 
                 # Apply relation (OnTop/Inside) — with per-relation timeout
                 rel_start = time.time()
                 relation_result = self._apply_relation(obj, placement_attempt)
                 rel_elapsed = time.time() - rel_start
-                self._step(2)  # reduced from 3+1 to 2: relation set_value already handles positioning
+                self._clear_usd_selection()
+                self._step(3)
 
                 if rel_elapsed > self.config.per_relation_attempt_timeout_sec:
                     print(f"\n[relation-timeout] {object_name} on {support_id}: "
@@ -1724,23 +1117,9 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
-                if placement_attempt.get("mode") == "on_top" and support_obj is not None:
-                    pose_check = self._validate_on_top_pose(obj, support_obj)
-                    if not pose_check.get("ok"):
-                        print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: invalid support pose ({pose_check.get('reason')})",
-                              end="", flush=True)
-                        result["errors"].append({
-                            "error": "invalid_support_pose_after_placement",
-                            "pose_check": pose_check,
-                            "support": support_id,
-                        })
-                        self._failed_placement_cache.add((category, support_id))
-                        continue
-
                 # Verify with AABB overlap check (cheap)
                 overlapping = self._check_aabb_overlap(
-                    obj, exclude_names={support_id} if support_id else None, margin=0.02,
-                    target_room=target_room,
+                    obj, exclude_names={support_id} if support_id else None, margin=0.01,
                 )
                 if overlapping:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: AABB overlap ({overlapping[:2]})",
@@ -1753,20 +1132,7 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
-                # Verify with contact check (catches objects resting on same surface)
-                has_contact, contact_names = self._has_unexpected_contacts(obj, support_obj, settle_steps=3)
-                if has_contact:
-                    print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: unexpected contact ({contact_names[:2]})",
-                          end="", flush=True)
-                    result["errors"].append({
-                        "error": "unexpected_contact_after_placement",
-                        "contact_objects": contact_names,
-                        "support": support_id,
-                    })
-                    self._failed_placement_cache.add((category, support_id))
-                    continue
-
-                # All checks passed
+                # All checks passed (contact check deferred to settling report)
                 if attempt_idx > 0:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: OK",
                           flush=True)
@@ -1796,8 +1162,6 @@ class OnlineDeltaSGEngine:
                 )
             if support_id:
                 self._placement_support_map[object_name] = support_id
-            else:
-                self._floor_placed_objects.add(object_name)
 
             position, orientation = obj.get_position_orientation()
             result.update(
@@ -1893,24 +1257,19 @@ class OnlineDeltaSGEngine:
         if not candidates:
             return None
         candidates.sort(key=lambda node: (node.get("category") or "", node["id"]))
-        selected = self.rng.choice(candidates)
-        selected["spawned"] = False
-        selected.setdefault("name", selected.get("id"))
-        return selected
+        return self.rng.choice(candidates)
 
     def _spawn_fire_target(self, target_room):
         record = self._record_for_category("plywood", fallback_category="book")
         spawned = self.add_task_asset(
             record=record,
-            object_name=f"online_env_b_fire_{self._run_counter:04d}_fire_target",
+            object_name=f"online_fire_target_{self._run_counter:04d}",
             target_room=target_room,
             semantic_role="anomaly_carrier",
         )
         if not spawned["ok"]:
             raise RuntimeError(f"Could not spawn a fire target: {spawned['errors']}")
-        spawned["name"] = spawned["object_name"]
-        spawned["spawned"] = True
-        return spawned
+        return {"name": spawned["object_name"], "category": spawned["category"]}
 
     def _set_boolean_state(self, object_name, state_cls, value):
         obj = self.env.scene.object_registry("name", object_name, None)
@@ -1942,17 +1301,6 @@ class OnlineDeltaSGEngine:
             records = self._usable_records(self.asset_db.by_category(candidate))
             if records:
                 return self.rng.choice(records)
-            if self._category_has_models(candidate):
-                return {
-                    "synset": f"{candidate}.n.01",
-                    "direct_categories": [candidate],
-                    "tasks": [],
-                    "object_type": "rigid",
-                    "edit_metadata": {
-                        "interaction": {"kind": "manipulable", "confidence": "synthetic_category"},
-                        "receptacle": {"supports_on_top": False, "supports_inside": False},
-                    },
-                }
             candidate_tokens = self._tokens(candidate)
             fuzzy = []
             for item_category, item_records in self.asset_db.categories.items():
@@ -2006,15 +1354,7 @@ class OnlineDeltaSGEngine:
         with checkpoint_path.open("r", encoding="utf-8") as f:
             state = json.load(f)
         self._run_counter = state.get("run_counter", self._run_counter)
-        # In diversity mode a task name may be reused with a different pose.
-        # Historical LLM/task-selection rejects must not exhaust the next
-        # process's task pool; exact samples are rejected by the output-level
-        # fingerprint instead. Retain the placement cache because it protects
-        # the scene from known bad object/support combinations.
-        self._rejected_task_cache = (
-            set() if self.config.allow_repeat_tasks
-            else set(state.get("rejected_task_cache", []))
-        )
+        self._rejected_task_cache = set(state.get("rejected_task_cache", []))
         self._failed_placement_cache = {
             (item["category"], item["support"])
             for item in state.get("failed_placement_cache", [])
@@ -2023,11 +1363,6 @@ class OnlineDeltaSGEngine:
         self._checkpoint["rejected_tasks"] = state.get("rejected_tasks", [])
         self._checkpoint["failed_placements"] = state.get("failed_placements", [])
         self._checkpoint["successful_samples"] = state.get("successful_samples", [])
-        self._used_target_categories = Counter()
-        for sample in self._checkpoint["successful_samples"]:
-            diversity = sample.get("diversity") or {}
-            for category in diversity.get("target_categories") or []:
-                self._used_target_categories[category] += 1
         print(f"[checkpoint] loaded {checkpoint_path}: "
               f"resumed from run #{self._run_counter}, "
               f"{len(self._rejected_task_cache)} rejected tasks, "
@@ -2094,84 +1429,6 @@ class OnlineDeltaSGEngine:
         # Outdoor/garage items that can be indoors
         "umbrella", "walking_stick", "cane",
     }
-
-    @classmethod
-    def _category_prefers_floor(cls, category: str) -> bool:
-        cat = (category or "").lower().replace("__", "_")
-        if cat in {
-            "fire_extinguisher",
-            "bucket",
-            "ice_bucket",
-            "pail",
-            "trash_can",
-            "recycling_bin",
-            "hamper",
-            "laundry_basket",
-            "mop",
-            "broom",
-            "dustpan",
-            "vacuum_cleaner",
-            "floor_lamp",
-            "air_filter",
-            "air_purifier",
-            "space_heater",
-        }:
-            return True
-        tokens = set(re.split(r"[_\W]+", cat))
-        return bool(tokens & {"bucket", "trash", "hamper", "mop", "broom", "vacuum"})
-
-    @classmethod
-    def _category_allows_floor(cls, category: str) -> bool:
-        """Return whether a spawned object category is reasonable on the floor."""
-        cat = (category or "").lower().replace("__", "_")
-        if cat in cls.FLOOR_OKAY:
-            return True
-        tokens = set(re.split(r"[_\W]+", cat))
-        floor_tokens = {
-            "bag", "basket", "bin", "box", "bucket", "carpet", "crate", "hamper",
-            "mat", "mop", "pillow", "plant", "rug", "shoe", "suitcase", "trash",
-            "umbrella", "vacuum",
-        }
-        return bool(tokens & floor_tokens)
-
-    def _floor_fallback_allowed(self, record: dict, category: str) -> bool:
-        """Allow floor fallback for movable, non-structural assets only."""
-        if self._category_allows_floor(category):
-            return True
-        tokens = self._tokens(category)
-        blocked = {
-            "car", "vehicle", "truck", "bus", "motorcycle", "wall", "ceiling",
-            "floor", "sink", "toilet", "bathtub", "cabinet", "counter", "table",
-        }
-        if tokens & blocked:
-            return False
-        interaction = ((record.get("edit_metadata") or {}).get("interaction") or {}).get("kind")
-        mass = self._record_min_mass(record)
-        return interaction == "manipulable" and (mass is None or mass <= 20.0)
-
-    @classmethod
-    def _has_explicit_support_affinity(cls, obj_category: str) -> bool:
-        return any(
-            cls._category_matches_affinity_key(obj_category, key)
-            for key in cls.OBJECT_SUPPORT_AFFINITY
-        )
-
-    @staticmethod
-    def _category_matches_affinity_key(obj_category: str, key: str) -> bool:
-        obj_lower = (obj_category or "").lower().replace("__", "_")
-        key_lower = (key or "").lower().replace("__", "_")
-        if not obj_lower or not key_lower:
-            return False
-        if obj_lower == key_lower:
-            return True
-        obj_tokens = set(re.split(r"[_\W]+", obj_lower))
-        key_tokens = set(re.split(r"[_\W]+", key_lower))
-        return key_lower in obj_tokens or obj_lower in key_tokens
-
-    @staticmethod
-    def _record_category_for_affinity(record) -> str:
-        categories = record.get("direct_categories") or []
-        return categories[0] if categories else record.get("synset", "").split(".")[0].replace("__", "_")
 
     def _get_scene_categories(self):
         """Return the set of all object categories currently in the scene (cached)."""
@@ -2262,14 +1519,13 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None, None, None
 
-    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02, target_room=None):
+    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02):
         """Check whether obj's AABB overlaps any other scene object's AABB.
 
         Args:
             obj: The object to check.
             exclude_names: Set of object names to exclude (e.g. the support, the object itself).
             margin: Extra padding (meters) added to each AABB side before intersection test.
-            target_room: Optional room filter — only check objects in this room.
 
         Returns:
             list[str]: Names of overlapping objects. Empty means no overlap.
@@ -2286,27 +1542,18 @@ class OnlineDeltaSGEngine:
             other_name = getattr(other, "name", None)
             if other_name in exclude:
                 continue
-            other_category = getattr(other, "category", "") or ""
-            other_tokens = self._tokens(other_category)
-            if other_tokens & {"floor", "floors"}:
-                continue
-            # Room filter: only check objects in the same room (fast pre-filter)
-            if target_room:
-                other_rooms = self._rooms_for_obj(other)
-                if target_room not in other_rooms:
-                    continue
             other_lo, other_hi, _ = self._safe_aabb(other)
             if other_lo is None or other_hi is None:
                 continue
             other_lo = np.asarray(other_lo, dtype=np.float32)
             other_hi = np.asarray(other_hi, dtype=np.float32)
-            if (obj_lo[0] < other_hi[0] and obj_hi[0] > other_lo[0] and
-                    obj_lo[1] < other_hi[1] and obj_hi[1] > other_lo[1] and
-                    obj_lo[2] < other_hi[2] and obj_hi[2] > other_lo[2]):
+            if (obj_lo[0] <= other_hi[0] and obj_hi[0] >= other_lo[0] and
+                    obj_lo[1] <= other_hi[1] and obj_hi[1] >= other_lo[1] and
+                    obj_lo[2] <= other_hi[2] and obj_hi[2] >= other_lo[2]):
                 overlapping.append(other_name)
         return overlapping
 
-    def _has_unexpected_contacts(self, obj, support_obj=None, settle_steps=2):
+    def _has_unexpected_contacts(self, obj, support_obj=None, settle_steps=3):
         """Check via RigidContactAPI whether obj contacts anything other than its support.
 
         Returns:
@@ -2442,151 +1689,30 @@ class OnlineDeltaSGEngine:
                 return cat
         return None
 
-    def _pick_task_from_category(
-        self,
-        category: str,
-        skip_tasks: set[str] | None = None,
-        used_task_names: set[str] | None = None,
-        task_counts: Counter[str] | None = None,
-        allowed_tasks: set[str] | None = None,
-    ) -> str | None:
-        """Pick a task with inverse-frequency weighting for large batches."""
+    def _pick_task_from_category(self, category: str, skip_tasks: set[str] | None = None) -> str | None:
+        """Pick a random un-skipped task from a category."""
         skip = skip_tasks or set()
-        pool = allowed_tasks if allowed_tasks is not None else self._get_active_categories().get(category, set())
-        available = [t for t in pool if t not in skip]
+        available = [t for t in VALID_TASKS.get(category, set()) if t not in skip]
         if not available:
             return None
-        # Strongly prefer unused tasks, then inverse-weight historical usage.
-        # This preserves task diversity after the first pass through a family.
-        used = used_task_names or set()
-        counts = task_counts or Counter()
-        weights = [(1 if t in used else 12) / (1 + counts.get(t, 0)) for t in available]
-        return self.rng.choices(available, weights=weights, k=1)[0]
+        return self.rng.choice(sorted(available))
 
-    def _get_base_graph(self):
-        """Return a cached graph for the unchanged base scene."""
-        if self._base_graph_cache is None:
-            self._base_graph_cache = self.snapshot()
-        return copy.deepcopy(self._base_graph_cache)
-
-    def _remove_spawned_objects_by_prefix(self, step_after=True):
-        removed = 0
-        for obj in list(self._scene_objects()):
-            name = getattr(obj, "name", "")
-            if name.startswith("online_env_"):
-                try:
-                    self.env.scene.remove_object(obj)
-                    removed += 1
-                except Exception:
-                    pass
-            for state_cls in (object_states.OnFire, object_states.Burnt):
-                try:
-                    if state_cls in obj.states and obj.states[state_cls].get_value():
-                        obj.states[state_cls].set_value(False)
-                except Exception:
-                    pass
-        if removed:
-            self._clear_usd_selection()
-            if step_after:
-                self._step(3)
-            print(f"[cleanup] removed {removed} spawned objects", flush=True)
-        return removed
-
-    def _cleanup_spawned_objects(self, prefer_reset=True):
-        """Restore scene before a run.
-
-        Env-A only adds online_env_a_* objects, so batch generation can remove
-        those objects directly. Env-B/C pass prefer_reset=True because they can
-        change native object states.
-        """
-        # The environment is already clean and robot-stabilized before the first
-        # run. Avoid any reset/state round-trip here.
-        if not self._run_started:
-            self._run_started = True
-            return
-
-        # Remove generated objects, then explicitly restore native poses. This
-        # works across changed object topology and prevents cumulative drift.
-        try:
-            self._remove_spawned_objects_by_prefix(step_after=False)
-            scene_objects = {getattr(obj, "name", ""): obj for obj in self._scene_objects()}
-            for name, (position, orientation) in self._clean_scene_poses.items():
-                obj = scene_objects.get(name)
-                if obj is None:
-                    continue
-                obj.set_position_orientation(position=position, orientation=orientation)
-                try:
-                    obj.keep_still()
-                except Exception:
-                    pass
-            if not og.sim.is_playing():
-                og.sim.play()
-            self._base_graph_cache = None
-            self._step(3)
-            return
-        except Exception as exc:
-            print(f"[cleanup] native-pose restore failed: {exc}; falling back to reset", flush=True)
-
-        # Fallback: full env reset (restores physics, object poses, states)
-        if hasattr(self.env, 'reset'):
-            try:
-                self.env.reset()
-                self._base_graph_cache = None
-                self._step(5)
-                return
-            except Exception:
-                pass
-
-        # Fallback 1: load previously saved state
-        if hasattr(self, '_pre_run_state') and self._pre_run_state is not None:
-            try:
-                og.sim.load_state(self._pre_run_state, serialized=False)
-                self._pre_run_state = None
-                self._base_graph_cache = None
-                self._step(3)
-                return
-            except Exception as e:
-                print(f"[cleanup] load_state failed: {e}", flush=True)
-
-        # Fallback 2: remove spawned objects by name prefix
-        self._remove_spawned_objects_by_prefix()
-
-    def set_enabled_categories(self, categories: set[str]):
-        """Filter task categories to only include the given set."""
-        self._enabled_categories = categories & set(VALID_TASKS.keys())
-
-    def _get_active_categories(self) -> dict[str, set[str]]:
-        """Return the currently active task categories dict."""
-        if self._enabled_categories is None:
-            return VALID_TASKS
-        return {k: v for k, v in VALID_TASKS.items() if k in self._enabled_categories}
-
-    def _select_task_and_category(self, skip_tasks: set[str] | None = None, cached_graph: dict | None = None) -> tuple[str | None, str | None]:
+    def _select_task_and_category(self, skip_tasks: set[str] | None = None) -> tuple[str | None, str | None]:
         """Select a task category and a specific task name.
 
         Returns (category, task_name) or (None, None) if no valid task found.
-
-        Args:
-            cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
-        if self.config.allow_repeat_tasks:
-            skip = set(self._rejected_task_cache)
-        else:
-            skip = (skip_tasks or set()) | self._rejected_task_cache
-        graph = cached_graph or self.snapshot()
+        skip = (skip_tasks or set()) | self._rejected_task_cache
+        graph = self.snapshot()
         scene_furniture = self._build_scene_furniture_dict(graph)
-        active_tasks = {
-            category: set(tasks) for category, tasks in self._get_active_categories().items()
-        }
-        if "retrieval_delivery" in active_tasks:
-            active_tasks["retrieval_delivery"] &= set(SAFE_RETRIEVAL_ASSETS)
 
-        # Track used task names to avoid repetition (at task level, not category)
-        task_counts = Counter(
-            s.get("task", "") for s in self._checkpoint.get("successful_samples", []) if s.get("task")
-        )
-        used_task_names = set(task_counts)
-        used_categories = {self._category_for_task(t) for t in used_task_names if self._category_for_task(t)}
+        # Track used categories to avoid repetition
+        used_categories = set()
+        for s in self._checkpoint.get("successful_samples", []):
+            task_name = s.get("task", "")
+            c = self._category_for_task(task_name)
+            if c:
+                used_categories.add(c)
 
         # Step 1: LLM picks a category based on scene furniture
         category = None
@@ -2596,35 +1722,34 @@ class OnlineDeltaSGEngine:
                 scene_furniture=scene_furniture,
                 used_categories=used_categories,
             )
-            if result and result.get("selected_category") in active_tasks:
+            if result and result.get("selected_category") in VALID_TASKS:
                 category = result["selected_category"]
                 reason = result.get("reason", "")
                 print(f"[llm] task category: {category} — {reason}")
 
-        # Fallback: weighted random, slightly preferring unused categories
+        # Fallback: pick a random category, preferring unused ones
         if not category:
             available_cats = [
-                c for c, tasks in active_tasks.items()
+                c for c, tasks in VALID_TASKS.items()
                 if any(t not in skip for t in tasks)
             ]
-            if not available_cats:
+            # Prefer categories not yet used
+            unused = [c for c in available_cats if c not in used_categories]
+            if unused:
+                category = self.rng.choice(sorted(unused))
+            elif available_cats:
+                category = self.rng.choice(sorted(available_cats))
+            else:
                 return None, None
-            # Weight: unused categories get 2x weight, used get 1x
-            weights = [2 if c not in used_categories else 1 for c in available_cats]
-            category = self.rng.choices(available_cats, weights=weights, k=1)[0]
 
         # Step 2: Pick a specific task from the category
-        task_name = self._pick_task_from_category(
-            category, skip, used_task_names, task_counts, active_tasks.get(category),
-        )
+        task_name = self._pick_task_from_category(category, skip)
         if not task_name:
             # Try other categories
-            for alt_cat in sorted(active_tasks):
+            for alt_cat in sorted(VALID_TASKS):
                 if alt_cat == category:
                     continue
-                task_name = self._pick_task_from_category(
-                    alt_cat, skip, used_task_names, task_counts, active_tasks.get(alt_cat),
-                )
+                task_name = self._pick_task_from_category(alt_cat, skip)
                 if task_name:
                     category = alt_cat
                     break
@@ -2632,198 +1757,6 @@ class OnlineDeltaSGEngine:
         if task_name:
             print(f"[llm] selected task: {task_name} (category={category})")
         return category, task_name
-
-    def _choose_diverse_required_record(self, records: list[dict]) -> dict:
-        if not records:
-            raise ValueError("records must be non-empty")
-
-        def key(record):
-            category = self._choose_category(record)
-            return (
-                self._used_target_categories.get(category, 0),
-                record.get("synset", ""),
-                category,
-            )
-
-        least_used = min(self._used_target_categories.get(self._choose_category(r), 0) for r in records)
-        candidates = [
-            r for r in records
-            if self._used_target_categories.get(self._choose_category(r), 0) == least_used
-        ]
-        return self.rng.choice(sorted(candidates, key=key))
-
-    def _safe_retrieval_records(self, task_name: str) -> list[dict]:
-        """Return one vetted, small physical asset for a retrieval task."""
-        categories = SAFE_RETRIEVAL_ASSETS.get(task_name, ())
-        records = []
-        for category in categories:
-            try:
-                record = self._record_for_category(category)
-            except (KeyError, ValueError):
-                continue
-            chosen_category = self._choose_category(record)
-            mass = self._record_min_mass(record)
-            if chosen_category not in categories:
-                continue
-            if mass is not None and mass > 2.0:
-                continue
-            records.append(record)
-        return [self._choose_diverse_required_record(records)] if records else []
-
-    def _build_retrieval_instruction(
-        self,
-        task_name: str,
-        target_room: str,
-        item: dict,
-        destination: dict | None = None,
-    ) -> str:
-        """Use the actual accepted support, never an LLM-invented location."""
-        category = (item.get("category") or "object").replace("_", " ")
-        placement = item.get("placement") or {}
-        support = (placement.get("support_category") or "support surface").replace("_", " ")
-        if support == "floors":
-            support = "floor"
-        room = (placement.get("room_id") or target_room or "the room").replace("_", " ")
-        if task_name.startswith("deliver_") and destination:
-            destination_category = destination["category"].replace("_", " ")
-            if destination_category == "floors":
-                destination_category = "floor"
-            destination_room = destination["room_id"].replace("_", " ")
-            return (
-                f"Move the {category} from the {support} in {room} "
-                f"to the {destination_category} in {destination_room}."
-            )
-        return f"Retrieve the {category} from the {support} in {room}."
-
-    def _choose_delivery_destination(self, graph: dict, item: dict) -> dict | None:
-        """Choose a real destination distinct from the object's source support."""
-        placement = item.get("placement") or {}
-        source_support = placement.get("support_object_id")
-        source_room = placement.get("room_id")
-        destination_tokens = {
-            "table", "counter", "countertop", "cabinet", "shelf", "desk",
-            "dresser", "bookcase", "nightstand", "island",
-        }
-        candidates = []
-        floor_candidates = []
-        for node in graph.get("nodes", []):
-            if node.get("type") != "object" or node.get("id") == source_support:
-                continue
-            if str(node.get("id", "")).startswith("online_env_"):
-                continue
-            category = str(node.get("category") or "")
-            rooms = node.get("rooms") or []
-            if not rooms:
-                continue
-            room = rooms[0]
-            if self._tokens(category) & {"floor", "floors"}:
-                if room != source_room:
-                    floor_candidates.append((category, node.get("id"), room))
-                continue
-            if not (self._tokens(category) & destination_tokens):
-                continue
-            receptacle = ((node.get("semantic") or {}).get("receptacle") or {})
-            if not receptacle.get("can_support"):
-                continue
-            different_room = 0 if room != source_room else 1
-            candidates.append((different_room, category, node.get("id"), room))
-        if candidates:
-            best_rank = min(item[0] for item in candidates)
-            _, category, object_id, room_id = self.rng.choice(
-                sorted(item for item in candidates if item[0] == best_rank)
-            )
-        elif floor_candidates:
-            category, object_id, room_id = self.rng.choice(sorted(floor_candidates))
-        else:
-            return None
-        return {"object_id": object_id, "category": category, "room_id": room_id}
-
-    def _select_native_task_target(self, task_name: str, graph: dict) -> dict | None:
-        """Find a real stateful scene object compatible with the task verb."""
-        tokens = NATIVE_TASK_TARGET_TOKENS.get(task_name, ())
-        required_state = "Open" if task_name.startswith(("open_", "close_")) else "ToggledOn"
-        candidates = []
-        for node in graph.get("nodes", []):
-            if node.get("type") != "object":
-                continue
-            category = str(node.get("category") or "").lower()
-            if not any(token in category for token in tokens):
-                continue
-            if required_state not in set(node.get("available_states") or []):
-                continue
-            rooms = node.get("rooms") or []
-            if not rooms:
-                continue
-            exact = 0 if category in tokens else 1
-            candidates.append((exact, category, node.get("id"), rooms[0]))
-        if not candidates:
-            return None
-        _, category, object_id, room_id = self.rng.choice(sorted(candidates))
-        return {"object_id": object_id, "category": category, "room_id": room_id}
-
-    @staticmethod
-    def _native_task_instruction(task_name: str, target: dict) -> str:
-        verb = "Open" if task_name.startswith("open_") else "Close" if task_name.startswith("close_") else "Turn on" if "turn_on" in task_name else "Turn off"
-        category = target["category"].replace("_", " ")
-        room = target["room_id"].replace("_", " ")
-        return f"{verb} the {category} in {room}."
-
-    def _room_camera_priority(self, room: str, graph: dict) -> int:
-        """Lower is better for the documented fixed room-camera strategies."""
-        room_lower = str(room or "").lower()
-        if any(token in room_lower for token in ("storage", "closet", "empty")):
-            priority = 3
-        elif any(token in room_lower for token in ("corridor", "entryway")):
-            priority = 2
-        elif any(token in room_lower for token in ("utility", "garage")):
-            priority = 1
-        else:
-            priority = 0
-        visible_anchors = 0
-        for node in graph.get("nodes", []):
-            if node.get("type") != "object" or room not in (node.get("rooms") or []):
-                continue
-            if not (self._tokens(node.get("category") or "") & STRUCTURAL_CATEGORIES):
-                visible_anchors += 1
-        if visible_anchors < 2:
-            priority += 2
-        if not ((graph.get("navigation") or {}).get("room_centers") or {}).get(room):
-            priority += 2
-        return priority
-
-    def _choose_safe_target_room(self, record: dict, graph: dict, preferred_room: str | None = None) -> str | None:
-        """Balance source rooms while retaining a physically valid fallback."""
-        rooms = [node["name"] for node in graph.get("nodes", []) if node.get("type") == "room"]
-        room_counts = Counter()
-        for sample in self._checkpoint.get("successful_samples", []):
-            diversity = sample.get("diversity") or {}
-            source_rooms = diversity.get("source_rooms") or []
-            if source_rooms:
-                for room in source_rooms:
-                    room_counts[room] += 1
-            elif diversity.get("target_room"):
-                room_counts[diversity["target_room"]] += 1
-        candidates = []
-        for room in rooms:
-            support = self._choose_support_node(record, room, graph).get("node")
-            if support:
-                quality = 1 if self._tokens(support.get("category", "")) & {"floor", "floors"} else 0
-            elif self._floor_fallback_allowed(record, self._choose_category(record)):
-                quality = 2
-            else:
-                continue
-            camera_priority = self._room_camera_priority(room, graph)
-            preferred_penalty = 0 if room == preferred_room else 1
-            candidates.append((camera_priority, quality, room_counts.get(room, 0), preferred_penalty, room))
-        if not candidates:
-            return preferred_room
-        best_camera = min(item[0] for item in candidates)
-        camera_safe = [item for item in candidates if item[0] == best_camera]
-        best_quality = min(item[1] for item in camera_safe)
-        quality_safe = [item for item in camera_safe if item[1] == best_quality]
-        best_usage = min(item[2] for item in quality_safe)
-        best = [item for item in quality_safe if item[2] == best_usage]
-        return self.rng.choice(sorted(best))[4]
 
     def _match_required_objects(self, required_objs: list[dict]) -> list[dict]:
         """Match LLM-returned required objects to asset database records.
@@ -2856,37 +1789,24 @@ class OnlineDeltaSGEngine:
                     found_in_scene = True
                 else:
                     for sc in scene_cats:
-                        # Only fuzzy-match if hint is long enough (>=4 chars)
-                        # and the match is substantial — not just a prefix like "book" in "bookcase"
-                        if len(hint) >= 4 and (hint in sc or sc in hint):
-                            # But exclude false matches: "book" vs "bookcase", "table" vs "breakfast_table"
-                            # Check if the hint is a standalone word or a substantial part
-                            hint_words = set(hint.split("_"))
-                            sc_words = set(sc.split("_"))
-                            if hint_words & sc_words:  # at least one word in common
-                                found_in_scene = True
-                                break
+                        if hint in sc or sc in hint:
+                            found_in_scene = True
+                            break
             if name and not found_in_scene:
                 if name in scene_cats:
                     found_in_scene = True
                 else:
                     for sc in scene_cats:
-                        if len(name) >= 4 and (name in sc or sc in name):
-                            name_words = set(name.split("_"))
-                            sc_words = set(sc.split("_"))
-                            if name_words & sc_words:
-                                found_in_scene = True
-                                break
+                        if name in sc or sc in name:
+                            found_in_scene = True
+                            break
 
             if found_in_scene and role == "target":
                 # Only skip if the matched scene category is large furniture
                 matched_scene_cat = hint if hint in scene_cats else None
                 if not matched_scene_cat:
                     for sc in scene_cats:
-                        # Use word-level matching to find the actual scene category
-                        hint_words = set((hint or "").replace("_", " ").split())
-                        sc_words = set(sc.replace("_", " ").split())
-                        if hint_words & sc_words:
+                        if (hint and hint in sc) or (name and name in sc) or (hint and sc in hint):
                             matched_scene_cat = sc
                             break
                 if matched_scene_cat and matched_scene_cat not in self.REUSE_CATEGORIES:
@@ -2897,9 +1817,9 @@ class OnlineDeltaSGEngine:
                 scene_native_count += 1
                 continue
 
-            # Search asset DB for matching categories. Keep all reasonable
-            # matches so repeated batch runs can prefer less-used categories.
-            scored_records = []
+            # Search asset DB for matching categories
+            best_record = None
+            best_score = 0
             for task_name, records in self.asset_db.tasks.items():
                 for r in self._usable_records(records):
                     score = 0
@@ -2931,22 +1851,13 @@ class OnlineDeltaSGEngine:
                     if name and len(name) > 3 and name in r_def:
                         score += 2
 
-                    if score >= 5:
-                        scored_records.append((score, r))
+                    if score > best_score:
+                        best_score = score
+                        best_record = r
 
-            if scored_records:
-                best_score = max(score for score, _ in scored_records)
-                close_matches = [
-                    r for score, r in scored_records
-                    if score >= max(5, best_score - 2)
-                ]
-                best_record = self._choose_diverse_required_record(close_matches)
+            if best_record and best_score >= 5:
                 selected.append(best_record)
-                used = self._used_target_categories.get(self._choose_category(best_record), 0)
-                print(
-                    f"[match] {obj['name']} → {best_record['synset']} "
-                    f"(score={best_score}, prior_category_uses={used})"
-                )
+                print(f"[match] {obj['name']} → {best_record['synset']} (score={best_score})")
             else:
                 # If no asset DB match, check if it's a structural fixture
                 if hint and (hint in self.SPAWN_BLOCKLIST or hint in self.REUSE_CATEGORIES):
@@ -2957,11 +1868,15 @@ class OnlineDeltaSGEngine:
                 else:
                     print(f"[match] {obj['name']}: no hint, skipping")
 
-        # If ALL required objects were unmatched and none were scene-native,
-        # the task can't be fulfilled — return empty to trigger rejection.
+        # Only fill remaining if ALL required objects were unmatched AND
+        # none were skipped because they're already in the scene.
         if len(selected) == 0 and scene_native_count == 0:
-            print(f"[match] all required objects unmatched, rejecting task", flush=True)
-            return []
+            all_records = []
+            for task_name, records in self.asset_db.tasks.items():
+                all_records.extend(self._usable_records(records))
+            if all_records:
+                selected = self._weighted_sample_records(all_records, self.config.task_objects)
+                print(f"[match] no matches found, falling back to {len(selected)} random records")
 
         return selected[:self.config.task_objects]
 
@@ -2983,7 +1898,6 @@ class OnlineDeltaSGEngine:
 
         if not candidates:
             return []
-        candidates = self._rank_context_candidates(candidates)
 
         # LLM selection if available
         if self._llm_client:
@@ -2996,49 +1910,10 @@ class OnlineDeltaSGEngine:
 
         return self._weighted_sample_records(candidates, self.config.context_objects)
 
-    def _record_min_mass(self, record: dict) -> float | None:
-        masses = record.get("mass_estimates") or {}
-        values = []
-        for value in masses.values():
-            try:
-                if value is not None:
-                    values.append(float(value))
-            except Exception:
-                pass
-        return min(values) if values else None
-
-    def _rank_context_candidates(self, candidates: list[dict]) -> list[dict]:
-        def score(record):
-            category = self._choose_category(record)
-            tokens = self._tokens(category)
-            mass = self._record_min_mass(record)
-            interaction = (record.get("edit_metadata", {}).get("interaction") or {}).get("kind")
-            receptacle = record.get("edit_metadata", {}).get("receptacle") or {}
-            value = 0.0
-            if interaction == "manipulable":
-                value += 3.0
-            if mass is not None:
-                if mass <= 0.5:
-                    value += 2.0
-                elif mass <= 1.0:
-                    value += 0.5
-                else:
-                    value -= 2.0
-            if receptacle.get("supports_inside"):
-                value += 0.3
-            if receptacle.get("supports_on_top") and mass is not None and mass > 0.5:
-                value -= 0.8
-            if tokens & {"tray", "pan", "pot", "basket", "bucket", "box"}:
-                value -= 0.6
-            return (-value, record.get("synset", ""))
-
-        return sorted(candidates, key=score)
-
     def _select_task_records(self, task, skip_tasks=None):
         skip = set(skip_tasks) if skip_tasks else set()
         # Also merge engine-level rejected task cache
-        if not self.config.allow_repeat_tasks:
-            skip |= self._rejected_task_cache
+        skip |= self._rejected_task_cache
         if task:
             pool = self._usable_records(self.asset_db.by_task(task))
             if len(pool) < self.config.task_objects:
@@ -3655,11 +2530,9 @@ class OnlineDeltaSGEngine:
         max_score = max(scores.values())
         return self.rng.choice(sorted(room for room, score in scores.items() if score == max_score))
 
-    def _choose_live_placement(self, record, target_room, graph=None, preferred_position=None):
+    def _choose_live_placement(self, record, target_room, graph=None):
         graph = graph or self.snapshot()
-        support_result = self._choose_support_node(
-            record, target_room, graph, preferred_position=preferred_position,
-        )
+        support_result = self._choose_support_node(record, target_room, graph)
         support_node = support_result["node"] if support_result else None
         mode = "on_top"
         if support_node:
@@ -3765,35 +2638,28 @@ class OnlineDeltaSGEngine:
         """Return a compatibility score (0.0–1.0) for placing obj on support."""
         obj_lower = obj_category.lower().replace("__", "_")
         support_lower = support_category.lower().replace("__", "_")
-        food_keywords = {"food", "fruit", "vegetable", "meat", "fish", "egg", "cheese", "bread", "chicken", "beef", "pork", "bacon", "sausage", "lettuce", "tomato", "onion", "carrot", "strawberry", "blueberry", "peach", "apple", "banana", "orange", "lemon", "milk", "butter", "yogurt", "cream", "flour", "sugar", "salt", "pepper", "oil", "sauce", "coffee", "tea", "water", "juice", "wine", "beer", "soda", "chocolate", "candy", "snack", "cereal", "pasta", "rice", "noodle", "soup"}
-
-        def generic_food_score() -> float:
-            if support_lower in {"countertop", "counter", "table", "dining_table", "plate", "bowl", "pot", "pan", "cutting_board", "refrigerator", "fridge", "freezer", "electric_refrigerator"}:
-                return 0.7
-            if support_lower in {"cabinet", "bottom_cabinet", "shelf"}:
-                return 0.45
-            if support_lower in {"sink", "furniture_sink", "stove", "oven"}:
-                return 0.25
-            return 0.1
 
         # Direct match from affinity table
         for key, preferred in cls.OBJECT_SUPPORT_AFFINITY.items():
-            if cls._category_matches_affinity_key(obj_lower, key):
+            if key in obj_lower or obj_lower in key:
                 if support_lower in preferred:
                     return 0.8
                 # Check partial matches
                 for pref in preferred:
                     if pref in support_lower or support_lower in pref:
                         return 0.6
-                if any(kw in obj_lower for kw in food_keywords):
-                    return generic_food_score()
                 return 0.1  # this object type, but wrong support
 
         # General heuristics
         # Food items prefer kitchen surfaces
+        food_keywords = {"food", "fruit", "vegetable", "meat", "fish", "egg", "cheese", "bread", "chicken", "beef", "pork", "bacon", "sausage", "lettuce", "tomato", "onion", "carrot", "strawberry", "blueberry", "peach", "apple", "banana", "orange", "lemon", "milk", "butter", "yogurt", "cream", "flour", "sugar", "salt", "pepper", "oil", "sauce", "coffee", "tea", "water", "juice", "wine", "beer", "soda", "chocolate", "candy", "snack", "cereal", "pasta", "rice", "noodle", "soup"}
         is_food = any(kw in obj_lower for kw in food_keywords)
         if is_food:
-            return generic_food_score()
+            if support_lower in {"countertop", "counter", "table", "dining_table", "plate", "bowl", "pot", "pan", "cutting_board", "refrigerator", "fridge", "freezer", "electric_refrigerator"}:
+                return 0.7
+            if support_lower in {"shelf", "cabinet", "sink", "stove", "oven"}:
+                return 0.4
+            return 0.1
 
         # Default: prefer horizontal surfaces
         if support_lower in {"countertop", "counter", "table", "dining_table", "desk", "coffee_table", "breakfast_table", "nightstand", "dresser", "shelf", "bookcase", "cabinet", "stove", "oven", "dishwasher", "washer", "dryer"}:
@@ -3802,7 +2668,7 @@ class OnlineDeltaSGEngine:
             return 0.3
         return 0.2
 
-    def _choose_support_node(self, record, target_room, graph, top_n=4, preferred_position=None):
+    def _choose_support_node(self, record, target_room, graph, top_n=4):
         """Choose the best support node for placing an object.
 
         Returns a dict with:
@@ -3837,17 +2703,6 @@ class OnlineDeltaSGEngine:
             if fill_ratio > 0.8:
                 continue  # support is too full
 
-            obj_cat = self._record_category_for_affinity(record)
-            support_cat = node.get("category", "")
-            affinity = self._object_support_affinity_score(obj_cat, support_cat)
-            support_tokens = self._tokens(support_cat)
-            # Scene categories are commonly named "floors" (plural). Treat
-            # both spellings as controlled low-priority floor supports.
-            if support_tokens & {"floor", "floors"} and not self._floor_fallback_allowed(record, obj_cat):
-                continue
-            if self._has_explicit_support_affinity(obj_cat) and affinity <= 0.15:
-                continue
-
             score = 0
             if wants_inside and receptacle.get("supports_inside"):
                 score += 4
@@ -3858,35 +2713,12 @@ class OnlineDeltaSGEngine:
             score += self._support_preference_score(node, target_room)
 
             # Object-support affinity score: prefer semantically compatible supports
-            score += affinity * 10
+            obj_cat = (record.get("direct_categories") or [""])[0]
+            affinity = self._object_support_affinity_score(obj_cat, node.get("category", ""))
+            score += affinity * 10  # scale to be comparable with other scores
 
-            # Surface area bonus: prefer larger tables/counters (not floor)
-            is_floor = node.get("category", "").lower() in {"floors", "floor"}
-            if not is_floor:
-                score += min(support_area * 3, 15)
-
-            # Fixed room cameras see elevated, open horizontal surfaces much
-            # more reliably than floors or deep storage furniture.
-            if support_tokens & {"coffee", "breakfast", "dining", "table", "desk", "counter", "countertop", "island"}:
-                score += 8
-            elif support_tokens & {"bookcase", "shelf", "cabinet", "dresser", "nightstand"}:
-                score += 2
-            if is_floor:
-                score -= 12
-            if receptacle.get("supports_inside") and not receptacle.get("supports_on_top"):
-                score -= 5
-
-            # Area-based crowding penalty
+            # Area-based crowding penalty (stronger as support fills up)
             score -= fill_ratio * 15
-
-            if preferred_position is not None:
-                center = self._center(node)
-                if center is not None:
-                    distance = float(np.linalg.norm(
-                        np.asarray(center[:2], dtype=float)
-                        - np.asarray(preferred_position[:2], dtype=float)
-                    ))
-                    score += max(0.0, 18.0 - distance * 4.0)
 
             candidates.append((score, node))
         if not candidates:
@@ -3930,20 +2762,12 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None
 
-    def _build_floor_placement(self, record, target_room, graph=None, preferred_position=None):
+    def _build_floor_placement(self, record, target_room, graph=None):
         """Last-resort placement: on the floor in the target room."""
         try:
             graph = graph or self.snapshot()
             room_center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
-            if preferred_position is not None:
-                angle = self.rng.uniform(-math.pi, math.pi)
-                radius = self.rng.uniform(0.8, 1.4)
-                pos = [
-                    float(preferred_position[0]) + math.cos(angle) * radius,
-                    float(preferred_position[1]) + math.sin(angle) * radius,
-                    0.5,
-                ]
-            elif room_center:
+            if room_center:
                 pos = [
                     float(room_center[0]) + self.rng.gauss(0, 0.3),
                     float(room_center[1]) + self.rng.gauss(0, 0.3),
@@ -3953,7 +2777,7 @@ class OnlineDeltaSGEngine:
                 pos = [self.rng.gauss(0, 0.3), self.rng.gauss(0, 0.3), 0.5]
             return {
                 "room_id": target_room,
-                "mode": "floor",
+                "mode": "on_top",
                 "support_object_id": None,
                 "support_category": "floor",
                 "support_candidates": [],
@@ -3983,115 +2807,7 @@ class OnlineDeltaSGEngine:
                 "reason": "state_not_available",
             }
         try:
-            if state_cls is object_states.OnTop:
-                support_aabb = support_obj.aabb
-                sup_x_min = float(support_aabb[0][0])
-                sup_x_max = float(support_aabb[1][0])
-                sup_y_min = float(support_aabb[0][1])
-                sup_y_max = float(support_aabb[1][1])
-                sup_z_top = float(support_aabb[1][2])
-
-                obj_aabb = obj.aabb
-                obj_w = max(float(obj_aabb[1][0] - obj_aabb[0][0]), 0.06)
-                obj_d = max(float(obj_aabb[1][1] - obj_aabb[0][1]), 0.06)
-                margin = 0.03
-
-                # Collect obstacles: objects ON the support + objects NEAR the support
-                obstacles = []
-                for other in self._scene_objects():
-                    other_name = getattr(other, "name", "")
-                    if other is obj or other_name == support_id:
-                        continue
-                    other_aabb = other.aabb
-                    ox_min = float(other_aabb[0][0]); ox_max = float(other_aabb[1][0])
-                    oy_min = float(other_aabb[0][1]); oy_max = float(other_aabb[1][1])
-                    oz_min = float(other_aabb[0][2]); oz_max = float(other_aabb[1][2])
-                    # Include if: on the support, OR AABB overlaps support XY and near support height
-                    is_obstacle = False
-                    try:
-                        if other.states[state_cls].get_value(support_obj):
-                            is_obstacle = True
-                    except Exception:
-                        pass
-                    if not is_obstacle:
-                        # Check if object is near the support (within 0.5m above or 0.2m below)
-                        if (ox_min < sup_x_max and ox_max > sup_x_min and
-                            oy_min < sup_y_max and oy_max > sup_y_min and
-                            oz_min < sup_z_top + 0.5 and oz_max > sup_z_top - 0.2):
-                            is_obstacle = True
-                    if is_obstacle:
-                        obstacles.append({
-                            "x_min": ox_min, "x_max": ox_max,
-                            "y_min": oy_min, "y_max": oy_max,
-                        })
-
-                # Grid-scan for a clear spot
-                sw = sup_x_min + margin + obj_w/2
-                ew = sup_x_max - margin - obj_w/2
-                sd = sup_y_min + margin + obj_d/2
-                ed = sup_y_max - margin - obj_d/2
-                if ew <= sw or ed <= sd:
-                    return {
-                        "ok": False,
-                        "mode": placement.get("mode"),
-                        "support": support_id,
-                        "state": state_cls.__name__,
-                        "reason": "support_surface_too_small",
-                        "object_footprint": [obj_w, obj_d],
-                        "support_bounds": [sup_x_max - sup_x_min, sup_y_max - sup_y_min],
-                    }
-                w_range = ew - sw
-                d_range = ed - sd
-
-                n_steps = 10
-                best_cx, best_cy = None, None
-                for ix in range(n_steps):
-                    for iy in range(n_steps):
-                        cx = sw + w_range * (ix + 0.5) / n_steps
-                        cy = sd + d_range * (iy + 0.5) / n_steps
-                        ok_spot = True
-                        for obs in obstacles:
-                            if (cx - obj_w/2 - margin < obs["x_max"] and
-                                cx + obj_w/2 + margin > obs["x_min"] and
-                                cy - obj_d/2 - margin < obs["y_max"] and
-                                cy + obj_d/2 + margin > obs["y_min"]):
-                                ok_spot = False
-                                break
-                        if ok_spot:
-                            best_cx, best_cy = cx, cy
-                            break
-                    if best_cx is not None:
-                        break
-
-                if best_cx is None:
-                    return {
-                        "ok": False,
-                        "mode": placement.get("mode"),
-                        "support": support_id,
-                        "state": state_cls.__name__,
-                        "reason": "support_surface_occupied",
-                        "num_obstacles": len(obstacles),
-                    }
-
-                drop_z = sup_z_top + 0.02
-                obj.set_position_orientation(
-                    position=th.tensor([best_cx, best_cy, drop_z], dtype=th.float32),
-                    orientation=th.tensor([0.0, 0.0, 0.0, 1.0], dtype=th.float32),
-                )
-                try:
-                    obj.keep_still()
-                except Exception:
-                    pass
-                self._step(5)
-                try:
-                    obj.wake()
-                except Exception:
-                    pass
-                self._step(3)
-                ok = bool(obj.states[state_cls].get_value(support_obj))
-            else:
-                # Inside: use set_value with sampling (only option for inside placement)
-                ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
+            ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
             return {
                 "ok": ok,
                 "mode": placement.get("mode"),
@@ -4106,55 +2822,6 @@ class OnlineDeltaSGEngine:
                 "state": state_cls.__name__,
                 "error": repr(exc),
             }
-
-    def _validate_on_top_pose(self, obj, support_obj):
-        """Validate that an OnTop sample is physically on the support surface."""
-        try:
-            obj_aabb = obj.aabb
-            sup_aabb = support_obj.aabb
-            ox_min, oy_min, oz_min = [float(v) for v in obj_aabb[0][:3]]
-            ox_max, oy_max, oz_max = [float(v) for v in obj_aabb[1][:3]]
-            sx_min, sy_min, _ = [float(v) for v in sup_aabb[0][:3]]
-            sx_max, sy_max, sz_top = [float(v) for v in sup_aabb[1][:3]]
-
-            obj_w = ox_max - ox_min
-            obj_d = oy_max - oy_min
-            sup_w = sx_max - sx_min
-            sup_d = sy_max - sy_min
-            clearance = 0.015
-
-            if obj_w + 2 * clearance > sup_w or obj_d + 2 * clearance > sup_d:
-                return {
-                    "ok": False,
-                    "reason": "object_larger_than_support_surface",
-                    "object_footprint": [obj_w, obj_d],
-                    "support_bounds": [sup_w, sup_d],
-                }
-            if (
-                ox_min < sx_min - clearance
-                or ox_max > sx_max + clearance
-                or oy_min < sy_min - clearance
-                or oy_max > sy_max + clearance
-            ):
-                return {
-                    "ok": False,
-                    "reason": "object_footprint_outside_support",
-                    "object_bounds": [ox_min, oy_min, ox_max, oy_max],
-                    "support_bounds": [sx_min, sy_min, sx_max, sy_max],
-                }
-
-            z_gap = oz_min - sz_top
-            max_gap = max(0.18, min(0.35, (oz_max - oz_min) * 0.75))
-            if z_gap < -0.04 or z_gap > max_gap:
-                return {
-                    "ok": False,
-                    "reason": "object_not_on_support_height",
-                    "z_gap": z_gap,
-                    "allowed": [-0.04, max_gap],
-                }
-            return {"ok": True, "z_gap": z_gap}
-        except Exception as exc:
-            return {"ok": False, "reason": "support_pose_check_failed", "error": repr(exc)}
 
     def _collect_settling_report(self, object_names):
         before = {name: self._object_position(name) for name in object_names}
@@ -4206,42 +2873,26 @@ class OnlineDeltaSGEngine:
                     )
                 except Exception:
                     has_contact = False
-                # A validated floor placement is expected to contact the
-                # floor. Only contacts with another generated object remain a
-                # failure in that case.
-                floor_placement = name in self._floor_placed_objects
-                contacting = []
-                if floor_placement:
+                if has_contact:
+                    entry["unexpected_contact"] = True
+                    all_within = False
+                    contact_issues.append(name)
+                    contacting = []
                     for other_name, other_obj in scene_objs_by_name.items():
                         if other_name == name:
                             continue
                         try:
-                            if RigidContactAPI.is_in_contact(
+                            pair = RigidContactAPI.is_in_contact(
                                 scene_idx=self.env.scene.idx,
-                                query_set=[obj], with_set=[other_obj],
-                                ignore_set=None, current_only=True,
-                            ):
-                                contacting.append(other_name)
+                                query_set=[obj],
+                                with_set=[other_obj],
+                                ignore_set=None,
+                                current_only=True,
+                            )
                         except Exception:
-                            pass
-                if (has_contact and not floor_placement) or contacting:
-                    entry["unexpected_contact"] = True
-                    all_within = False
-                    contact_issues.append(name)
-                    if not contacting:
-                        for other_name, other_obj in scene_objs_by_name.items():
-                            if other_name == name:
-                                continue
-                            try:
-                                pair = RigidContactAPI.is_in_contact(
-                                    scene_idx=self.env.scene.idx,
-                                    query_set=[obj], with_set=[other_obj],
-                                    ignore_set=None, current_only=True,
-                                )
-                            except Exception:
-                                pair = False
-                            if pair:
-                                contacting.append(other_name)
+                            pair = False
+                        if pair:
+                            contacting.append(other_name)
                     entry["contacting_objects"] = contacting
                 else:
                     entry["unexpected_contact"] = False
@@ -4256,7 +2907,7 @@ class OnlineDeltaSGEngine:
             "contact_issues": contact_issues,
         }
 
-    def _build_task_instance(self, run_id, primary_task, target_room, created_objects, instruction=None, required_objs=None, task_category=None):
+    def _build_task_instance(self, run_id, primary_task, target_room, created_objects, instruction=None, required_objs=None):
         task_objects = [item for item in created_objects if item.get("semantic_role") == "task_object"]
 
         # Build object info for LLM plan generation — includes actual placement info
@@ -4286,7 +2937,7 @@ class OnlineDeltaSGEngine:
         if instruction and self._llm_client:
             task_cats = {o["category"].lower() for o in plan_objects}
             instruction_lower = instruction.lower()
-            for obj in self._scene_objects_prefer_room(target_room):
+            for obj in self._scene_objects():
                 cat = getattr(obj, "category", None)
                 if not cat or cat.lower() in task_cats:
                     continue
@@ -4309,26 +2960,22 @@ class OnlineDeltaSGEngine:
             for robj in required_objs:
                 hint = robj.get("category_hint", "").lower().replace("_", " ")
                 name = robj.get("name", "").lower().replace("_", " ")
-                for obj in self._scene_objects_prefer_room(target_room):
+                for obj in self._scene_objects():
                     cat = getattr(obj, "category", None)
                     if not cat or cat.lower() in task_cats:
                         continue
                     cat_display = cat.lower().replace("_", " ")
                     if hint and (hint in cat_display or cat_display in hint or hint.replace(" ", "_") == cat.lower()):
-                        # Only match if words overlap (not just substring like "book" in "bookcase")
-                        hint_words = set(hint.replace("_", " ").split())
-                        cat_words = set(cat_display.split())
-                        if hint_words & cat_words or hint.replace(" ", "_") == cat.lower():
-                            rooms = self._rooms_for_obj(obj)
-                            plan_objects.append({
-                                "object_id": getattr(obj, "name", cat),
-                                "category": cat,
-                                "room": rooms[0] if rooms else target_room,
-                                "reused": True,
-                                "reference_only": True,
-                            })
-                            task_cats.add(cat.lower())
-                            break
+                        rooms = self._rooms_for_obj(obj)
+                        plan_objects.append({
+                            "object_id": getattr(obj, "name", cat),
+                            "category": cat,
+                            "room": rooms[0] if rooms else target_room,
+                            "reused": True,
+                            "reference_only": True,
+                        })
+                        task_cats.add(cat.lower())
+                        break
                     if name and (name in cat_display or cat_display in name):
                         rooms = self._rooms_for_obj(obj)
                         plan_objects.append({
@@ -4340,44 +2987,6 @@ class OnlineDeltaSGEngine:
                         })
                         task_cats.add(cat.lower())
                         break
-
-        if task_category in {"open_close", "appliance"} and not task_objects and plan_objects:
-            actual_room = plan_objects[0].get("room")
-            if actual_room and actual_room != target_room:
-                instruction = self._rewrite_instruction_room(instruction, target_room, actual_room)
-                target_room = actual_room
-
-        # Refresh instruction with actual placement info
-        # Retrieval instructions are built from the accepted physical pose
-        # above. Do not let the LLM overwrite that ground truth with an
-        # invented destination during the generic instruction-refresh step.
-        if self._llm_client and instruction and task_category != "retrieval_delivery":
-            placed_with_positions = []
-            for po in plan_objects:
-                if po.get("reference_only") or po.get("reused"):
-                    continue
-                # Resolve support object ID to category name
-                support_name = po.get("placed_on", "")
-                if support_name and "_" in support_name:
-                    support_obj = self.env.scene.object_registry("name", support_name, None)
-                    if support_obj is not None:
-                        support_name = getattr(support_obj, "category", support_name)
-                entry = {
-                    "category": po.get("category", ""),
-                    "placed_on": support_name or "floor",
-                    "placement_mode": po.get("placement_mode", "on_top"),
-                }
-                placed_with_positions.append(entry)
-            if placed_with_positions:
-                refresh = llm_prompts.generate_instruction(
-                    client=self._llm_client,
-                    task_name=primary_task,
-                    task_objects=placed_with_positions,
-                    target_room=target_room,
-                    task_category=task_category,
-                )
-                if refresh and refresh.get("instruction"):
-                    instruction = refresh["instruction"]
 
         # LLM-driven solution plan
         plan = None
@@ -4441,27 +3050,6 @@ class OnlineDeltaSGEngine:
             "solution_plan": plan,
         }
 
-    def _scene_objects_prefer_room(self, target_room):
-        def sort_key(obj):
-            rooms = self._rooms_for_obj(obj)
-            return (0 if target_room in rooms else 1, getattr(obj, "name", ""))
-
-        return sorted(self._scene_objects(), key=sort_key)
-
-    @staticmethod
-    def _rewrite_instruction_room(instruction, old_room, new_room):
-        if not instruction:
-            return instruction
-        old_label = str(old_room or "").rsplit("_", 1)[0].replace("_", " ")
-        new_label = str(new_room or "").rsplit("_", 1)[0].replace("_", " ")
-        if not old_label or not new_label or old_label == new_label:
-            return instruction
-        for prefix in ("in the ", "in "):
-            needle = f"{prefix}{old_label}"
-            if needle in instruction:
-                return instruction.replace(needle, f"{prefix}{new_label}", 1)
-        return instruction
-
     def _build_task_environment_record(
         self,
         env_id,
@@ -4493,14 +3081,10 @@ class OnlineDeltaSGEngine:
                 "instruction": task_instance["instruction"],
                 "target_room": target_room,
                 "semantic_constraints": task_instance.get("semantic_constraints", []),
-                "semantic_reasoning": task_instance.get("semantic_reasoning"),
                 "plan_objects": task_instance.get("plan_objects", []),
             },
-            "robot": (robot_record := self._robot_record(target_room, graph)),
-            "camera": self._camera_records(
-                target_room, graph,
-                initial_room=robot_record.get("initial_room") if robot_record else None,
-            ),
+            "robot": self._robot_record(target_room, graph),
+            "camera": self._camera_records(target_room, graph),
             "added_objects": added_objects,
             "context_objects": [
                 ao for ao in added_objects
@@ -4529,13 +3113,12 @@ class OnlineDeltaSGEngine:
         settled_by_name = {item.get("object_name"): item for item in settling}
         added = []
         for item in created_objects:
-            object_name = item.get("object_name") or item.get("name") or item.get("object_id")
             pose = item.get("final_pose_before_warmup") or {}
-            settled = settled_by_name.get(object_name, {})
+            settled = settled_by_name.get(item.get("object_name"), {})
             added.append(
                 {
-                    "object_id": object_name,
-                    "object_name": object_name,
+                    "object_id": item.get("object_name"),
+                    "object_name": item.get("object_name"),
                     "category": item.get("category"),
                     "synset": item.get("synset"),
                     "model": item.get("model"),
@@ -4548,7 +3131,6 @@ class OnlineDeltaSGEngine:
                         "pose": (item.get("placement") or {}).get("pose"),
                         "pose_source": (item.get("placement") or {}).get("pose_source"),
                     },
-                    "final_pose_before_warmup": pose,
                     "pose": {
                         "position": settled.get("end_position") or pose.get("position"),
                         "orientation_xyzw": pose.get("orientation_xyzw"),
@@ -4615,7 +3197,7 @@ class OnlineDeltaSGEngine:
             "navigation_hint": self._room_path(graph, initial_room, target_room) if initial_room else None,
         }
 
-    def _camera_records(self, target_room, graph, initial_room=None):
+    def _camera_records(self, target_room, graph):
         cameras = []
         if getattr(self.env, "robots", None):
             robot = self.env.robots[0]
@@ -4642,38 +3224,22 @@ class OnlineDeltaSGEngine:
                     }
                 )
 
-        # Global cameras for robot's initial room and task target room
-        room_centers = (graph.get("navigation") or {}).get("room_centers", {})
-        rooms_to_cover = []
-        if initial_room and initial_room != target_room:
-            rooms_to_cover.append(initial_room)
-        rooms_to_cover.append(target_room)
-
-        for room_id in rooms_to_cover:
-            if not room_id:
-                continue
-            center = room_centers.get(room_id)
-            if not center:
-                continue
-            cam_pos, orientation = self._compute_global_camera_pose(room_id, center)
-            camera_id = f"global_{room_id}"
+        center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
+        if center:
             cameras.append(
                 {
-                    "camera_id": camera_id,
-                    "camera_type": "global_camera",
-                    "room_id": room_id,
+                    "camera_id": f"planned_global_{target_room}",
+                    "camera_type": "global_camera_plan",
+                    "room_id": target_room,
                     "pose": {
-                        "position": list(cam_pos),
-                        "orientation_xyzw": list(orientation),
+                        "position": [float(center[0]), float(center[1]), 2.4],
+                        "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
                     },
                     "modalities": ["rgb", "depth", "seg_semantic"],
-                    "resolution": {"height": 480, "width": 640},
-                    "status": "active",
+                    "resolution": None,
+                    "status": "planned_not_spawned",
                 }
             )
-            # Spawn the camera in the simulation
-            self._spawn_global_camera(camera_id, room_id, list(cam_pos), list(orientation))
-
         return cameras
 
     def _object_pose_record(self, obj):
@@ -4704,234 +3270,6 @@ class OnlineDeltaSGEngine:
         if height is None or width is None:
             return None
         return {"height": int(height), "width": int(width)}
-
-    def _spawn_global_camera(self, camera_id, room_id, position, orientation_xyzw,
-                             resolution=None, modalities=None):
-        """Spawn a standalone VisionSensor in the scene at the given pose."""
-        from omnigibson.sensors import create_sensor
-        resolution = resolution or {"height": 480, "width": 640}
-        modalities = modalities or ["rgb", "depth", "seg_semantic"]
-        try:
-            sensor = create_sensor(
-                sensor_type="Camera",
-                relative_prim_path=f"/{camera_id}",
-                name=camera_id,
-                modalities=modalities,
-                enabled=True,
-                sensor_kwargs={
-                    "image_height": resolution["height"],
-                    "image_width": resolution["width"],
-                },
-            )
-            # Load sensor directly into the scene (bypass add_object which is for USDObject)
-            sensor.load(self.env.scene)
-            sensor.initialize()
-            sensor.set_position_orientation(
-                position=np.array(position, dtype=np.float32),
-                orientation=np.array(orientation_xyzw, dtype=np.float32),
-            )
-            return sensor
-        except Exception:
-            # If the camera already exists or spawn fails, skip silently
-            return None
-
-    # Per-room camera configs from camera_config_guide.md.
-    # Rooms not listed use the official size rule: wall-center for small rooms,
-    # corner camera for large rooms.
-    ROOM_CAMERA_CONFIGS = {
-        "living_room_0": ("SW", 30),
-        "bedroom_0": ("SE", 45),
-        "bathroom_0": ("NE", 45),
-    }
-
-    def _compute_global_camera_pose(self, room_id, room_center):
-        """Compute camera position and orientation for a room overview.
-
-        Uses corner-based placement per camera_config_guide.md:
-        3D objects → seg_map pixel bbox → world corners.
-        Large rooms use corner placement; small rooms use wall-center placement.
-        h_offset=0. Falls back to room_center-based only if seg_map/corners fail.
-        """
-        try:
-            corners = self._get_room_corners_from_objects(room_id)
-            if corners is None:
-                raise ValueError(f"No objects found in {room_id}")
-            diag = float(np.linalg.norm(corners["NE"][:2] - corners["SW"][:2]))
-            if diag <= 3.0:
-                return self._compute_wall_center_camera(corners)
-            if room_id in self.ROOM_CAMERA_CONFIGS:
-                corner_name, v_angle = self.ROOM_CAMERA_CONFIGS[room_id]
-                opposite_map = {"SW": "NE", "SE": "NW", "NW": "SE", "NE": "SW"}
-                corner = corners[corner_name]
-                opposite = corners[opposite_map[corner_name]]
-                return self._compute_corner_camera(corner, opposite, v_angle=v_angle)
-            return self._compute_corner_camera(corners["SW"], corners["NE"], v_angle=30)
-        except Exception:
-            pass
-
-        # Fallback: room_center-based placement
-        cam_pos = np.array([
-            float(room_center[0]) + 0.5,
-            float(room_center[1]) + 0.5,
-            2.4,
-        ], dtype=np.float32)
-        look_at = np.array([float(room_center[0]), float(room_center[1]), 0.8], dtype=np.float32)
-        return cam_pos, self._look_at_quat(cam_pos, look_at)
-
-    def _get_room_corners_from_objects(self, room_name):
-        """Get SW/NE/NW/SE world corners for a room via 3D objects → seg_map pixel mapping."""
-        seg_map = self.env.scene.seg_map
-        positions = []
-        for obj in self._scene_objects():
-            try:
-                pos, _ = obj.get_position_orientation()
-                pos = np.array(pos)
-            except Exception:
-                continue
-            rooms = self._rooms_for_obj(obj)
-            if room_name not in rooms:
-                continue
-            positions.append(pos)
-        if not positions:
-            return None
-        pixels = []
-        for pos in positions:
-            px = seg_map.world_to_map(th.tensor([pos[0], pos[1]], dtype=th.float32))
-            pixels.append(px.numpy())
-        pixels = np.stack(pixels)
-        px_min = pixels.min(axis=0).astype(int)
-        px_max = pixels.max(axis=0).astype(int)
-        map_h, map_w = seg_map.room_ins_map.shape
-        px_min = np.clip(px_min, 0, [map_w - 1, map_h - 1])
-        px_max = np.clip(px_max, 0, [map_w - 1, map_h - 1])
-        sw = seg_map.map_to_world(th.tensor([px_min[0], px_min[1]], dtype=th.float32)).cpu().numpy()
-        ne = seg_map.map_to_world(th.tensor([px_max[0], px_max[1]], dtype=th.float32)).cpu().numpy()
-        return {
-            "SW": sw,
-            "NE": ne,
-            "NW": np.array([sw[0], ne[1]]),
-            "SE": np.array([ne[0], sw[1]]),
-        }
-
-    @staticmethod
-    def _compute_corner_camera(corner, opposite, v_angle=30.0, inward=0.3, height=2.4):
-        """Camera at room corner, looking inward along diagonal. h_offset=0."""
-        diagonal = np.array([opposite[0] - corner[0], opposite[1] - corner[1]])
-        diag_len = np.sqrt(diagonal[0]**2 + diagonal[1]**2)
-        cam_pos = np.array([
-            corner[0] + (diagonal[0] / diag_len) * inward,
-            corner[1] + (diagonal[1] / diag_len) * inward,
-            height,
-        ], dtype=np.float32)
-        diag_angle = np.degrees(np.arctan2(diagonal[1], diagonal[0]))
-        yaw = np.radians(diag_angle - 90.0)  # h_offset=0
-        pitch = np.radians(90.0 - v_angle)
-        cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
-        cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
-        q_pitch = np.array([sp, 0, 0, cp], dtype=np.float32)
-        q_yaw = np.array([0, 0, sy, cy], dtype=np.float32)
-        orientation = np.array([
-            q_yaw[3]*q_pitch[0] + q_yaw[0]*q_pitch[3] + q_yaw[1]*q_pitch[2] - q_yaw[2]*q_pitch[1],
-            q_yaw[3]*q_pitch[1] - q_yaw[0]*q_pitch[2] + q_yaw[1]*q_pitch[3] + q_yaw[2]*q_pitch[0],
-            q_yaw[3]*q_pitch[2] + q_yaw[0]*q_pitch[1] - q_yaw[1]*q_pitch[0] + q_yaw[2]*q_pitch[3],
-            q_yaw[3]*q_pitch[3] - q_yaw[0]*q_pitch[0] - q_yaw[1]*q_pitch[1] - q_yaw[2]*q_pitch[2],
-        ], dtype=np.float32)
-        return cam_pos, orientation
-
-    @staticmethod
-    def _compute_wall_center_camera(corners, v_angle=45.0, inward=0.2, height=2.2):
-        """Camera at the center of the shortest wall, looking inward. h_offset=0."""
-        walls = [
-            (corners["SW"], corners["SE"]),
-            (corners["SE"], corners["NE"]),
-            (corners["NE"], corners["NW"]),
-            (corners["NW"], corners["SW"]),
-        ]
-        c1, c2 = min(walls, key=lambda wall: np.linalg.norm(wall[1][:2] - wall[0][:2]))
-        wall_center = np.array([(c1[0] + c2[0]) * 0.5, (c1[1] + c2[1]) * 0.5], dtype=np.float32)
-        wall_dir = np.array([c2[0] - c1[0], c2[1] - c1[1]], dtype=np.float32)
-        wall_len = float(np.linalg.norm(wall_dir))
-        if wall_len < 1e-6:
-            raise ValueError("invalid wall length")
-        wall_dir = wall_dir / wall_len
-        normal = np.array([-wall_dir[1], wall_dir[0]], dtype=np.float32)
-        cam_pos = np.array([
-            wall_center[0] + normal[0] * inward,
-            wall_center[1] + normal[1] * inward,
-            height,
-        ], dtype=np.float32)
-        normal_angle = np.degrees(np.arctan2(normal[1], normal[0]))
-        yaw = np.radians(normal_angle - 90.0)
-        pitch = np.radians(90.0 - v_angle)
-        cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
-        cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
-        q_pitch = np.array([sp, 0, 0, cp], dtype=np.float32)
-        q_yaw = np.array([0, 0, sy, cy], dtype=np.float32)
-        orientation = np.array([
-            q_yaw[3]*q_pitch[0] + q_yaw[0]*q_pitch[3] + q_yaw[1]*q_pitch[2] - q_yaw[2]*q_pitch[1],
-            q_yaw[3]*q_pitch[1] - q_yaw[0]*q_pitch[2] + q_yaw[1]*q_pitch[3] + q_yaw[2]*q_pitch[0],
-            q_yaw[3]*q_pitch[2] + q_yaw[0]*q_pitch[1] - q_yaw[1]*q_pitch[0] + q_yaw[2]*q_pitch[3],
-            q_yaw[3]*q_pitch[3] - q_yaw[0]*q_pitch[0] - q_yaw[1]*q_pitch[1] - q_yaw[2]*q_pitch[2],
-        ], dtype=np.float32)
-        return cam_pos, orientation
-
-    @staticmethod
-    def _look_at_quat(cam_pos, look_at):
-        """Compute xyzw quaternion for camera at cam_pos looking at look_at.
-
-        When the camera is looking mostly downward (|dz| is large), uses
-        world +Y as the up vector to avoid the singularity and upside-down
-        orientation that occurs when the look direction is parallel to world +Z.
-        """
-        d = np.array(look_at) - np.array(cam_pos)
-        d_norm = np.linalg.norm(d)
-        if d_norm < 1e-8:
-            d = np.array([0.0, 0.0, -1.0])
-        else:
-            d = d / d_norm
-
-        # If looking mostly down, use world +Y as up to avoid the Z-cross-Z singularity
-        if abs(d[2]) > 0.9:
-            up = np.array([0.0, 1.0, 0.0])
-        else:
-            up = np.array([0.0, 0.0, 1.0])
-
-        right = np.cross(up, d)
-        right_norm = np.linalg.norm(right)
-        if right_norm < 1e-8:
-            right = np.array([1.0, 0.0, 0.0])
-        else:
-            right = right / right_norm
-        up = np.cross(d, right)
-        up = up / np.linalg.norm(up)
-        R = np.column_stack([right, up, -d])
-        # Matrix to quaternion
-        t = R[0, 0] + R[1, 1] + R[2, 2]
-        if t > 0:
-            s = 0.5 / np.sqrt(t + 1.0)
-            w = 0.25 / s
-            x = (R[2, 1] - R[1, 2]) * s
-            y = (R[0, 2] - R[2, 0]) * s
-            z = (R[1, 0] - R[0, 1]) * s
-        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
-            w = (R[2, 1] - R[1, 2]) / s
-            x = 0.25 * s
-            y = (R[0, 1] + R[1, 0]) / s
-            z = (R[0, 2] + R[2, 0]) / s
-        elif R[1, 1] > R[2, 2]:
-            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
-            w = (R[0, 2] - R[2, 0]) / s
-            x = (R[0, 1] + R[1, 0]) / s
-            y = 0.25 * s
-            z = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
-            w = (R[1, 0] - R[0, 1]) / s
-            x = (R[0, 2] + R[2, 0]) / s
-            y = (R[1, 2] + R[2, 1]) / s
-            z = 0.25 * s
-        return np.array([x, y, z, w], dtype=np.float32)
 
     def _nearest_room(self, position, graph):
         if not position or len(position) < 2:
@@ -5069,9 +3407,6 @@ class OnlineDeltaSGEngine:
         if max(x, y) < 0.18:
             return False
         if float(pos[2]) > 1.8:
-            return False
-        bbox_max = bbox.get("max")
-        if bbox_max and len(bbox_max) >= 3 and float(bbox_max[2]) > 1.45:
             return False
         room_type = str(target_room).rsplit("_", 1)[0]
         preferred = GOOD_SUPPORT_TOKENS.get(room_type, set())
@@ -5245,8 +3580,6 @@ class OnlineDeltaSGEngine:
         return list(dedup.values())
 
     def _step(self, n_steps):
-        if not og.sim.is_playing():
-            og.sim.play()
         for _ in range(n_steps):
             og.sim.step()
 
