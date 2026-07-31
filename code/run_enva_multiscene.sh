@@ -34,14 +34,15 @@ run_scene() {
   local out_dir="$OUT_ROOT/$scene"
   mkdir -p "$out_dir"
   echo "===== GENERATE Env-A scene=$scene categories=$TASK_CATEGORIES count=$count $(date '+%F %T') ====="
-  env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
-    conda run -n behavior python code/run_online_deltasg.py \
+  env -u ALL_PROXY -u all_proxy PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+    conda run --no-capture-output -n behavior python code/run_online_deltasg.py \
       --scene "$scene" --robot "$ROBOT" \
       --env-type A --task-categories "$TASK_CATEGORIES" \
       --allow-repeat-tasks \
       --num-envs "$count" \
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
+      --llm-model qwen3.7-max \
       --max-llm-retries 2 --max-retries 1 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \

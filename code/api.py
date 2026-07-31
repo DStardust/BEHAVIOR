@@ -334,14 +334,14 @@ def stabilize_robot_spawn(env, seed, max_attempts=16, warmup_steps=30, native_di
         except Exception:
             continue
     for attempt in range(1, max_attempts + 1):
-        # Fetch is a holonomic-base robot. Setting its pose while physics is
-        # running teleports six base joints and can invalidate PhysX broadphase.
-        # Pose it while stopped, then rebuild the simulation view via play().
-        if og.sim.is_playing():
-            og.sim.stop()
         # Raw env.reset() destabilizes native rigid bodies in several scenes.
-        # Restore their original poses directly between spawn candidates.
+        # Restore their original poses through PhysX while it is playing. OG's
+        # stopped EntityPrim path asserts that an articulated entity prim and
+        # its root link have exactly matching orientations, which is not true
+        # for every official scene object.
         if attempt > 1:
+            if not og.sim.is_playing():
+                og.sim.play()
             for name, (position, orientation) in native_baseline.items():
                 obj = scene_objects.get(name)
                 if obj is None:
@@ -351,6 +351,11 @@ def stabilize_robot_spawn(env, seed, max_attempts=16, warmup_steps=30, native_di
                     obj.keep_still()
                 except Exception:
                     pass
+        # Fetch is a holonomic-base robot. Setting its pose while physics is
+        # running teleports six base joints and can invalidate PhysX broadphase.
+        # Pose only the robot while stopped, then rebuild the view via play().
+        if og.sim.is_playing():
+            og.sim.stop()
         for name in pinned_native_names:
             if name in jointed_native_names:
                 continue

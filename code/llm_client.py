@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3.7-max"
-DEFAULT_API_KEY = "sk-cffcb695da004d258a929e6657770e0c"
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_MAX_RETRIES = 1
 DEFAULT_TIMEOUT = 300.0
@@ -104,7 +103,7 @@ class LLMClient:
         self.timeout = timeout
         self._cache: dict[tuple[str, str, bool, float, str], dict] = {}
 
-        resolved_key = api_key or os.environ.get("DASHSCOPE_API_KEY") or DEFAULT_API_KEY
+        resolved_key = api_key or os.environ.get("DASHSCOPE_API_KEY")
         resolved_url = base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL)
 
         self._client = None
