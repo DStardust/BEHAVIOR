@@ -51,6 +51,7 @@ def sample_fingerprint(run):
         pose = item.get("pose") or placement.get("pose") or {}
         objects.append({
             "category": item.get("category"),
+            "model": item.get("model"),
             "roles": sorted(item.get("semantic_roles") or []),
             "room": item.get("room_id"),
             "mode": placement.get("mode"),
@@ -97,7 +98,10 @@ def sample_diversity_record(run):
     ]
     source_rooms = sorted(set(item.get("room_id") for item in objects if item.get("room_id")))
     position_bins = []
+    target_models = set()
     for item in objects:
+        if item.get("category") and item.get("model"):
+            target_models.add((item["category"], item["model"]))
         position = ((item.get("pose") or {}).get("position"))
         if isinstance(position, (list, tuple)) and len(position) >= 2:
             position_bins.append([round(float(position[0]) / 0.25), round(float(position[1]) / 0.25)])
@@ -108,6 +112,15 @@ def sample_diversity_record(run):
         "target_room": task.get("target_room"),
         "source_rooms": source_rooms,
         "target_categories": sorted(set(categories)),
+        "target_models": [
+            {"category": category, "model": model}
+            for category, model in sorted(target_models)
+        ],
+        "target_object_ids": sorted(set(
+            item.get("object_id")
+            for item in plan_objects
+            if item.get("object_id")
+        )),
         "support_categories": sorted(set(supports)),
         "position_bins_25cm": sorted(position_bins),
     }
@@ -364,6 +377,12 @@ def main():
         help="Max total placement time (seconds) per environment.",
     )
     parser.add_argument(
+        "--max-model-failures",
+        type=int,
+        default=2,
+        help="Skip a specific asset model after this many failed placements.",
+    )
+    parser.add_argument(
         "--no-abort-on-task-failure",
         action="store_true",
         help="Continue placing context objects even if task objects fail.",
@@ -437,6 +456,7 @@ def main():
             per_relation_attempt_timeout_sec=args.relation_timeout,
             max_placement_attempts_per_object=args.max_placement_attempts,
             max_total_placement_time_sec=args.max_total_placement_time,
+            max_failures_per_target_model=args.max_model_failures,
             abort_on_task_object_failure=not args.no_abort_on_task_failure,
             skip_context_on_failure=not args.no_skip_context_on_failure,
             fast_env_a_cleanup=args.unsafe_fast_env_a_cleanup,
@@ -607,6 +627,9 @@ def main():
                     "task": task_name,
                     "diversity": diversity,
                 })
+                for item in diversity.get("target_models") or []:
+                    if item.get("category") and item.get("model"):
+                        engine._used_target_models[(item["category"], item["model"])] += 1
             else:
                 print(f"[online-deltasg] run {idx + 1} excluded from dataset (ok=False)", flush=True)
 

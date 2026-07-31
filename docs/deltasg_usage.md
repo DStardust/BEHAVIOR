@@ -85,13 +85,15 @@ bash code/run_enva_multiscene.sh code/outputs/enva_selected
 
 ## 全任务批处理
 
-正式批量任务应在 `tmux` 中启动。默认情况下，脚本通过 `code/list_deltasg_scenes.py` 发现本机安装的全部室内场景，并将 `NUM` 个目标样本分配给各场景。每个标签都会补齐严格合格的样本，而不是简单执行固定次数。
+正式批量任务应在 `tmux` 中启动。默认情况下，脚本通过 `code/list_deltasg_scenes.py` 发现本机安装的全部室内场景，并将 `NUM` 个目标样本分配给各场景。`MIN_OK_PER_SCENE` 保证每个场景和任务标签至少具有指定数量的合格样本。每个标签都会补齐严格合格的样本，而不是简单执行固定次数。
 
 ```bash
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 OUT="code/outputs/batch100_all_${RUN_ID}"
 tmux new-session -d -s "deltasg_${RUN_ID}" \
-  "cd '$PWD' && NUM=100 bash code/run_batch100_all.sh '$OUT' \
+  "cd '$PWD' && NUM=100 MIN_OK_PER_SCENE=1 \
+   STRICT_COVERAGE=1 REQUIRE_ALL_ASSET_MODELS=1 REQUIRE_ALL_NATIVE_TARGETS=1 \
+   bash code/run_batch100_all.sh '$OUT' \
    >> '$OUT.master.log' 2>&1"
 ```
 
@@ -118,6 +120,18 @@ tmux attach -t <session-name>
 tail -f <output-root>.master.log
 find <output-root> -name 'online_*.json' | wc -l
 ```
+
+批处理结束时会生成：
+
+- `audit_accepted.json`：样本内容、物理稳定性、重复和 bbox 审计。
+- `coverage_inventory.json`：本机已安装的任务资产类别和模型清单。
+- `coverage_audit.json`：全场景 × 全任务标签矩阵、任务变体、目标类别、模型和原生目标实例覆盖报告。
+
+`STRICT_COVERAGE=1` 要求每个启用任务族的已知任务变体至少出现一次。
+`REQUIRE_ALL_ASSET_MODELS=1` 要求 retrieval/fire 使用的已安装任务资产模型全部出现。生成器会优先调度尚未覆盖的任务、模型和场景原生目标，直到数量上限；任何剩余缺口都会使脚本非零退出并写入 `failed_jobs.tsv`。小规模冒烟测试可显式设置这两个变量为 `0`，但这种结果不能标记为全覆盖数据集。
+`REQUIRE_ALL_NATIVE_TARGETS=1` 还要求所有与任务状态兼容的门、窗、柜体、冰箱、开关、电器和可燃原生实例至少成为一次真实任务目标。
+
+具体模型连续两次放置失败后会在当前断点中暂停调度，避免一个坏资产造成无限重试；它不会从覆盖清单中消失，因此最终覆盖审计仍会报告该模型缺失。应修复模型或放置策略后续跑，而不是降低审计标准。
 
 ## 可视化与审计
 

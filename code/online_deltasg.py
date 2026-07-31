@@ -224,6 +224,7 @@ class OnlineDeltaSGConfig:
     per_relation_attempt_timeout_sec: float = 15.0
     max_placement_attempts_per_object: int = 4
     max_total_placement_time_sec: float = 180.0
+    max_failures_per_target_model: int = 2
 
     # ---- Context object behavior ----
     abort_on_task_object_failure: bool = True
@@ -289,6 +290,8 @@ class OnlineDeltaSGEngine:
             "successful_samples": [],
         }
         self._used_target_categories: Counter[str] = Counter()
+        self._used_target_models: Counter[tuple[str, str]] = Counter()
+        self._failed_target_models: Counter[tuple[str, str]] = Counter()
         self._enabled_categories: set[str] | None = None  # None = all categories
         self._llm_client = create_llm_client(
             api_key=self.config.llm_api_key,
@@ -659,8 +662,13 @@ class OnlineDeltaSGEngine:
                 support_id = (add_result.get("placement") or {}).get("support_object_id", "__none__")
                 self._failed_placement_cache.add((cat, support_id))
                 self._checkpoint["failed_placements"].append({
-                    "category": cat, "support": support_id, "errors": errors,
+                    "category": cat,
+                    "model": add_result.get("model"),
+                    "support": support_id,
+                    "errors": errors,
                 })
+                if add_result.get("model"):
+                    self._failed_target_models[(cat, add_result["model"])] += 1
                 # For task objects: don't abort immediately — try remaining task objects.
                 # Only abort if we finish all task objects and none succeeded.
                 if role == "task_object" and self.config.abort_on_task_object_failure:
@@ -1558,9 +1566,12 @@ class OnlineDeltaSGEngine:
             if not self._category_has_models(category):
                 raise ValueError(f"No available models found for category {category}")
             prim_type = PrimType.CLOTH if record.get("object_type") == "cloth" else PrimType.RIGID
+            model = self._choose_target_model(category)
+            result["model"] = model
             obj = DatasetObject(
                 name=object_name,
                 category=category,
+                model=model,
                 prim_type=prim_type,
                 in_rooms=target_room,
             )
@@ -1893,7 +1904,16 @@ class OnlineDeltaSGEngine:
         if not candidates:
             return None
         candidates.sort(key=lambda node: (node.get("category") or "", node["id"]))
-        selected = self.rng.choice(candidates)
+        used_object_ids = Counter()
+        for sample in self._checkpoint.get("successful_samples", []):
+            diversity = sample.get("diversity") or {}
+            for object_id in diversity.get("target_object_ids") or []:
+                used_object_ids[object_id] += 1
+        min_used = min(used_object_ids.get(node["id"], 0) for node in candidates)
+        selected = self.rng.choice([
+            node for node in candidates
+            if used_object_ids.get(node["id"], 0) == min_used
+        ])
         selected["spawned"] = False
         selected.setdefault("name", selected.get("id"))
         return selected
@@ -1941,7 +1961,9 @@ class OnlineDeltaSGEngine:
                 continue
             records = self._usable_records(self.asset_db.by_category(candidate))
             if records:
-                return self.rng.choice(records)
+                record = copy.deepcopy(self.rng.choice(records))
+                record["_preferred_category"] = candidate
+                return record
             if self._category_has_models(candidate):
                 return {
                     "synset": f"{candidate}.n.01",
@@ -1984,6 +2006,10 @@ class OnlineDeltaSGEngine:
                 {"category": c, "support": s}
                 for c, s in self._failed_placement_cache
             ],
+            "failed_target_models": [
+                {"category": category, "model": model, "count": count}
+                for (category, model), count in sorted(self._failed_target_models.items())
+            ],
             "attempted_tasks": self._checkpoint["attempted_tasks"],
             "rejected_tasks": self._checkpoint["rejected_tasks"],
             "failed_placements": self._checkpoint["failed_placements"],
@@ -2019,19 +2045,29 @@ class OnlineDeltaSGEngine:
             (item["category"], item["support"])
             for item in state.get("failed_placement_cache", [])
         }
+        self._failed_target_models = Counter({
+            (item["category"], item["model"]): int(item.get("count", 1))
+            for item in state.get("failed_target_models", [])
+            if item.get("category") and item.get("model")
+        })
         self._checkpoint["attempted_tasks"] = state.get("attempted_tasks", [])
         self._checkpoint["rejected_tasks"] = state.get("rejected_tasks", [])
         self._checkpoint["failed_placements"] = state.get("failed_placements", [])
         self._checkpoint["successful_samples"] = state.get("successful_samples", [])
         self._used_target_categories = Counter()
+        self._used_target_models = Counter()
         for sample in self._checkpoint["successful_samples"]:
             diversity = sample.get("diversity") or {}
             for category in diversity.get("target_categories") or []:
                 self._used_target_categories[category] += 1
+            for item in diversity.get("target_models") or []:
+                if isinstance(item, dict) and item.get("category") and item.get("model"):
+                    self._used_target_models[(item["category"], item["model"])] += 1
         print(f"[checkpoint] loaded {checkpoint_path}: "
               f"resumed from run #{self._run_counter}, "
               f"{len(self._rejected_task_cache)} rejected tasks, "
-              f"{len(self._failed_placement_cache)} failed placements", flush=True)
+              f"{len(self._failed_placement_cache)} failed placements, "
+              f"{len(self._failed_target_models)} failed models", flush=True)
         return self._rejected_task_cache
 
     # Categories that should be reused from the scene when possible.
@@ -2456,12 +2492,36 @@ class OnlineDeltaSGEngine:
         available = [t for t in pool if t not in skip]
         if not available:
             return None
+        if category == "retrieval_delivery":
+            model_gaps = {
+                task: self._uncovered_model_count_for_task(task)
+                for task in available
+            }
+            uncovered_tasks = [task for task in available if model_gaps[task] > 0]
+            if uncovered_tasks:
+                weights = [model_gaps[task] for task in uncovered_tasks]
+                return self.rng.choices(uncovered_tasks, weights=weights, k=1)[0]
         # Strongly prefer unused tasks, then inverse-weight historical usage.
         # This preserves task diversity after the first pass through a family.
         used = used_task_names or set()
         counts = task_counts or Counter()
         weights = [(1 if t in used else 12) / (1 + counts.get(t, 0)) for t in available]
         return self.rng.choices(available, weights=weights, k=1)[0]
+
+    def _uncovered_model_count_for_task(self, task_name: str) -> int:
+        count = 0
+        for category in SAFE_RETRIEVAL_ASSETS.get(task_name, ()):
+            try:
+                models = get_all_object_category_models(category=category)
+            except Exception:
+                models = []
+            count += sum(
+                self._used_target_models.get((category, model), 0) == 0
+                and self._failed_target_models.get((category, model), 0)
+                < self.config.max_failures_per_target_model
+                for model in models
+            )
+        return count
 
     def _get_base_graph(self):
         """Return a cached graph for the unchanged base scene."""
@@ -2668,6 +2728,26 @@ class OnlineDeltaSGEngine:
             if mass is not None and mass > 2.0:
                 continue
             records.append(record)
+        model_gaps = {}
+        for record in records:
+            category = self._choose_category(record)
+            try:
+                models = get_all_object_category_models(category=category)
+            except Exception:
+                models = []
+            model_gaps[category] = sum(
+                self._used_target_models.get((category, model), 0) == 0
+                and self._failed_target_models.get((category, model), 0)
+                < self.config.max_failures_per_target_model
+                for model in models
+            )
+        if model_gaps and max(model_gaps.values()) > 0:
+            max_gap = max(model_gaps.values())
+            candidates = [
+                record for record in records
+                if model_gaps.get(self._choose_category(record), 0) == max_gap
+            ]
+            return [self.rng.choice(candidates)]
         return [self._choose_diverse_required_record(records)] if records else []
 
     def _build_retrieval_instruction(
@@ -2758,7 +2838,16 @@ class OnlineDeltaSGEngine:
             candidates.append((exact, category, node.get("id"), rooms[0]))
         if not candidates:
             return None
-        _, category, object_id, room_id = self.rng.choice(sorted(candidates))
+        used_object_ids = Counter()
+        for sample in self._checkpoint.get("successful_samples", []):
+            if sample.get("task") != task_name:
+                continue
+            diversity = sample.get("diversity") or {}
+            for object_id in diversity.get("target_object_ids") or []:
+                used_object_ids[object_id] += 1
+        min_used = min(used_object_ids.get(item[2], 0) for item in candidates)
+        least_used = [item for item in candidates if used_object_ids.get(item[2], 0) == min_used]
+        _, category, object_id, room_id = self.rng.choice(sorted(least_used))
         return {"object_id": object_id, "category": category, "room_id": room_id}
 
     @staticmethod
@@ -4987,6 +5076,9 @@ class OnlineDeltaSGEngine:
         categories = [c for c in record.get("direct_categories", []) if self._category_has_models(c)]
         if not categories:
             return record["synset"].split(".")[0].replace("__", "_")
+        preferred = record.get("_preferred_category")
+        if preferred in categories:
+            return preferred
         # For REUSE_CATEGORIES: prefer categories that exist in the scene.
         # This prevents picking "wine_fridge" when only "electric_refrigerator"
         # is in the scene, even though both come from the same record.
@@ -5053,6 +5145,31 @@ class OnlineDeltaSGEngine:
             except Exception:
                 self._category_models_cache[category] = False
         return self._category_models_cache[category]
+
+    def _choose_target_model(self, category):
+        """Choose a least-used model so large batches cover task assets evenly."""
+        try:
+            models = sorted(get_all_object_category_models(category=category))
+        except Exception:
+            models = []
+        if not models:
+            raise ValueError(f"No available models found for category {category}")
+        eligible = [
+            model for model in models
+            if self._failed_target_models.get((category, model), 0)
+            < self.config.max_failures_per_target_model
+        ]
+        if not eligible:
+            raise ValueError(
+                f"All models for category {category} reached the failure limit "
+                f"({self.config.max_failures_per_target_model})"
+            )
+        min_used = min(self._used_target_models.get((category, model), 0) for model in eligible)
+        candidates = [
+            model for model in eligible
+            if self._used_target_models.get((category, model), 0) == min_used
+        ]
+        return self.rng.choice(candidates)
 
     def _is_valid_support_node(self, node, target_room):
         category = node.get("category") or ""

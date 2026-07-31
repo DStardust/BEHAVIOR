@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 OUT_ROOT="${1:-code/outputs/batch100_all_multiscene_20260708}"
 ROBOT="${ROBOT:-fetch}"
 NUM="${NUM:-100}"
+MIN_OK_PER_SCENE="${MIN_OK_PER_SCENE:-1}"
 SEED_BASE="${SEED_BASE:-78000}"
 CHUNK_SIZE="${CHUNK_SIZE:-5}"
 MAX_TOPUP_ROUNDS="${MAX_TOPUP_ROUNDS:-30}"
@@ -14,6 +15,9 @@ MAX_CONSECUTIVE_PROCESS_FAILURES="${MAX_CONSECUTIVE_PROCESS_FAILURES:-3}"
 MAX_VIS_RETRIES="${MAX_VIS_RETRIES:-3}"
 SCENE_SCOPE="${SCENE_SCOPE:-interior}"
 LABELS="${LABELS:-all}"
+STRICT_COVERAGE="${STRICT_COVERAGE:-1}"
+REQUIRE_ALL_ASSET_MODELS="${REQUIRE_ALL_ASSET_MODELS:-1}"
+REQUIRE_ALL_NATIVE_TARGETS="${REQUIRE_ALL_NATIVE_TARGETS:-1}"
 
 # By default use every locally installed BEHAVIOR home interior scene. Override
 # with an explicit SCENES list for a small smoke run, or SCENE_SCOPE=all when a
@@ -61,6 +65,9 @@ scene_count_for_index() {
   if (( idx < rem )); then
     count=$((count + 1))
   fi
+  if (( count < MIN_OK_PER_SCENE )); then
+    count="$MIN_OK_PER_SCENE"
+  fi
   echo "$count"
 }
 
@@ -84,6 +91,7 @@ run_gen_scene() {
       --max-llm-retries 5 --max-retries 4 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \
+      --max-model-failures 2 \
       --output-dir "$out_dir" \
       --seed "$seed" \
       "$@"; then
@@ -271,6 +279,48 @@ if ! python code/audit_deltasg_outputs.py \
   --json-out "$OUT_ROOT/audit_accepted.json" \
   --fail-on-issues; then
   printf '%s\t%s\t%s\n' "all" "all" "accepted_sample_audit_failed" >> "$FAILED_JOBS_FILE"
+  FAILED_JOB_COUNT=$((FAILED_JOB_COUNT + 1))
+fi
+
+echo "===== BUILD COVERAGE INVENTORY $(date '+%F %T') ====="
+if ! env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+  conda run --no-capture-output -n behavior \
+  python code/build_deltasg_coverage_inventory.py \
+    --output "$OUT_ROOT/coverage_inventory.json"; then
+  printf '%s\t%s\t%s\n' "all" "all" "coverage_inventory_failed" >> "$FAILED_JOBS_FILE"
+  FAILED_JOB_COUNT=$((FAILED_JOB_COUNT + 1))
+fi
+
+COVERAGE_LABELS=()
+for label in \
+  envA_retrieval_delivery envA_open_close envA_appliance envB_fire \
+  envC_retrieval_delivery envC_open_close envC_appliance envC_fire_disambiguation; do
+  if label_enabled "$label"; then
+    COVERAGE_LABELS+=("$label")
+  fi
+done
+COVERAGE_ARGS=(
+  --root "$OUT_ROOT"
+  --scenes-file "$OUT_ROOT/scenes.txt"
+  --labels "$(IFS=,; echo "${COVERAGE_LABELS[*]}")"
+  --min-clean-per-cell "$MIN_OK_PER_SCENE"
+  --asset-inventory "$OUT_ROOT/coverage_inventory.json"
+  --json-out "$OUT_ROOT/coverage_audit.json"
+  --fail-on-gaps
+)
+if [[ "$STRICT_COVERAGE" == "1" ]]; then
+  COVERAGE_ARGS+=(--require-all-known-tasks)
+fi
+if [[ "$REQUIRE_ALL_ASSET_MODELS" == "1" ]]; then
+  COVERAGE_ARGS+=(--require-all-asset-models)
+fi
+if [[ "$REQUIRE_ALL_NATIVE_TARGETS" == "1" ]]; then
+  COVERAGE_ARGS+=(--require-all-native-targets)
+fi
+
+echo "===== AUDIT COVERAGE $(date '+%F %T') ====="
+if ! python code/audit_deltasg_coverage.py "${COVERAGE_ARGS[@]}"; then
+  printf '%s\t%s\t%s\n' "all" "all" "coverage_audit_failed" >> "$FAILED_JOBS_FILE"
   FAILED_JOB_COUNT=$((FAILED_JOB_COUNT + 1))
 fi
 

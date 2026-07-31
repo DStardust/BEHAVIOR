@@ -256,6 +256,9 @@ def test_checkpoint_serialization():
             {"category": "mailbox", "support": "bottom_cabinet_0"},
             {"category": "plate", "support": "__floor__"},
         ],
+        "failed_target_models": [
+            {"category": "paperback_book", "model": "bad_model", "count": 2},
+        ],
         "attempted_tasks": [
             {"task": "task_a", "aborted": True, "abort_reason": "task_object_failed:plate"},
         ],
@@ -302,6 +305,12 @@ def test_checkpoint_serialization():
         }
         assert ("mailbox", "bottom_cabinet_0") in failed_cache
         print("PASS: failed placement cache restored from checkpoint")
+        failed_models = {
+            (item["category"], item["model"]): item["count"]
+            for item in loaded["failed_target_models"]
+        }
+        assert failed_models[("paperback_book", "bad_model")] == 2
+        print("PASS: failed target-model counts restored from checkpoint")
 
     print()
     print("=== All checkpoint tests passed ===")
@@ -319,6 +328,7 @@ def test_config_defaults():
         "per_relation_attempt_timeout_sec": 5.0,
         "max_placement_attempts_per_object": 4,
         "max_total_placement_time_sec": 60.0,
+        "max_failures_per_target_model": 2,
         "abort_on_task_object_failure": True,
         "skip_context_on_failure": True,
     }
@@ -328,6 +338,7 @@ def test_config_defaults():
     assert config["per_object_placement_timeout_sec"] <= 30, "Placement timeout should be reasonable"
     assert config["max_placement_attempts_per_object"] <= 5, "Too many attempts risk long hangs"
     assert config["max_total_placement_time_sec"] <= 120, "Total placement time should be bounded"
+    assert config["max_failures_per_target_model"] <= 3, "Bad models should be quarantined quickly"
     assert config["abort_on_task_object_failure"], "Default should abort on task failure"
     assert config["skip_context_on_failure"], "Default should skip context on failure"
 

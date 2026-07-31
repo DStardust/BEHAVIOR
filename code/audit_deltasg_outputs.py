@@ -219,8 +219,8 @@ def main():
     bbox_totals = Counter()
     diversity_totals = {
         "env_type": Counter(), "primary_task": Counter(), "target_room": Counter(),
-        "source_room": Counter(), "target_category": Counter(), "support_category": Counter(),
-        "position_bin_25cm": Counter(),
+        "source_room": Counter(), "target_category": Counter(), "target_model": Counter(),
+        "target_object_id": Counter(), "support_category": Counter(), "position_bin_25cm": Counter(),
     }
     examples = []
 
@@ -243,6 +243,22 @@ def main():
                 diversity_totals[key][str(diversity[key])] += 1
         for category in diversity.get("target_categories") or []:
             diversity_totals["target_category"][str(category)] += 1
+        target_models = diversity.get("target_models") or [
+            {"category": item.get("category"), "model": item.get("model")}
+            for item in te.get("added_objects") or []
+            if item.get("category") and item.get("model")
+        ]
+        for item in target_models:
+            if isinstance(item, dict) and item.get("category") and item.get("model"):
+                key = f"{item['category']}::{item['model']}"
+                diversity_totals["target_model"][key] += 1
+        target_object_ids = diversity.get("target_object_ids") or [
+            item.get("object_id")
+            for item in (te.get("task") or {}).get("plan_objects") or []
+            if item.get("object_id")
+        ]
+        for object_id in target_object_ids:
+            diversity_totals["target_object_id"][str(object_id)] += 1
         for room in diversity.get("source_rooms") or []:
             diversity_totals["source_room"][str(room)] += 1
         for category in diversity.get("support_categories") or []:

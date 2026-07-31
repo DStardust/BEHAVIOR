@@ -13,6 +13,7 @@ def fingerprint_payload(run):
         pose = item.get("pose", {})
         objects.append({
             "category": item.get("category"),
+            "model": item.get("model"),
             "roles": sorted(item.get("semantic_roles", [])),
             "room": item.get("room_id"),
             "mode": placement.get("mode"),
@@ -45,14 +46,15 @@ def integrity(before, after, limit=0.05):
     return not missing and not moved
 
 
-def sample(position):
+def sample(position, model="book_model_a"):
     return {
         "task_environment": {
             "base_scene": {"scene_model": "Rs_int"},
             "env_type": "Env-A",
             "task": {"primary_behavior_task": "retrieve_book", "target_room": "living_room_0"},
             "added_objects": [{
-                "category": "book", "semantic_roles": ["task_object"], "room_id": "living_room_0",
+                "category": "book", "model": model,
+                "semantic_roles": ["task_object"], "room_id": "living_room_0",
                 "placement": {"mode": "on_top", "support_object_id": "coffee_table_0"},
                 "pose": {"position": position},
             }],
@@ -63,6 +65,9 @@ def sample(position):
 def main():
     assert fingerprint(sample([1.0, 2.0, 3.0])) == fingerprint(sample([1.0, 2.0, 3.0]))
     assert fingerprint(sample([1.0, 2.0, 3.0])) != fingerprint(sample([1.1, 2.0, 3.0]))
+    assert fingerprint(sample([1.0, 2.0, 3.0])) != fingerprint(
+        sample([1.0, 2.0, 3.0], model="book_model_b")
+    )
     assert integrity({"table": [0, 0, 0]}, {"table": [0.04, 0, 0]})
     assert not integrity({"table": [0, 0, 0]}, {"table": [0.06, 0, 0]})
     assert not integrity({"table": [0, 0, 0]}, {})
