@@ -10,6 +10,11 @@ NUM="${NUM:-300}"
 TASK_CATEGORIES="${TASK_CATEGORIES:-retrieval_delivery}"
 SEED_BASE="${SEED_BASE:-79000}"
 VISUALIZE="${VISUALIZE:-0}"
+MAX_GLOBAL_CAMERAS="${MAX_GLOBAL_CAMERAS:-3}"
+MAX_CAMERA_POSE_ATTEMPTS="${MAX_CAMERA_POSE_ATTEMPTS:-6}"
+CAMERA_POSE_RENDER_STEPS="${CAMERA_POSE_RENDER_STEPS:-4}"
+MIN_MANIPULATION_HEIGHT="${MIN_MANIPULATION_HEIGHT:-0.10}"
+MAX_MANIPULATION_HEIGHT="${MAX_MANIPULATION_HEIGHT:-1.55}"
 
 read -r -a SCENE_LIST <<< "${SCENES:-Rs_int Benevolence_0_int Pomaria_0_int Wainscott_0_int Merom_0_int}"
 
@@ -34,7 +39,7 @@ run_scene() {
   local out_dir="$OUT_ROOT/$scene"
   mkdir -p "$out_dir"
   echo "===== GENERATE Env-A scene=$scene categories=$TASK_CATEGORIES count=$count $(date '+%F %T') ====="
-  env -u ALL_PROXY -u all_proxy PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+  PYTHONUNBUFFERED=1 code/run_omnigibson_single_gpu.sh \
     conda run --no-capture-output -n behavior python code/run_online_deltasg.py \
       --scene "$scene" --robot "$ROBOT" \
       --env-type A --task-categories "$TASK_CATEGORIES" \
@@ -42,7 +47,12 @@ run_scene() {
       --num-envs "$count" \
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
-      --llm-model qwen3.7-max \
+      --llm-model qwen3.8-max \
+      --max-global-cameras "$MAX_GLOBAL_CAMERAS" \
+      --max-camera-pose-attempts "$MAX_CAMERA_POSE_ATTEMPTS" \
+      --camera-pose-render-steps "$CAMERA_POSE_RENDER_STEPS" \
+      --min-manipulation-height "$MIN_MANIPULATION_HEIGHT" \
+      --max-manipulation-height "$MAX_MANIPULATION_HEIGHT" \
       --max-llm-retries 2 --max-retries 1 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \
@@ -56,7 +66,7 @@ vis_scene() {
   local vis_dir="$OUT_ROOT/visualizations/$scene"
   mkdir -p "$vis_dir"
   echo "===== VISUALIZE Env-A scene=$scene $(date '+%F %T') ====="
-  env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+  code/run_omnigibson_single_gpu.sh \
     conda run -n behavior python code/visualize_deltasg_batch.py \
       --scene "$scene" --robot "$ROBOT" \
       --input-dir "$in_dir" \

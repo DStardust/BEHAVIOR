@@ -152,6 +152,89 @@ def test_retry_control_logic():
     print("=== All retry control tests passed ===")
 
 
+def test_allow_repeat_still_skips_repeated_failure_within_one_sample():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    engine_source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    assert "run_skip_tasks = set(skip_tasks)" in source
+    assert "run_skip_tasks.add(rejected_task)" in source
+    assert "skip_tasks=run_skip_tasks" in source
+    assert "skip = (skip_tasks or set()) | self._rejected_task_cache" in engine_source
+
+
+def test_explicit_hard_reject_returns_control_to_outer_process_runner():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    retry_block = source[
+        source.index("# Check if we should stop"):
+        source.index("run_llm_retries += 1")
+    ]
+    assert "should_retry and hard_reject and current_task" in retry_block
+    assert "returning control to the outer runner" in retry_block
+    assert retry_block.index("hard_reject and current_task") < retry_block.index(
+        "if not should_retry"
+    )
+
+
+def test_generation_runner_supports_an_ordered_single_process_task_sequence():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    assert '"--task-sequence"' in source
+    assert "args.num_envs = len(task_sequence)" in source
+    assert "current_task = task_sequence[idx] if task_sequence else args.task" in source
+    assert "task=current_task" in source
+    assert "engine.prepare_native_task_robot_spawn(current_task)" in source
+    assert "preferred_target_name=preferred_target" in source
+    assert "settle_scene=False" in source
+    assert "engine.bind_prepared_native_task_spawn(current_task)" in source
+
+
+def test_target_conditioned_spawn_candidates_cover_an_operation_ring():
+    source = (CODE_DIR / "api.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("if preferred_target_name:"):
+        source.index("for _ in range(max_attempts * 3):")
+    ]
+    assert "distance > effective_max_distance" in block
+    assert "< 0.25" in block
+    assert "len(spawn_candidates) >= max_attempts" in block
+
+
+def test_explicit_native_camera_failure_returns_control_to_candidate_runner():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    retry_block = source[
+        source.index("# Check if we should stop"):
+        source.index("run_llm_retries += 1")
+    ]
+    assert "camera_failed and args.target_native_object_id" in retry_block
+    assert "returning control to the outer candidate runner" in retry_block
+    assert retry_block.index("camera_failed and args.target_native_object_id") < retry_block.index(
+        "if not should_retry"
+    )
+
+
+def test_clean_process_coverage_disables_in_process_generation_retries():
+    generator = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    coverage = (CODE_DIR / "run_enva_expert_coverage.py").read_text(encoding="utf-8")
+    assert '"--single-attempt"' in generator
+    assert "if args.single_attempt:" in generator
+    assert "single-attempt mode: returning failure" in generator
+    command = coverage[
+        coverage.index("command = ["):
+        coverage.index('if job.get("target_asset_category")')
+    ]
+    assert '"--single-attempt"' in command
+    assert '"--max-retries"' not in command
+
+
+def test_zero_generated_samples_fail_the_process_contract():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    finalization = source[
+        source.index("# A requested sample slot is successful"):
+        source.index("# Final checkpoint save")
+    ]
+    assert "len(runs) != args.num_envs" in finalization
+    assert 'summary["ok"] = False' in finalization
+    assert 'summary["num_generated"] = len(runs)' in finalization
+
+
 def test_placement_cache_logic():
     """Test placement cache logic without OmniGibson."""
     failed_placement_cache = set()

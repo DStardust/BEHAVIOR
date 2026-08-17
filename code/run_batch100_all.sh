@@ -5,14 +5,22 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_ROOT="${1:-code/outputs/batch100_all_multiscene_20260708}"
-ROBOT="${ROBOT:-fetch}"
+ROBOT="${ROBOT:-Tiago}"
 NUM="${NUM:-100}"
 MIN_OK_PER_SCENE="${MIN_OK_PER_SCENE:-1}"
+TASK_OBJECTS="${TASK_OBJECTS:-1}"
+CONTEXT_OBJECTS="${CONTEXT_OBJECTS:-0}"
 SEED_BASE="${SEED_BASE:-78000}"
 CHUNK_SIZE="${CHUNK_SIZE:-5}"
 MAX_TOPUP_ROUNDS="${MAX_TOPUP_ROUNDS:-30}"
 MAX_CONSECUTIVE_PROCESS_FAILURES="${MAX_CONSECUTIVE_PROCESS_FAILURES:-3}"
 MAX_VIS_RETRIES="${MAX_VIS_RETRIES:-3}"
+MAX_GLOBAL_CAMERAS="${MAX_GLOBAL_CAMERAS:-3}"
+MAX_CAMERA_POSE_ATTEMPTS="${MAX_CAMERA_POSE_ATTEMPTS:-6}"
+CAMERA_POSE_RENDER_STEPS="${CAMERA_POSE_RENDER_STEPS:-4}"
+MIN_MANIPULATION_HEIGHT="${MIN_MANIPULATION_HEIGHT:-0.10}"
+MAX_MANIPULATION_HEIGHT="${MAX_MANIPULATION_HEIGHT:-1.55}"
+VISUALIZE_INCREMENTAL="${VISUALIZE_INCREMENTAL:-1}"
 SCENE_SCOPE="${SCENE_SCOPE:-interior}"
 LABELS="${LABELS:-all}"
 STRICT_COVERAGE="${STRICT_COVERAGE:-1}"
@@ -26,7 +34,7 @@ if [[ -n "${SCENES:-}" ]]; then
   read -r -a SCENE_LIST <<< "$SCENES"
 else
   mapfile -t SCENE_LIST < <(
-    env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+    code/run_omnigibson_single_gpu.sh \
       conda run --no-capture-output -n behavior python code/list_deltasg_scenes.py --scope "$SCENE_SCOPE"
   )
   FILTERED_SCENE_LIST=()
@@ -80,18 +88,23 @@ run_gen_scene() {
   local out_dir="$OUT_ROOT/$label/$scene"
   mkdir -p "$out_dir"
   echo "===== GENERATE $label scene=$scene count=$count $(date '+%F %T') ====="
-  if ! env -u ALL_PROXY -u all_proxy PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+  if ! PYTHONUNBUFFERED=1 code/run_omnigibson_single_gpu.sh \
     conda run --no-capture-output -n behavior python code/run_online_deltasg.py \
       --scene "$scene" --robot "$ROBOT" \
       --num-envs "$count" \
-      --task-objects 1 --context-objects 0 \
+      --task-objects "$TASK_OBJECTS" --context-objects "$CONTEXT_OBJECTS" \
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
-      --llm-model qwen3.7-max \
+      --llm-model qwen3.8-max \
       --max-llm-retries 5 --max-retries 4 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \
       --max-model-failures 2 \
+      --max-global-cameras "$MAX_GLOBAL_CAMERAS" \
+      --max-camera-pose-attempts "$MAX_CAMERA_POSE_ATTEMPTS" \
+      --camera-pose-render-steps "$CAMERA_POSE_RENDER_STEPS" \
+      --min-manipulation-height "$MIN_MANIPULATION_HEIGHT" \
+      --max-manipulation-height "$MAX_MANIPULATION_HEIGHT" \
       --output-dir "$out_dir" \
       --seed "$seed" \
       "$@"; then
@@ -112,6 +125,9 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+sys.path.insert(0, str(Path.cwd() / "code"))
+from audit_deltasg_outputs import check_run
+
 count = 0
 for path in root.glob("online_*.json"):
     if path.name in {"summary.json", "dataset.json", "dataset_index.json", "checkpoint.json"}:
@@ -129,6 +145,7 @@ for path in root.glob("online_*.json"):
         and integrity.get("ok") is True
         and settling.get("all_within_threshold") is True
         and not validation.get("duplicate_sample")
+        and not check_run(path, data)
     ):
         count += 1
 print(count)
@@ -190,6 +207,10 @@ run_gen_multiscene() {
       printf '%s\t%s\t%s\n' "$label" "$scene" "generation_incomplete" >> "$FAILED_JOBS_FILE"
       FAILED_JOB_COUNT=$((FAILED_JOB_COUNT + 1))
       echo "===== QUARANTINED $label scene=$scene; continuing with remaining scenes =====" >&2
+    elif [[ "$VISUALIZE_INCREMENTAL" == "1" ]]; then
+      if ! run_vis_scene_with_retry "$label" "$scene"; then
+        : # Failure is recorded by the visualization helper; continue the matrix.
+      fi
     fi
   done
 }
@@ -204,7 +225,7 @@ run_vis_scene() {
   fi
   mkdir -p "$vis_dir"
   echo "===== VISUALIZE $label scene=$scene $(date '+%F %T') ====="
-  env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+  code/run_omnigibson_single_gpu.sh \
     conda run --no-capture-output -n behavior python code/visualize_deltasg_batch.py \
       --scene "$scene" --robot none \
       --input-dir "$in_dir" \
@@ -230,6 +251,23 @@ run_vis_multiscene() {
       echo "===== VISUALIZATION FAILED $label scene=$scene; continuing =====" >&2
     fi
   done
+}
+
+run_vis_scene_with_retry() {
+  local label="$1"
+  local scene="$2"
+  local attempt=1
+  while (( attempt <= MAX_VIS_RETRIES )); do
+    if run_vis_scene "$label" "$scene"; then
+      return 0
+    fi
+    echo "===== RETRY VISUALIZATION $label scene=$scene attempt=$attempt/$MAX_VIS_RETRIES =====" >&2
+    attempt=$((attempt + 1))
+  done
+  printf '%s\t%s\t%s\n' "$label" "$scene" "visualization_failed" >> "$FAILED_JOBS_FILE"
+  FAILED_JOB_COUNT=$((FAILED_JOB_COUNT + 1))
+  echo "===== VISUALIZATION FAILED $label scene=$scene; continuing =====" >&2
+  return 1
 }
 
 if label_enabled "envA_retrieval_delivery"; then
@@ -263,13 +301,15 @@ if label_enabled "envC_fire_disambiguation"; then
   run_gen_multiscene "envC_fire_disambiguation" 8 --env-type C --env-c-types fire
 fi
 
-for label in \
-  envA_retrieval_delivery envA_open_close envA_appliance envB_fire \
-  envC_retrieval_delivery envC_open_close envC_appliance envC_fire_disambiguation; do
-  if label_enabled "$label"; then
-    run_vis_multiscene "$label"
-  fi
-done
+if [[ "$VISUALIZE_INCREMENTAL" != "1" ]]; then
+  for label in \
+    envA_retrieval_delivery envA_open_close envA_appliance envB_fire \
+    envC_retrieval_delivery envC_open_close envC_appliance envC_fire_disambiguation; do
+    if label_enabled "$label"; then
+      run_vis_multiscene "$label"
+    fi
+  done
+fi
 
 echo "===== AUDIT ACCEPTED SAMPLES $(date '+%F %T') ====="
 if ! python code/audit_deltasg_outputs.py \
@@ -283,7 +323,7 @@ if ! python code/audit_deltasg_outputs.py \
 fi
 
 echo "===== BUILD COVERAGE INVENTORY $(date '+%F %T') ====="
-if ! env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+if ! code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/build_deltasg_coverage_inventory.py \
     --output "$OUT_ROOT/coverage_inventory.json"; then

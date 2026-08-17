@@ -37,7 +37,7 @@ export DASHSCOPE_API_KEY='<your-key>'
 所有正式命令必须包含：
 
 ```text
---llm-model qwen3.7-max
+--llm-model qwen3.8-max
 ```
 
 仓库不保存 API 密钥。可选的兼容接口地址通过 `LLM_BASE_URL` 设置。
@@ -57,12 +57,14 @@ env -u ALL_PROXY -u all_proxy \
     --task-categories retrieval_delivery \
     --allow-repeat-tasks \
     --num-envs 10 \
-    --llm-model qwen3.7-max \
+    --llm-model qwen3.8-max \
     --output-dir code/outputs/enva_beechwood \
     --seed 1000
 ```
 
 `--allow-repeat-tasks` 允许重复抽取任务类别，不允许生成完全相同的样本。样本指纹包含初始场景、任务、房间、物品、承接面和量化后的位置；相同物品放在不同合理位置会被视为不同样本。
+
+初始摄像头布置使用真实 `seg_instance` 观测进行验证。系统先检查机器人头部主相机，再针对仍不可见的任务物品，在其所在房间按官方房间相机策略逐台布置全局相机；每个房间最多一台。使用命令行参数 `--max-global-cameras` 或批处理环境变量 `MAX_GLOBAL_CAMERAS` 设置上限（默认 `3`）。达到上限、无法解析物品房间，或房间相机仍看不到对应物品时，该样本会被拒绝并重试。
 
 ## Env-A 多场景
 
@@ -99,6 +101,9 @@ tmux new-session -d -s "deltasg_${RUN_ID}" \
 
 常用覆盖参数：
 
+- `TASK_OBJECTS` / `CONTEXT_OBJECTS`：控制单个任务实例中任务物品和上下文物品的目标数量；正式多物品回测可使用 `TASK_OBJECTS=2 CONTEXT_OBJECTS=1`。
+- `VISUALIZE_INCREMENTAL=1`（默认）：每个场景和任务标签补齐目标样本后立即生成图片与 bbox，而不是等待全部生成任务结束。
+
 ```bash
 # 只跑指定场景和标签
 SCENES='Beechwood_0_int Merom_0_int' \
@@ -130,6 +135,20 @@ find <output-root> -name 'online_*.json' | wc -l
 `STRICT_COVERAGE=1` 要求每个启用任务族的已知任务变体至少出现一次。
 `REQUIRE_ALL_ASSET_MODELS=1` 要求 retrieval/fire 使用的已安装任务资产模型全部出现。生成器会优先调度尚未覆盖的任务、模型和场景原生目标，直到数量上限；任何剩余缺口都会使脚本非零退出并写入 `failed_jobs.tsv`。小规模冒烟测试可显式设置这两个变量为 `0`，但这种结果不能标记为全覆盖数据集。
 `REQUIRE_ALL_NATIVE_TARGETS=1` 还要求所有与任务状态兼容的门、窗、柜体、冰箱、开关、电器和可燃原生实例至少成为一次真实任务目标。
+
+Env-A 当前可执行闭环为 23 个任务名：9 个 retrieval/delivery、8 个 open/close、6 个 appliance。研究 taxonomy 中的 `retrieve_remote`、`put_object_on_table`、`put_object_in_container` 尚无完整物理资产/目标契约，不计入当前全覆盖结果。
+
+真实 floor 高度正反例回归使用 `code/run_enva_floor_height_regression.sh <output-root>`：竖立水瓶必须通过生成和 oracle expert，低矮手机必须留下 `task_object_floor_height_out_of_range` 证据，不能生成成功样本。
+
+场景或资产版本升级后，用已有干净样本中的完整 `before_graph` 刷新原生目标配置：
+
+```bash
+python code/build_enva_native_eligibility.py \
+  --input-root code/outputs/<multiscene-run> \
+  --output code/configs/env_a_native_eligibility.json
+```
+
+工具要求 15 个版本化场景均有图，并且每个场景至少存在一个高度合格的 open/close 和 appliance 目标族，否则非零退出。
 
 具体模型连续两次放置失败后会在当前断点中暂停调度，避免一个坏资产造成无限重试；它不会从覆盖清单中消失，因此最终覆盖审计仍会报告该模型缺失。应修复模型或放置策略后续跑，而不是降低审计标准。
 

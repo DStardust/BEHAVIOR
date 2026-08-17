@@ -9,22 +9,17 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from audit_deltasg_outputs import EXPECTED_LABELS, check_run, infer_label, iter_run_files, load_json
+from deltasg_expert import (
+    SUPPORTED_APPLIANCE_TASKS,
+    SUPPORTED_OPEN_CLOSE_TASKS,
+    SUPPORTED_RETRIEVAL_DELIVERY_TASKS,
+)
 
 
 KNOWN_TASKS = {
-    "retrieval_delivery": {
-        "retrieve_medicine", "retrieve_key", "retrieve_phone", "retrieve_book",
-        "retrieve_drink", "retrieve_food", "deliver_medicine", "deliver_food",
-        "deliver_drink",
-    },
-    "open_close": {
-        "open_door", "close_door", "open_window", "close_window",
-        "open_fridge", "close_fridge", "open_cabinet", "close_cabinet",
-    },
-    "appliance": {
-        "turn_on_light", "turn_off_light", "turn_on_tv",
-        "turn_off_tv", "turn_on_stove", "turn_off_stove",
-    },
+    "retrieval_delivery": set(SUPPORTED_RETRIEVAL_DELIVERY_TASKS),
+    "open_close": set(SUPPORTED_OPEN_CLOSE_TASKS),
+    "appliance": set(SUPPORTED_APPLIANCE_TASKS),
 }
 
 LABEL_TASK_GROUP = {
@@ -67,6 +62,8 @@ NATIVE_TASK_RULES = {
     "turn_on_stove": ("ToggledOn", ("stove",)),
     "turn_off_stove": ("ToggledOn", ("stove",)),
 }
+DEFAULT_MIN_MANIPULATION_HEIGHT = 0.10
+DEFAULT_MAX_MANIPULATION_HEIGHT = 1.55
 
 
 def parse_list(value: str):
@@ -125,7 +122,41 @@ def expected_models(label: str, inventory: dict):
     return result
 
 
-def eligible_native_targets(label: str, run: dict):
+def _native_height_eligible(node, graph, min_height, max_height):
+    bbox = node.get("bbox") or {}
+    aabb_min = bbox.get("min")
+    aabb_max = bbox.get("max")
+    if not aabb_min or not aabb_max:
+        return False
+    rooms = set(node.get("rooms") or [])
+    floor_surfaces = []
+    for candidate in graph.get("nodes") or []:
+        if candidate.get("type") != "object":
+            continue
+        category = str(candidate.get("category") or "").lower()
+        if category not in {"floor", "floors"}:
+            continue
+        if rooms and not rooms.intersection(candidate.get("rooms") or []):
+            continue
+        surface = ((candidate.get("bbox") or {}).get("max") or [None, None, None])[2]
+        if surface is not None:
+            floor_surfaces.append(float(surface))
+    lower_z = float(aabb_min[2])
+    below = [height for height in floor_surfaces if height <= lower_z + 0.10]
+    floor_height = max(below) if below else (
+        min(floor_surfaces, key=lambda height: abs(height - lower_z))
+        if floor_surfaces else 0.0
+    )
+    operation_height = (float(aabb_min[2]) + float(aabb_max[2])) / 2.0 - floor_height
+    return float(min_height) <= operation_height <= float(max_height)
+
+
+def eligible_native_targets(
+    label: str,
+    run: dict,
+    min_height=DEFAULT_MIN_MANIPULATION_HEIGHT,
+    max_height=DEFAULT_MAX_MANIPULATION_HEIGHT,
+):
     rule = NATIVE_TARGET_RULES.get(label)
     if not rule:
         return set()
@@ -140,12 +171,21 @@ def eligible_native_targets(label: str, run: dict):
             continue
         if required_state not in set(node.get("available_states") or []):
             continue
+        if not node.get("rooms"):
+            continue
+        if not _native_height_eligible(node, graph, min_height, max_height):
+            continue
         if node.get("id"):
             result.add(node["id"])
     return result
 
 
-def eligible_native_task_pairs(label: str, run: dict):
+def eligible_native_task_pairs(
+    label: str,
+    run: dict,
+    min_height=DEFAULT_MIN_MANIPULATION_HEIGHT,
+    max_height=DEFAULT_MAX_MANIPULATION_HEIGHT,
+):
     group = LABEL_TASK_GROUP.get(label)
     if group not in {"open_close", "appliance"}:
         return set()
@@ -160,6 +200,10 @@ def eligible_native_task_pairs(label: str, run: dict):
             if not any(token in category for token in category_tokens):
                 continue
             if required_state not in set(node.get("available_states") or []):
+                continue
+            if not node.get("rooms"):
+                continue
+            if not _native_height_eligible(node, graph, min_height, max_height):
                 continue
             if node.get("id"):
                 result.add((task_name, node["id"]))
@@ -176,9 +220,13 @@ def main():
     parser.add_argument("--asset-inventory", default=None)
     parser.add_argument("--require-all-asset-models", action="store_true")
     parser.add_argument("--require-all-native-targets", action="store_true")
+    parser.add_argument("--min-manipulation-height", type=float, default=DEFAULT_MIN_MANIPULATION_HEIGHT)
+    parser.add_argument("--max-manipulation-height", type=float, default=DEFAULT_MAX_MANIPULATION_HEIGHT)
     parser.add_argument("--json-out", default=None)
     parser.add_argument("--fail-on-gaps", action="store_true")
     args = parser.parse_args()
+    if args.min_manipulation_height < 0 or args.max_manipulation_height <= args.min_manipulation_height:
+        parser.error("manipulation height bounds must satisfy 0 <= min < max")
 
     root = Path(args.root)
     scenes_file = Path(args.scenes_file) if args.scenes_file else root / "scenes.txt"
@@ -216,11 +264,15 @@ def main():
         cell_counts[(label, scene)] += 1
         expected_native[label].update(
             f"{scene}::{object_id}"
-            for object_id in eligible_native_targets(label, run)
+            for object_id in eligible_native_targets(
+                label, run, args.min_manipulation_height, args.max_manipulation_height
+            )
         )
         expected_native_pairs[label].update(
             f"{scene}::{task_name}::{object_id}"
-            for task_name, object_id in eligible_native_task_pairs(label, run)
+            for task_name, object_id in eligible_native_task_pairs(
+                label, run, args.min_manipulation_height, args.max_manipulation_height
+            )
         )
         dims = extract_dimensions(run)
         observed_native[label].update(

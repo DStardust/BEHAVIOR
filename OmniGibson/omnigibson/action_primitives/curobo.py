@@ -1,4 +1,5 @@
 import math
+import logging
 from enum import Enum
 from typing import Dict, Any, Optional
 
@@ -26,6 +27,8 @@ m.HOLONOMIC_BASE_REVOLUTE_JOINT_LIMIT = math.pi * 2  # radians
 
 m.DEFAULT_COLLISION_ACTIVATION_DISTANCE = 0.005
 m.DEFAULT_ATTACHED_OBJECT_SCALE = 0.8
+
+log = logging.getLogger(__name__)
 
 
 class CuRoboEmbodimentSelection(str, Enum):
@@ -78,6 +81,7 @@ class CuRoboMotionGenerator:
         debug=False,
         use_default_embodiment_only=False,
         collision_activation_distance=m.DEFAULT_COLLISION_ACTIVATION_DISTANCE,
+        obstacle_predicate=None,
     ):
         """
         Args:
@@ -106,6 +110,7 @@ class CuRoboMotionGenerator:
         self.robot = robot
         self.robot_joint_names = list(robot.joints.keys())
         self.batch_size = batch_size
+        self.obstacle_predicate = obstacle_predicate
 
         # Load robot config and usd paths and make sure paths point correctly
         robot_cfg_path_dict = robot.curobo_path if robot_cfg_path is None else robot_cfg_path
@@ -283,10 +288,13 @@ class CuRoboMotionGenerator:
             )
             obstacles["mesh"].append(m)
 
+        skipped_singular_meshes = []
         for obj in self.robot.scene.objects:
             if obj == self.robot:
                 continue
             if obj.visual_only:
+                continue
+            if self.obstacle_predicate is not None and not self.obstacle_predicate(obj):
                 continue
             if ignore_objects is not None and obj in ignore_objects:
                 continue
@@ -297,6 +305,18 @@ class CuRoboMotionGenerator:
                     ), f"collision_mesh {collision_mesh.prim_path} is not a mesh, but a {collision_mesh.geom_type}"
                     obj_pose = T.pose2mat(collision_mesh.get_position_orientation())
                     pose = robot_transform @ obj_pose
+                    scale = collision_mesh.get_world_scale()
+                    linear_det = th.linalg.det(pose[:3, :3])
+                    if (
+                        not bool(th.all(th.isfinite(pose)))
+                        or not bool(th.all(th.isfinite(scale)))
+                        or abs(float(linear_det)) < 1e-6
+                        or bool(th.any(th.abs(scale) < 1e-6))
+                    ):
+                        # A non-invertible transform cannot be represented as a
+                        # CuRobo obstacle and has no valid collision volume.
+                        skipped_singular_meshes.append(collision_mesh.prim_path)
+                        continue
                     pos, orn = T.mat2pose(pose)
                     # xyzw -> wxyz
                     orn = orn[[3, 0, 1, 2]]
@@ -305,9 +325,17 @@ class CuRoboMotionGenerator:
                         pose=th.cat([pos, orn]).tolist(),
                         vertices=collision_mesh.points.numpy(),
                         faces=collision_mesh.faces.numpy(),
-                        scale=collision_mesh.get_world_scale().numpy(),
+                        scale=scale.numpy(),
                     )
                     obstacles["mesh"].append(m)
+
+        self.skipped_singular_collision_meshes = sorted(set(skipped_singular_meshes))
+        if self.skipped_singular_collision_meshes:
+            log.warning(
+                "Skipping %d singular CuRobo collision meshes: %s",
+                len(self.skipped_singular_collision_meshes),
+                self.skipped_singular_collision_meshes,
+            )
 
         world = lazy.curobo.geom.types.WorldConfig(**obstacles)
         world = world.get_collision_check_world()

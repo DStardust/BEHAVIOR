@@ -123,6 +123,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
         enable_head_tracking=True,
         always_track_eef=False,
         task_relevant_objects_only=False,
+        curobo_obstacle_predicate=None,
         curobo_batch_size=3,
         debug_visual_marker=None,
         skip_curobo_initilization=False,
@@ -165,6 +166,7 @@ class StarterSemanticActionPrimitives(BaseActionPrimitiveSet):
                 robot=self.robot,
                 batch_size=curobo_batch_size,
                 collision_activation_distance=m.DEFAULT_COLLISION_ACTIVATION_DISTANCE,
+                obstacle_predicate=curobo_obstacle_predicate,
             )
         )
 

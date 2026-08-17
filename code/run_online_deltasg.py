@@ -25,13 +25,14 @@ from omnigibson.macros import gm
 gm.ENABLE_OBJECT_STATES = True
 gm.ENABLE_TRANSITION_RULES = False
 gm.HEADLESS = True
-gm.RENDER_VIEWER_CAMERA = False
+gm.RENDER_VIEWER_CAMERA = True
 gm.GUI_VIEWPORT_ONLY = True
 
 import omnigibson as og
 import omnigibson.lazy as lazy
 
-from api import create_env, ensure_dir, stabilize_robot_spawn
+from api import RobotSpawnError, create_env, ensure_dir, stabilize_robot_spawn
+from deltasg_expert import DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE, SUPPORTED_ENV_A_TASKS
 from online_deltasg import OnlineDeltaSGConfig, OnlineDeltaSGEngine
 
 
@@ -89,17 +90,27 @@ def sample_diversity_record(run):
     task = te.get("task") or {}
     objects = te.get("added_objects") or []
     plan_objects = task.get("plan_objects") or []
-    categories = [item.get("category") for item in objects if item.get("category")]
+    task_objects = [
+        item for item in objects
+        if "task_object" in set(item.get("semantic_roles") or [])
+    ]
+    categories = [item.get("category") for item in task_objects if item.get("category")]
     if not categories:
-        categories = [item.get("category") for item in plan_objects if item.get("category")]
+        categories = [
+            item.get("category") for item in plan_objects
+            if item.get("category")
+            and item.get("semantic_role") in {"target", "task_object"}
+        ]
     supports = [
         (item.get("placement") or {}).get("support_category")
         for item in objects if (item.get("placement") or {}).get("support_category")
     ]
-    source_rooms = sorted(set(item.get("room_id") for item in objects if item.get("room_id")))
+    source_rooms = sorted(
+        set(item.get("room_id") for item in task_objects if item.get("room_id"))
+    )
     position_bins = []
     target_models = set()
-    for item in objects:
+    for item in task_objects:
         if item.get("category") and item.get("model"):
             target_models.add((item["category"], item["model"]))
         position = ((item.get("pose") or {}).get("position"))
@@ -136,6 +147,16 @@ def load_existing_fingerprints(output_dir):
         if run.get("ok"):
             fingerprints.add(sample_fingerprint(run)[0])
     return fingerprints
+
+
+def interaction_target(run):
+    """Return the single fixture manipulated by a formal Env-A plan."""
+    targets = {
+        step.get("target_object")
+        for step in ((run.get("task_environment") or {}).get("solution_plan") or [])
+        if step.get("primitive") == "INTERACT" and step.get("target_object")
+    }
+    return next(iter(targets)) if len(targets) == 1 else None
 
 
 def scene_integrity(before_graph, after_graph, max_displacement=0.05):
@@ -181,6 +202,35 @@ def enforce_run_quality(run):
         te_validation["ok"] = False
         run["ok"] = False
     return integrity
+
+
+def enforce_expert_plan_quality(run):
+    """Require a deterministic expert-plan compilation for successful Env-A samples."""
+    te = run.get("task_environment") or {}
+    if not run.get("ok") or te.get("env_type") != "Env-A":
+        return None
+    from deltasg_expert import ExpertPlanError, compile_expert_plan
+
+    validation = run.setdefault("validation", {})
+    te_validation = te.setdefault("validation", {})
+    try:
+        compiled = compile_expert_plan(run)
+    except ExpertPlanError as exc:
+        result = {"ok": False, "error": str(exc)}
+        run["ok"] = False
+        validation["ok"] = False
+        te_validation["ok"] = False
+    else:
+        result = {
+            "ok": True,
+            "num_steps": len(compiled.steps),
+            "warnings": list(compiled.warnings),
+        }
+        te["compiled_expert_plan"] = compiled.to_dict()
+        run["compiled_expert_plan"] = compiled.to_dict()
+    validation["expert_plan_preflight"] = result
+    te_validation["expert_plan_preflight"] = result
+    return result
 
 
 def hard_exit(code=0):
@@ -272,6 +322,20 @@ def main():
         help="DeltaSG environment type: A=basic task, B=fire anomaly, C=constraint semantic tasks.",
     )
     parser.add_argument("--task", default=None, help="Optional BEHAVIOR task name for Env-A, e.g. cook_eggplant-0")
+    parser.add_argument(
+        "--task-sequence",
+        default=None,
+        help="Comma-separated Env-A tasks to generate in order within one simulator process.",
+    )
+    parser.add_argument("--target-asset-category", default=None)
+    parser.add_argument("--target-asset-model", default=None)
+    parser.add_argument("--target-native-object-id", default=None)
+    parser.add_argument(
+        "--target-placement-mode",
+        choices=("auto", "floor"),
+        default="auto",
+        help="Coverage diagnostic override; normal generation should use auto.",
+    )
     parser.add_argument("--target-room", default=None, help="Optional room id, e.g. kitchen_0")
     parser.add_argument(
         "--task-categories",
@@ -290,6 +354,22 @@ def main():
     parser.add_argument("--warmup-steps", type=int, default=20)
     parser.add_argument("--settle-steps", type=int, default=5)
     parser.add_argument("--settle-threshold", type=float, default=0.25)
+    parser.add_argument("--min-manipulation-height", type=float, default=0.10)
+    parser.add_argument("--max-manipulation-height", type=float, default=1.55)
+    parser.add_argument(
+        "--max-global-cameras",
+        type=int,
+        default=3,
+        help="Maximum official room cameras used to cover task objects at initialization.",
+    )
+    parser.add_argument("--max-camera-pose-attempts", type=int, default=6)
+    parser.add_argument("--camera-pose-render-steps", type=int, default=4)
+    parser.add_argument(
+        "--solvability-profile",
+        choices=("oracle_symbolic", "physical_control"),
+        default="physical_control",
+        help="Apply generation eligibility gates for the downstream expert backend.",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed. None = random each run.")
     parser.add_argument(
         "--allow-cloth",
@@ -313,7 +393,7 @@ def main():
     )
     parser.add_argument(
         "--llm-model",
-        default="qwen3.7-max",
+        default="qwen3.8-max",
         help="Required LLM model name.",
     )
     parser.add_argument(
@@ -331,6 +411,11 @@ def main():
         type=int,
         default=0,
         help="Max retries per env when LLM validation rejects. 0 = unlimited.",
+    )
+    parser.add_argument(
+        "--single-attempt",
+        action="store_true",
+        help="Run one generation attempt and return failure to an outer clean-process runner.",
     )
     # ---- Retry control ----
     parser.add_argument(
@@ -421,23 +506,52 @@ def main():
     )
     args = parser.parse_args()
 
-    robot_model = None if str(args.robot).lower() in {"none", "null", ""} else args.robot
+    task_sequence = None
+    if args.task_sequence:
+        if args.env_type != "A":
+            parser.error("--task-sequence is only supported for Env-A")
+        if args.task:
+            parser.error("--task and --task-sequence are mutually exclusive")
+        task_sequence = [item.strip() for item in args.task_sequence.split(",") if item.strip()]
+        invalid_tasks = sorted(set(task_sequence) - set(SUPPORTED_ENV_A_TASKS))
+        if not task_sequence or invalid_tasks:
+            parser.error(f"invalid --task-sequence tasks: {invalid_tasks or task_sequence}")
+        args.num_envs = len(task_sequence)
+
+    if args.min_manipulation_height < 0 or args.max_manipulation_height <= args.min_manipulation_height:
+        parser.error("manipulation height bounds must satisfy 0 <= min < max")
+    if args.max_camera_pose_attempts < 1 or args.camera_pose_render_steps < 1:
+        parser.error("camera pose attempts and render steps must both be positive")
+    if args.target_asset_model and not args.target_asset_category:
+        parser.error("--target-asset-model requires --target-asset-category")
+    if args.target_native_object_id and (args.target_asset_category or args.target_asset_model):
+        parser.error("native-object and spawned-asset coverage controls are mutually exclusive")
+    if args.target_placement_mode == "floor" and (
+        args.env_type != "A" or not args.target_asset_category or args.target_native_object_id
+    ):
+        parser.error("--target-placement-mode floor requires an Env-A spawned target asset")
+
+    normalized_robot = str(args.robot).lower()
+    robot_model = None if normalized_robot in {"none", "null", ""} else normalized_robot
     ensure_dir(args.output_dir)
     env = None
     try:
         with gm.unlocked():
             gm.ENABLE_TRANSITION_RULES = args.enable_transition_rules
-        # Online generation records robot state but does not consume camera pixels.
-        # Deferring visual sensors prevents Replicator graph crashes in large scenes;
-        # capture scripts still use create_env's visual-sensor defaults.
+        # Creating multiple Replicator annotators during Environment startup
+        # can segfault in Isaac Sim 5.1. Start with RGB, stabilize the scene,
+        # then attach instance segmentation to the primary camera only.
         env = create_env(
             scene_model=args.scene,
             robot_model=robot_model,
-            robot_obs_modalities=[],
+            robot_obs_modalities=["rgb"],
         )
         harden_headless_kit()
-        stabilize_robot_spawn(env, seed=args.seed)
-
+        stabilize_robot_spawn(
+            env,
+            seed=args.seed,
+            preferred_target_name=args.target_native_object_id,
+        )
         config = OnlineDeltaSGConfig(
             task_objects=args.task_objects,
             context_objects=args.context_objects,
@@ -462,6 +576,24 @@ def main():
             fast_env_a_cleanup=args.unsafe_fast_env_a_cleanup,
             cache_base_graph=not args.no_cache_base_graph,
             allow_repeat_tasks=args.allow_repeat_tasks,
+            max_global_cameras=args.max_global_cameras,
+            max_camera_pose_attempts_per_room=args.max_camera_pose_attempts,
+            camera_pose_render_steps=args.camera_pose_render_steps,
+            solvability_profile=args.solvability_profile,
+            max_task_object_approach_distance=(
+                2.5
+                if args.solvability_profile == "oracle_symbolic"
+                else DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+            ),
+            expert_base_clearance_margin=(
+                0.0 if args.solvability_profile == "oracle_symbolic" else 0.20
+            ),
+            min_manipulation_height=args.min_manipulation_height,
+            max_manipulation_height=args.max_manipulation_height,
+            target_asset_category=args.target_asset_category,
+            target_asset_model=args.target_asset_model,
+            target_native_object_id=args.target_native_object_id,
+            target_placement_mode=args.target_placement_mode,
         )
         engine = OnlineDeltaSGEngine(env=env, metadata_dir=args.metadata_dir, config=config)
 
@@ -496,12 +628,21 @@ def main():
             skip_tasks = set() if args.allow_repeat_tasks else loaded_skip_tasks
 
         for idx in range(args.num_envs):
-            print(f"[online-deltasg] run {idx + 1}/{args.num_envs}", flush=True)
+            current_task = task_sequence[idx] if task_sequence else args.task
+            task_label = f" task={current_task}" if current_task else ""
+            print(
+                f"[online-deltasg] run {idx + 1}/{args.num_envs}{task_label}",
+                flush=True,
+            )
             run_start_time = time.time()
             run_llm_retries = 0
             run = None
             attempt = 0
             task_retry_count = {}  # task_name -> retry count
+            # Diversity mode permits a task name in later samples, but a task
+            # that repeatedly fails must still be excluded for this sample so
+            # it cannot consume the entire retry budget.
+            run_skip_tasks = set(skip_tasks)
 
             while True:
                 # Check per-run generation time budget
@@ -517,9 +658,75 @@ def main():
                           f">= max {config.max_llm_retries_per_scene}, stopping", flush=True)
                     break
 
+                # Retry-scoped target-conditioned spawn: the first attempt and
+                # every recovery retry re-clean the sample, re-select the
+                # native target, re-stabilize the robot spawn over the full
+                # generation warmup horizon, and re-bind the target. A binding
+                # consumed by a failed attempt is never reused, so a
+                # recoverable physical failure cannot degrade into
+                # no_officially_transitionable_native_target.
+                spawn_failed = False
+                if task_sequence and current_task:
+                    preferred_target = engine.prepare_native_task_robot_spawn(current_task)
+                    if preferred_target:
+                        print(
+                            f"[robot-spawn] preparing task={current_task} "
+                            f"target={preferred_target} attempt={attempt + 1}",
+                            flush=True,
+                        )
+                        try:
+                            stabilize_robot_spawn(
+                                env,
+                                seed=(args.seed or 0) + idx + 1 + attempt,
+                                # Validate each candidate for at least the same
+                                # effective warmup horizon generation applies
+                                # after binding; the old 10-step window missed
+                                # the 0.613 m robot drift that the later
+                                # generation warmup exposed.
+                                warmup_steps=max(args.warmup_steps, 10),
+                                preferred_target_name=preferred_target,
+                                preferred_max_distance=1.35,
+                                settle_scene=False,
+                            )
+                        except RobotSpawnError as exc:
+                            print(
+                                f"[robot-spawn] target-conditioned spawn exhausted "
+                                f"task={current_task} attempt={attempt + 1} "
+                                f"reason={getattr(exc, 'reason', repr(exc))}",
+                                flush=True,
+                            )
+                            spawn_failed = True
+                        if not spawn_failed and not engine.bind_prepared_native_task_spawn(current_task):
+                            print(
+                                f"[robot-spawn] target-conditioned spawn could not bind "
+                                f"task={current_task} attempt={attempt + 1}",
+                                flush=True,
+                            )
+                            spawn_failed = True
+                        if not spawn_failed:
+                            engine.invalidate_robot_reachability()
+                if spawn_failed:
+                    attempt += 1
+                    limit = args.max_retries
+                    if limit > 0 and attempt > limit:
+                        print(
+                            f"[robot-spawn] max retries ({limit}) reached for "
+                            f"task={current_task}",
+                            flush=True,
+                        )
+                        break
+                    print(
+                        f"[robot-spawn] retry {attempt}"
+                        f"{f'/{limit}' if limit > 0 else ''} task={current_task}",
+                        flush=True,
+                    )
+                    continue
+
                 if args.env_type == "A":
                     run = engine.generate_env_a(
-                        task=args.task, target_room=args.target_room, skip_tasks=skip_tasks,
+                        task=current_task,
+                        target_room=args.target_room,
+                        skip_tasks=run_skip_tasks,
                     )
                 elif args.env_type == "B":
                     run = engine.generate_env_b_fire(target_room=args.target_room)
@@ -530,14 +737,22 @@ def main():
                     run = engine.generate_env_c(
                         target_room=args.target_room,
                         env_c_types=env_c_types,
-                        skip_tasks=skip_tasks,
+                        skip_tasks=run_skip_tasks,
                     )
 
                 integrity = enforce_run_quality(run)
                 if not integrity["ok"]:
                     print(f"[quality] rejected scene integrity failure: "
                           f"missing={len(integrity['missing_source_objects'])} "
-                          f"moved={len(integrity['moved_source_objects'])}", flush=True)
+                          f"moved={len(integrity['moved_source_objects'])} "
+                          f"missing_objects={integrity['missing_source_objects']} "
+                          f"moved_objects={integrity['moved_source_objects']}", flush=True)
+                expert_preflight = enforce_expert_plan_quality(run)
+                if expert_preflight is not None and not expert_preflight["ok"]:
+                    print(
+                        f"[quality] rejected invalid expert plan: {expert_preflight['error']}",
+                        flush=True,
+                    )
                 if run.get("ok"):
                     fingerprint, _ = sample_fingerprint(run)
                     if fingerprint in fingerprints:
@@ -565,18 +780,47 @@ def main():
                     not run.get("ok", False) and not llm_rejected
                 )
                 should_retry = llm_rejected or no_task_objects
+                camera_failed = not (validation.get("camera_coverage") or {}).get("ok", True)
 
                 # Hard rejects should not retry the same task, but the sample slot
                 # can still be recovered by asking the LLM for a different task.
                 if should_retry and hard_reject:
                     rejected_task = (run.get("task") or {}).get("primary_behavior_task", "")
                     if rejected_task and rejected_task != "unknown":
-                        skip_tasks.add(rejected_task)
+                        run_skip_tasks.add(rejected_task)
+                        if not args.allow_repeat_tasks:
+                            skip_tasks.add(rejected_task)
                     print(f"[hard-reject] task is fundamentally unsuitable, "
                           f"skipping it and selecting another task", flush=True)
 
-                # Check if we should stop (success or retry limit reached)
+                # Check if we should stop (success, retry limit reached, or a
+                # fatal physics view that in-process retries cannot heal)
+                if run.get("fatal_physics_error"):
+                    print("[fatal-physics] invalid physics view during placement; "
+                          "stopping retries in this scene process", flush=True)
+                    break
+                if should_retry and hard_reject and current_task:
+                    print(
+                        "[hard-reject] explicit task cannot change in this process; "
+                        "returning control to the outer runner",
+                        flush=True,
+                    )
+                    break
+                if should_retry and camera_failed and args.target_native_object_id:
+                    print(
+                        "[camera-coverage] explicit native target cannot change in this "
+                        "process; returning control to the outer candidate runner",
+                        flush=True,
+                    )
+                    break
                 if not should_retry:
+                    break
+                if args.single_attempt:
+                    print(
+                        "[retry-control] single-attempt mode: returning failure "
+                        "to the clean-process runner",
+                        flush=True,
+                    )
                     break
 
                 run_llm_retries += 1
@@ -593,14 +837,24 @@ def main():
                     # Track per-task retry count
                     task_retry_count[rejected_task] = task_retry_count.get(rejected_task, 0) + 1
                     if task_retry_count[rejected_task] > config.max_retries_per_task:
+                        run_skip_tasks.add(rejected_task)
                         print(f"[retry-control] task '{rejected_task}' retried "
                               f"{task_retry_count[rejected_task]}x > max {config.max_retries_per_task}, "
                               f"permanently skipping", flush=True)
-                reason = "LLM rejected" if llm_rejected else "all task objects failed to place"
+                if camera_failed and args.env_type == "A":
+                    engine.reject_native_target(
+                        interaction_target(run), "initial_camera_coverage",
+                    )
+                if llm_rejected:
+                    reason = "LLM rejected"
+                elif camera_failed:
+                    reason = "initial camera coverage failed"
+                else:
+                    reason = "task generation or placement failed"
                 limit_str = f"/{limit}" if limit > 0 else ""
                 print(f"[retry-control] retry {attempt}{limit_str} (LLM: {run_llm_retries}/{config.max_llm_retries_per_scene}): "
-                      f"{reason}, task={rejected_task}, skip set: {len(skip_tasks)}", flush=True)
-                if len(skip_tasks) >= 50:
+                      f"{reason}, task={rejected_task}, run skip set: {len(run_skip_tasks)}", flush=True)
+                if len(run_skip_tasks) >= 50:
                     print(f"[online-deltasg] WARNING: 50+ tasks skipped, "
                           f"scene may not support enough linear tasks", flush=True)
 
@@ -655,6 +909,20 @@ def main():
                 summary["ok"] = summary["ok"] and run["ok"]
             print(json.dumps(item, ensure_ascii=False, indent=2), flush=True)
 
+            if run.get("fatal_physics_error"):
+                summary["aborted_reason"] = "fatal_physics_error"
+                print(f"[fatal-physics] aborting remaining samples in this process "
+                      f"({args.num_envs - idx - 1} skipped); a clean process is required",
+                      flush=True)
+                break
+
+        # A requested sample slot is successful only if it produced an
+        # accepted dataset entry. Outer coverage runners use this status to
+        # start a fresh OG process instead of reusing contaminated physics.
+        if len(runs) != args.num_envs:
+            summary["ok"] = False
+            summary["num_generated"] = len(runs)
+
         # Final checkpoint save
         engine.save_checkpoint(args.output_dir)
 
@@ -667,7 +935,16 @@ def main():
         print(f"[online-deltasg] saved {dataset_path}", flush=True)
         hard_exit(0 if summary["ok"] else 2)
     except Exception as exc:
-        error = {"ok": False, "error": repr(exc), "traceback": traceback.format_exc()}
+        error = {
+            "ok": False,
+            "error": repr(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
+        if hasattr(exc, "reason"):
+            error["reason"] = exc.reason
+        if hasattr(exc, "detail"):
+            error["detail"] = exc.detail
         error_path = Path(args.output_dir) / "error.json"
         with error_path.open("w", encoding="utf-8") as f:
             json.dump(error, f, ensure_ascii=False, indent=2)

@@ -11,25 +11,28 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import random
 import re
 import sys
 import time
 import traceback
 import importlib.util
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import cv2
 import torch as th
 
 import omnigibson as og
 import omnigibson.lazy as lazy
 from omnigibson import object_states
 from omnigibson.utils.usd_utils import RigidContactAPI
+from omnigibson.utils import transform_utils as T
 from omnigibson.objects import DatasetObject
-from omnigibson.utils.asset_utils import get_all_object_category_models
+from omnigibson.utils.asset_utils import get_all_object_category_models, get_dataset_path
 from omnigibson.utils.constants import PrimType
 
 
@@ -39,6 +42,19 @@ if str(REPO_ROOT) not in sys.path:
 
 from llm_client import create_llm_client
 import llm_client as llm_prompts
+from deltasg_expert import (
+    DEFAULT_MAX_MANIPULATION_HEIGHT,
+    DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+    DEFAULT_MIN_MANIPULATION_HEIGHT,
+    DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT,
+    ExpertPlanError,
+    SUPPORTED_APPLIANCE_TASKS,
+    SUPPORTED_OPEN_CLOSE_TASKS,
+    SUPPORTED_RETRIEVAL_DELIVERY_TASKS,
+    direct_floor_primary_view_error,
+    evaluate_manipulation_height,
+    validate_env_a_plan_contract,
+)
 
 TASK_ASSET_DATABASE_PATH = REPO_ROOT / "OmniGibson" / "omnigibson" / "scene_graphs" / "task_asset_database.py"
 
@@ -54,6 +70,7 @@ TaskAssetDatabase = _load_task_asset_database_class()
 
 
 STRUCTURAL_CATEGORIES = {"agent", "ceilings", "ceiling", "floors", "floor", "walls", "wall"}
+NON_BLOCKING_NAVIGATION_CATEGORIES = STRUCTURAL_CATEGORIES | {"carpet", "rug", "mat"}
 SUPPORT_SURFACE_TOKENS = {
     "bar",
     "bed",
@@ -149,22 +166,19 @@ ROOM_KEYWORDS = {
 # Other categories (anomaly, appliance, cleaning, etc.) go to Env-B/C.
 VALID_TASKS: dict[str, set[str]] = {
     # Retrieval & Delivery
-    "retrieval_delivery": {
-        "retrieve_medicine", "retrieve_key", "retrieve_remote",
-        "retrieve_phone", "retrieve_book", "retrieve_drink",
-        "retrieve_food", "deliver_medicine", "deliver_food",
-        "deliver_drink", "put_object_on_table", "put_object_in_container",
-    },
+    "retrieval_delivery": set(SUPPORTED_RETRIEVAL_DELIVERY_TASKS),
     # Open / Close
-    "open_close": {
-        "open_door", "close_door", "open_window", "close_window",
-        "open_fridge", "close_fridge", "open_cabinet", "close_cabinet",
-    },
+    "open_close": set(SUPPORTED_OPEN_CLOSE_TASKS),
     # Appliance (switch on/off)
-    "appliance": {
-        "turn_on_light", "turn_off_light", "turn_on_tv",
-        "turn_off_tv", "turn_on_stove", "turn_off_stove",
-    },
+    "appliance": set(SUPPORTED_APPLIANCE_TASKS),
+}
+
+# These taxonomy entries do not yet have a semantically exact asset and
+# destination contract, so they must not be advertised as executable tasks.
+PLANNED_RETRIEVAL_TASKS: set[str] = {
+    "retrieve_remote",
+    "put_object_on_table",
+    "put_object_in_container",
 }
 
 # Flattened set of all task names for quick lookup
@@ -185,6 +199,8 @@ SAFE_RETRIEVAL_ASSETS: dict[str, tuple[str, ...]] = {
     "deliver_food": ("canned_food",),
     "deliver_drink": ("bottle_of_water", "water_bottle"),
 }
+
+assert VALID_TASKS["retrieval_delivery"] == set(SAFE_RETRIEVAL_ASSETS)
 
 NATIVE_TASK_TARGET_TOKENS: dict[str, tuple[str, ...]] = {
     "open_door": ("door",), "close_door": ("door",),
@@ -209,7 +225,7 @@ class OnlineDeltaSGConfig:
     support_z_tolerance: float = 0.08
     seed: int | None = None
     allow_cloth: bool = False
-    max_fallback_supports: int = 2
+    max_fallback_supports: int = 5
     llm_model: str | None = None
     llm_base_url: str | None = None
     llm_api_key: str | None = None
@@ -237,6 +253,35 @@ class OnlineDeltaSGConfig:
     cache_base_graph: bool = True
     allow_repeat_tasks: bool = False
 
+    # ---- Initial multi-camera coverage ----
+    max_global_cameras: int = 3
+    visibility_min_pixels: int = 8
+    max_camera_pose_attempts_per_room: int = 6
+    camera_pose_render_steps: int = 4
+
+    # Generation must apply the same solvability contract as the downstream
+    # expert. Symbolic experts still require a connected observation pose, but
+    # do not require a Tiago arm-reachable 0.65 m grasp point.
+    solvability_profile: str = "physical_control"
+
+    # A stable placement is not useful for physical expert data when the task
+    # object is outside the initial robot's traversable component or arm range.
+    require_task_object_reachability: bool = True
+    max_task_object_approach_distance: float = DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+    # The official traversability map is already eroded by the active robot
+    # footprint. Additional clearance is opt-in because it can disconnect an
+    # otherwise stable target-conditioned spawn from its own component.
+    expert_base_clearance_margin: float = 0.20
+    min_manipulation_height: float = DEFAULT_MIN_MANIPULATION_HEIGHT
+    max_manipulation_height: float = DEFAULT_MAX_MANIPULATION_HEIGHT
+
+    # Deterministic coverage controls. These remain unset for normal diverse
+    # generation and are used by the coverage backfill scheduler.
+    target_asset_category: str | None = None
+    target_asset_model: str | None = None
+    target_native_object_id: str | None = None
+    target_placement_mode: str = "auto"
+
 
 class OnlineDeltaSGEngine:
     """
@@ -260,6 +305,9 @@ class OnlineDeltaSGEngine:
         self._placed_on_support = {}
         self._placement_support_map = {}
         self._floor_placed_objects: set[str] = set()
+        self._anchored_native_fixtures: set[str] = set()
+        self._robot_component_cache = {}
+        self._reachable_room_pixels_cache = {}
         self._support_occupied_area = {}  # support_id → occupied XY area (m²)
         self._scene_categories_cache = None  # lazily computed set of categories in scene
         self._base_graph_cache = None
@@ -275,11 +323,14 @@ class OnlineDeltaSGEngine:
                     self._clean_scene_poses[name] = (position.clone(), orientation.clone())
                 except Exception:
                     pass
+        self._native_state_baselines = {}
+        self._mutated_native_states = set()
         self._run_started = False
         self._pre_run_state = None
         # Retry / fail-fast state
         self._rejected_task_cache: set[str] = set()
         self._failed_placement_cache: set[tuple[str, str]] = set()  # (category, support_id) pairs
+        self._rejected_rooms: set[str] = set()  # rooms where a task attempt failed; avoided on retry
         self._llm_retry_count: int = 0
         self._task_placement_start_time: float = 0.0
         self._scene_start_time: float = 0.0
@@ -292,6 +343,10 @@ class OnlineDeltaSGEngine:
         self._used_target_categories: Counter[str] = Counter()
         self._used_target_models: Counter[tuple[str, str]] = Counter()
         self._failed_target_models: Counter[tuple[str, str]] = Counter()
+        self._last_native_target_rejection = None
+        self._rejected_native_target_cache: set[str] = set()
+        self._prepared_native_target_id: str | None = None
+        self._prepared_native_target: dict | None = None
         self._enabled_categories: set[str] | None = None  # None = all categories
         self._llm_client = create_llm_client(
             api_key=self.config.llm_api_key,
@@ -388,6 +443,8 @@ class OnlineDeltaSGEngine:
         self._placed_on_support = {}
         self._placement_support_map = {}
         self._floor_placed_objects = set()
+        self._robot_component_cache = {}
+        self._reachable_room_pixels_cache = {}
         self._support_occupied_area = {}
         self._scene_categories_cache = None  # refresh scene categories
         self._cleanup_spawned_objects(prefer_reset=not self.config.fast_env_a_cleanup)
@@ -449,35 +506,117 @@ class OnlineDeltaSGEngine:
         # ---- Step 3: Match required objects to asset database records ----
         selected_records = self._match_required_objects(required_objs)
 
+        generated_support_record = None
+
         # For retrieval/delivery, task semantics are simple enough to bind the
         # spawned object to a vetted category. This prevents LLM object
         # hallucinations from reaching the physics layer.
         if task_category == "retrieval_delivery":
             safe_records = self._safe_retrieval_records(primary_task)
+            if self.config.target_asset_category and not safe_records:
+                self._rejected_task_cache.add(primary_task)
+                return self._build_llm_rejected_result(
+                    llm_validation={
+                        "issues": [
+                            f"target_asset_category_incompatible:{self.config.target_asset_category}"
+                        ]
+                    },
+                    before_graph=before_graph,
+                    primary_task=primary_task,
+                    target_room=target_room or "",
+                    hard_reject=True,
+                )
             if safe_records:
                 selected_records = safe_records
-                target_room = self._choose_safe_target_room(
+                preferred_target_room = target_room
+                native_room = self._choose_safe_target_room(
                     safe_records[0], before_graph, preferred_room=target_room,
                 )
+                target_room = native_room
+                if target_room is None:
+                    alternate_exclusions = set(self._rejected_rooms)
+                    if preferred_target_room:
+                        alternate_exclusions.add(preferred_target_room)
+                    target_room = self._choose_support_bootstrap_room(
+                        before_graph, excluded_rooms=alternate_exclusions,
+                    ) or self._choose_support_bootstrap_room(
+                        before_graph, excluded_rooms=self._rejected_rooms,
+                    ) or self._choose_support_bootstrap_room(
+                        before_graph,
+                    )
+                if target_room is None:
+                    self._rejected_task_cache.add(primary_task)
+                    return self._build_llm_rejected_result(
+                        llm_validation={"issues": ["no_reachable_compatible_support_room"]},
+                        before_graph=before_graph,
+                        primary_task=primary_task,
+                        target_room="",
+                        hard_reject=True,
+                    )
+                if native_room is None:
+                    generated_support_record = copy.deepcopy(
+                        self._record_for_category("breakfast_table")
+                    )
+                    generated_support_record["_generated_support_fixture"] = True
+                    print(
+                        f"[retrieval-bootstrap] no native surface; placing breakfast_table in {target_room}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[retrieval-bootstrap] using vetted native support in {target_room}",
+                        flush=True,
+                    )
                 print(f"[retrieval-profile] task={primary_task} asset="
                       f"{self._choose_category(safe_records[0])} room={target_room}", flush=True)
 
         native_target = None
+        native_initial_state = None
         native_instruction = None
         if task_category in {"open_close", "appliance"}:
             # These tasks act on an existing fixture; never spawn whatever
             # auxiliary object the LLM happened to mention before binding it.
             selected_records = []
-            native_target = self._select_native_task_target(primary_task, before_graph)
-            if native_target is None:
-                self._rejected_task_cache.add(primary_task)
-                return self._build_llm_rejected_result(
-                    llm_validation={"issues": ["no_matching_native_stateful_target"]},
-                    before_graph=before_graph,
-                    primary_task=primary_task,
-                    target_room=target_room,
-                    hard_reject=True,
+            rejected_state_targets = []
+            while True:
+                native_target = self._select_native_task_target(primary_task, before_graph)
+                if native_target is None:
+                    self._rejected_task_cache.add(primary_task)
+                    return self._build_llm_rejected_result(
+                        llm_validation={
+                            "issues": ["no_officially_transitionable_native_target"],
+                            "detail": {
+                                "selection": self._last_native_target_rejection,
+                                "rejected_targets": rejected_state_targets,
+                            },
+                        },
+                        before_graph=before_graph,
+                        primary_task=primary_task,
+                        target_room=target_room,
+                        hard_reject=True,
+                    )
+                native_initial_state = self._prepare_native_task_initial_state(
+                    primary_task, native_target
                 )
+                if native_initial_state.get("ok"):
+                    break
+                rejected_state_targets.append(native_initial_state)
+                self.reject_native_target(
+                    native_target.get("object_id"),
+                    native_initial_state.get("error", "official state transition preflight failed"),
+                )
+                if self.config.target_native_object_id:
+                    self._rejected_task_cache.add(primary_task)
+                    return self._build_llm_rejected_result(
+                        llm_validation={
+                            "issues": ["native_target_official_state_transition_failed"],
+                            "detail": native_initial_state,
+                        },
+                        before_graph=before_graph,
+                        primary_task=primary_task,
+                        target_room=native_target["room_id"],
+                        hard_reject=True,
+                    )
             target_room = native_target["room_id"]
             required_objs = [{
                 "name": native_target["category"],
@@ -511,7 +650,11 @@ class OnlineDeltaSGEngine:
             context_records = []
         else:
             context_records = self._select_context_records_for_objects(selected_records, before_graph)
-        records = self._dedupe_records(selected_records + context_records)
+        records = self._dedupe_records(
+            ([generated_support_record] if generated_support_record else [])
+            + selected_records
+            + context_records
+        )
 
         # LLM task feasibility validation
         generated_instruction = None
@@ -587,11 +730,32 @@ class OnlineDeltaSGEngine:
         self._task_placement_start_time = _time.time()
         abort_task = False
         abort_reason = None
+        # An invalid physics view cannot be healed by retrying inside this
+        # process. Escalate it so the runner starts a clean process.
+        fatal_physics = False
+        placement_graph = before_graph
+        generated_support_id = None
 
         for idx, record in enumerate(records):
-            role = "task_object" if record in selected_records else "context_object"
+            if record.get("_generated_support_fixture"):
+                role = "task_support"
+            else:
+                role = "task_object" if record in selected_records else "context_object"
             cat = self._choose_category(record)
             obj_name = f"{run_id}_{idx:03d}_{self._slug(cat)}"
+
+            # Pre-check: an invalid physics view aborts every remaining record.
+            if fatal_physics:
+                print(f"[placement] ({idx + 1}/{len(records)}) SKIP {cat}: "
+                      f"physics view invalid, clean process required", flush=True)
+                validation["failed_objects"].append({
+                    "ok": False,
+                    "object_name": obj_name,
+                    "category": cat,
+                    "semantic_role": role,
+                    "errors": [{"error": "skipped_after_fatal_physics_error"}],
+                })
+                continue
 
             # Pre-check: skip if this is a context object and we already failed task objects
             if abort_task and role == "context_object":
@@ -638,8 +802,70 @@ class OnlineDeltaSGEngine:
                 object_name=obj_name,
                 target_room=target_room,
                 semantic_role=role,
-                cached_graph=before_graph,
+                cached_graph=placement_graph,
+                preferred_support_id=(generated_support_id if role == "task_object" else None),
             )
+            if (
+                not add_result["ok"]
+                and not fatal_physics
+                and role == "task_object"
+                and task_category == "retrieval_delivery"
+                and generated_support_id is None
+            ):
+                bootstrap_room = self._choose_support_bootstrap_room(
+                    placement_graph,
+                    excluded_rooms={target_room} | self._rejected_rooms,
+                ) or target_room
+                if bootstrap_room != target_room:
+                    print(
+                        f"[retrieval-bootstrap] moving fallback support from cramped "
+                        f"{target_room} to {bootstrap_room}",
+                        flush=True,
+                    )
+                    target_room = bootstrap_room
+                    delta["task"]["target_room"] = target_room
+                support_record = copy.deepcopy(self._record_for_category("breakfast_table"))
+                support_record["_generated_support_fixture"] = True
+                support_name = f"{run_id}_bootstrap_support"
+                print(
+                    f"[retrieval-bootstrap] native surfaces failed; placing breakfast_table in {target_room}",
+                    flush=True,
+                )
+                support_result = self.add_task_asset(
+                    record=support_record,
+                    object_name=support_name,
+                    target_room=target_room,
+                    semantic_role="task_support",
+                    cached_graph=placement_graph,
+                )
+                if support_result.get("fatal_physics_error"):
+                    fatal_physics = True
+                elif support_result.get("ok"):
+                    generated_support_id = support_result["object_name"]
+                    created_names.append(generated_support_id)
+                    validation["created_objects"].append(support_result)
+                    delta["nodes"].append(support_result["delta_node"])
+                    delta["edges"].extend(support_result["delta_edges"])
+                    self._step(15)
+                    placement_graph = self.snapshot()
+                    add_result = self.add_task_asset(
+                        record=record,
+                        object_name=obj_name,
+                        target_room=target_room,
+                        semantic_role=role,
+                        cached_graph=placement_graph,
+                        preferred_support_id=generated_support_id,
+                    )
+                else:
+                    add_result.setdefault("errors", []).append({
+                        "error": "bootstrap_support_failed",
+                        "detail": support_result.get("errors") or [],
+                    })
+            if add_result.get("fatal_physics_error"):
+                fatal_physics = True
+            if fatal_physics:
+                abort_task = True
+                abort_reason = "fatal_physics_error"
             elapsed = _time.time() - t0
             if add_result["ok"]:
                 if not add_result.get("reused"):
@@ -647,6 +873,10 @@ class OnlineDeltaSGEngine:
                 validation["created_objects"].append(add_result)
                 delta["nodes"].append(add_result["delta_node"])
                 delta["edges"].extend(add_result["delta_edges"])
+                if role == "task_support":
+                    generated_support_id = add_result.get("object_name")
+                    self._step(15)
+                    placement_graph = self.snapshot()
                 mode = (add_result.get("placement") or {}).get("mode", "?")
                 support = (add_result.get("placement") or {}).get("support_object_id", "none")
                 if add_result.get("reused"):
@@ -697,6 +927,15 @@ class OnlineDeltaSGEngine:
         self._checkpoint["attempted_tasks"].append({
             "task": primary_task, "aborted": abort_task, "abort_reason": abort_reason,
         })
+        # A room whose placements all failed is a dead end for this process;
+        # avoid re-selecting it on the next attempt so retries explore fresh
+        # rooms instead of re-poisoning the same one.
+        if abort_task and target_room and abort_reason in {
+            "all_task_objects_failed", "fatal_physics_error",
+        }:
+            self._rejected_rooms.add(target_room)
+            print(f"[room-memory] rejecting room {target_room} for this process "
+                  f"({abort_reason}); rejected={sorted(self._rejected_rooms)}", flush=True)
         t0 = _time.time()
         # Keep all placed objects still, then release one by one to prevent clipping
         placed_objs = []
@@ -815,19 +1054,57 @@ class OnlineDeltaSGEngine:
                     failed_names = [fo.get("category", "?") for fo in failed_task_objects]
                     print(f"  failed objects excluded: {failed_names}")
 
+        delivery_destination = None
         if task_category == "retrieval_delivery" and placed_task_objects:
-            delivery_destination = None
             if primary_task.startswith("deliver_"):
                 delivery_destination = self._choose_delivery_destination(
-                    after_graph, placed_task_objects[0],
+                    after_graph, placed_task_objects[0]
                 )
                 if delivery_destination is None:
-                    validation["ok"] = False
-                    validation["failed_objects"].append({
-                        "semantic_role": "delivery_destination",
-                        "errors": [{"error": "no_distinct_delivery_destination"}],
-                    })
-                else:
+                    destination_support, delivery_destination = (
+                        self._spawn_delivery_destination_support(
+                            run_id,
+                            after_graph,
+                            source_room=(placed_task_objects[0].get("placement") or {}).get("room_id"),
+                            source_item=placed_task_objects[0],
+                        )
+                    )
+                    if destination_support.get("ok") and delivery_destination:
+                        validation["created_objects"].append(destination_support)
+                        delta["nodes"].append(destination_support["delta_node"])
+                        delta["edges"].extend(destination_support["delta_edges"])
+                        if not destination_support.get("reused"):
+                            created_names.append(destination_support["object_name"])
+                        self._step(15)
+                        validation["settling"] = self._collect_settling_report(created_names)
+                        validation["ok"] = bool(
+                            validation["ok"]
+                            and validation["settling"]["all_within_threshold"]
+                        )
+                        if not validation["settling"]["all_within_threshold"]:
+                            failed_settling = [
+                                {
+                                    "object_name": item.get("object_name"),
+                                    "displacement": item.get("displacement"),
+                                    "unexpected_contact": item.get("unexpected_contact", False),
+                                    "contacting_objects": item.get("contacting_objects", []),
+                                }
+                                for item in validation["settling"].get("objects", [])
+                                if (
+                                    not item.get("within_threshold", False)
+                                    or item.get("unexpected_contact", False)
+                                )
+                            ]
+                            print(
+                                f"[delivery-destination] final settling rejected: "
+                                f"{failed_settling}",
+                                flush=True,
+                            )
+                        after_graph = self.snapshot()
+                    else:
+                        validation["ok"] = False
+                        validation["failed_objects"].append(destination_support)
+                if delivery_destination is not None:
                     target_room = delivery_destination["room_id"]
                     required_objs.append({
                         "name": delivery_destination["category"],
@@ -842,6 +1119,8 @@ class OnlineDeltaSGEngine:
             run_id, primary_task, target_room, validation["created_objects"],
             generated_instruction, required_objs=required_objs,
             task_category=task_category,
+            native_target=native_target,
+            delivery_destination=delivery_destination,
         )
         task_environment = self._build_task_environment_record(
             env_id=run_id,
@@ -852,6 +1131,7 @@ class OnlineDeltaSGEngine:
             validation=validation,
             delta_sg=delta,
             graph=after_graph,
+            state_changed_objects=[native_initial_state] if native_initial_state else [],
         )
         if validation["ok"]:
             for item in placed_task_objects:
@@ -862,6 +1142,7 @@ class OnlineDeltaSGEngine:
             "schema_version": "online_deltasg_env_a.v1",
             "run_id": run_id,
             "ok": validation["ok"],
+            "fatal_physics_error": fatal_physics,
             "task_environment": task_environment,
             "base_scene": task_environment["base_scene"],
             "task": task_environment["task"],
@@ -1422,13 +1703,26 @@ class OnlineDeltaSGEngine:
 
     def _append_env_c_native_plan_objects(self, task_instance, candidates):
         plan_objects = task_instance.setdefault("plan_objects", [])
-        existing = {item.get("object_id") for item in plan_objects}
+        existing = {item.get("object_id"): item for item in plan_objects}
         for item in candidates:
-            if not item or item.get("object_id") in existing:
+            if not item:
+                continue
+            object_id = item.get("object_id")
+            if object_id in existing:
+                # Native distractors are often already present as reference
+                # context. Attach their Env-C role to that existing record.
+                record = existing[object_id]
+                role = item.get("semantic_role")
+                roles = set(record.get("semantic_roles") or [])
+                if role:
+                    roles.add(role)
+                    record["semantic_role"] = role
+                roles.update(item.get("semantic_roles") or [])
+                record["semantic_roles"] = sorted(roles)
                 continue
             plan_objects.append(
                 {
-                    "object_id": item.get("object_id"),
+                    "object_id": object_id,
                     "category": item.get("category"),
                     "room": item.get("room_id"),
                     "reused": True,
@@ -1437,7 +1731,7 @@ class OnlineDeltaSGEngine:
                     "semantic_roles": item.get("semantic_roles"),
                 }
             )
-            existing.add(item.get("object_id"))
+            existing[object_id] = plan_objects[-1]
 
     def _append_env_c_native_delta(self, delta_sg, target_room, candidates):
         for item in candidates:
@@ -1461,6 +1755,14 @@ class OnlineDeltaSGEngine:
     def _env_c_optimal_object(self, task_instance, created_objects):
         for item in task_instance.get("task_objects") or []:
             object_id = item.get("object_id")
+            if object_id:
+                return object_id
+        # Native state-change tasks have no spawned task object. The INTERACT
+        # target is authoritative; the first plan object may only be context.
+        for step in reversed(task_instance.get("solution_plan") or []):
+            if str(step.get("primitive") or "").upper() != "INTERACT":
+                continue
+            object_id = step.get("target_object")
             if object_id:
                 return object_id
         for item in task_instance.get("plan_objects") or []:
@@ -1510,6 +1812,8 @@ class OnlineDeltaSGEngine:
         semantic_role="task_object",
         cached_graph=None,
         preferred_position=None,
+        avoid_position=None,
+        preferred_support_id=None,
     ):
         """Add one task asset directly to the live OmniGibson scene.
 
@@ -1536,7 +1840,11 @@ class OnlineDeltaSGEngine:
             # Check if an object of this category already exists in the target room.
             # Large furniture (tables, cabinets, countertops) are already in the scene —
             # reuse them instead of spawning a new one.
-            existing = self._find_existing_in_room(category, target_room)
+            existing = (
+                None
+                if record.get("_generated_support_fixture")
+                else self._find_existing_in_room(category, target_room)
+            )
             if existing is not None:
                 pos, ori = self._safe_pose(existing)
                 actual_rooms = self._rooms_for_obj(existing)
@@ -1566,7 +1874,9 @@ class OnlineDeltaSGEngine:
             if not self._category_has_models(category):
                 raise ValueError(f"No available models found for category {category}")
             prim_type = PrimType.CLOTH if record.get("object_type") == "cloth" else PrimType.RIGID
-            model = self._choose_target_model(category)
+            model = self._choose_target_model(
+                category, preferred_models=record.get("_preferred_models")
+            )
             result["model"] = model
             obj = DatasetObject(
                 name=object_name,
@@ -1574,9 +1884,45 @@ class OnlineDeltaSGEngine:
                 model=model,
                 prim_type=prim_type,
                 in_rooms=target_room,
+                # NOTE: kinematic_only is intentionally NOT set here. It only takes
+                # effect with fixed_base=True (see compute_kinematic_only in
+                # usd_utils.py), and loading a fixed/kinematic body mid-play trips
+                # the RigidContactAPI row-count assertion, so a generated support
+                # cannot be anchored that way. The support stays dynamic; what keeps
+                # it from falling through the floor is the stop/play physics rebuild
+                # right below.
             )
+            # Import the object while physics is STOPPED, then rebuild the physics
+            # scene with play(). Importing a dynamic body mid-play corrupts PhysX's
+            # incremental broadphase ("Illegal BroadPhaseUpdateData",
+            # BpBroadPhaseABP.cpp) so the new body loses floor-contact pairs and
+            # falls straight through the floor (observed: generated nightstands at
+            # z=-2..-4 while the floor is z=0, in every 2026-08-10 run up to and
+            # including enva_gen5_viewfix). The only historical Env-A sample that
+            # stayed on the floor (enva_firstjob_officialontop, 2026-08-10) did so
+            # by accident: a flood of PhysX errors made omni.physxui stop the
+            # timeline, and the next _step() re-played the sim; that stop/play
+            # rebuild re-registers every body with the broadphase from scratch and
+            # restores floor contact. Do that rebuild deliberately here. The object
+            # itself is initialized inside play() (_non_physics_step runs at the end
+            # of play and calls obj.initialize() + keep_still() + update_handles()).
+            was_playing = og.sim.is_playing()
+            rebuild_pose_restore = []
+            if was_playing:
+                # stop()+play() re-initializes PhysX from USD and calls
+                # Robot.reset(); capture the live poses of the robot and every
+                # previously generated object first so the rebuild cannot
+                # revert them (see _capture_physics_rebuild_poses).
+                rebuild_pose_restore = self._capture_physics_rebuild_poses()
+                og.sim.stop()
             self.env.scene.add_object(obj)
             self._clear_usd_selection()
+            if was_playing:
+                og.sim.play()
+                self._restore_physics_rebuild_poses(rebuild_pose_restore)
+                self._stabilize_rebuilt_native_fixtures(rebuild_pose_restore)
+            else:
+                self._step(1)
 
             # Build candidate placement list: primary + fallbacks + floor
             # Use cached graph from generate_env_a when available to avoid expensive re-scans
@@ -1584,29 +1930,132 @@ class OnlineDeltaSGEngine:
             placement = self._choose_live_placement(
                 record, target_room, graph=placement_graph, preferred_position=preferred_position,
             )
+            if preferred_support_id:
+                preferred_support = next(
+                    (
+                        node for node in placement_graph.get("nodes", [])
+                        if node.get("id") == preferred_support_id
+                    ),
+                    None,
+                )
+                preferred_placement = (
+                    self._build_placement_for_support(
+                        record, target_room, preferred_support, graph=placement_graph,
+                    )
+                    if preferred_support is not None
+                    else None
+                )
+                if preferred_placement:
+                    # Pin the generated-support placement so the task object is
+                    # tried on its intended support before any floor fallback,
+                    # even after robot-distance ranking reorders candidates.
+                    preferred_placement["_preferred_support_candidate"] = True
+                    fallback_nodes = []
+                    support_id = placement.get("support_object_id")
+                    if support_id and support_id != preferred_support_id:
+                        fallback = next(
+                            (
+                                node for node in placement_graph.get("nodes", [])
+                                if node.get("id") == support_id
+                            ),
+                            None,
+                        )
+                        if fallback is not None:
+                            fallback_nodes.append(fallback)
+                    fallback_nodes.extend(placement.get("support_candidates", []))
+                    preferred_placement["support_candidates"] = fallback_nodes
+                    placement = preferred_placement
             floor_candidates = []
-            if self._floor_fallback_allowed(record, category):
+            generated_support_fixture = semantic_role == "task_support"
+            # A task object may use floor as a last resort, but it is accepted
+            # only after its live AABB proves that the grasp point is inside
+            # the expert robot's manipulation-height band.
+            task_floor_eligible = (
+                semantic_role != "task_object"
+                or self._floor_fallback_allowed(record, category)
+            )
+            if (
+                generated_support_fixture
+                or self._floor_fallback_allowed(record, category)
+            ) and task_floor_eligible:
                 for _ in range(3):
                     floor_placement = self._build_floor_placement(
-                        record, target_room, graph=placement_graph, preferred_position=preferred_position,
+                        record,
+                        target_room,
+                        graph=placement_graph,
+                        preferred_position=preferred_position,
+                        avoid_position=avoid_position,
+                        spread_across_room=generated_support_fixture,
+                        placement_obj=obj,
+                        require_footprint_clear=generated_support_fixture,
                     )
                     if floor_placement:
                         floor_candidates.append(floor_placement)
             candidates = []
-            if self._category_prefers_floor(category):
+            primary_is_floor = (
+                placement.get("mode") == "floor"
+                or self._tokens(placement.get("support_category") or "") & {"floor", "floors"}
+            )
+            if generated_support_fixture:
+                # Generated support furniture is itself the receptacle. Place
+                # it directly on a free reachable floor pose instead of
+                # attempting an OnTop relation with the structural floor node.
+                candidates.extend(floor_candidates)
+            elif self._category_prefers_floor(category):
                 candidates.extend(floor_candidates)
                 candidates.append(placement)
-            else:
+            elif not primary_is_floor or task_floor_eligible:
                 candidates.append(placement)
-            for alt_support in placement.get("support_candidates", [])[:self.config.max_fallback_supports]:
+            for alt_support in (
+                [] if generated_support_fixture
+                else placement.get("support_candidates", [])[:self.config.max_fallback_supports]
+            ):
+                alt_is_floor = self._tokens(alt_support.get("category") or "") & {"floor", "floors"}
+                if semantic_role == "task_object" and alt_is_floor and not task_floor_eligible:
+                    continue
                 alt_placement = self._build_placement_for_support(record, target_room, alt_support, graph=placement_graph)
                 if alt_placement:
                     candidates.append(alt_placement)
-            if not self._category_prefers_floor(category):
+            if not generated_support_fixture and not self._category_prefers_floor(category):
                 # Only allow floor placement for categories that reasonably go on the floor.
                 # Do not use floor as a universal last resort: plates, food, knives, cups, etc.
                 # should fail placement rather than becoming invalid task data.
                 candidates.extend(floor_candidates)
+            if semantic_role == "task_object" and self.config.target_placement_mode == "floor":
+                candidates = floor_candidates
+
+            if semantic_role == "task_object":
+                for candidate in candidates:
+                    candidate["prefer_robot_access"] = True
+
+            # Relation placement is comparatively expensive and may move the
+            # object to a random point on a support. Rank a wider candidate
+            # pool by the proposed pose's distance to the robot's initial
+            # traversable component, then retain the strict post-placement
+            # reachability check below as the source of truth.
+            if semantic_role == "task_object" and self.config.require_task_object_reachability:
+                ranked_candidates = []
+                for original_index, candidate in enumerate(candidates):
+                    preflight = self._validate_task_approach_position(
+                        candidate["pose"]["position"], {target_room},
+                    )
+                    candidate["preflight_robot_approach"] = preflight
+                    distance = preflight.get("horizontal_distance")
+                    ranked_candidates.append((
+                        0 if preflight.get("ok") else 1,
+                        float(distance) if distance is not None else float("inf"),
+                        original_index,
+                        candidate,
+                    ))
+                ranked_candidates.sort(key=lambda item: item[:3])
+                candidates = [item[3] for item in ranked_candidates]
+                # The distance ranking can move cheap floor candidates ahead of
+                # the generated-support on-top candidate; restore the intended
+                # support so it is tried first and floor is a true last resort.
+                preferred_first = [c for c in candidates if c.get("_preferred_support_candidate")]
+                if preferred_first:
+                    remaining = [c for c in candidates if not c.get("_preferred_support_candidate")]
+                    candidates = preferred_first + remaining
 
             placed = False
             chosen_placement = None
@@ -1615,6 +2064,11 @@ class OnlineDeltaSGEngine:
             # Cap attempts per object
             max_attempts = min(len(candidates), self.config.max_placement_attempts_per_object)
             placement_start = time.time()
+            # Budget the blocking official relation sampler: at most one call
+            # per object. The call is uninterruptible; repeated invocations in
+            # the same process poison the physics view, so measure it here
+            # instead of relying on the after-the-fact relation timeout log.
+            official_fallback = {"calls": 0, "seconds": 0.0}
 
             for attempt_idx, placement_attempt in enumerate(candidates):
                 if attempt_idx >= max_attempts:
@@ -1684,9 +2138,18 @@ class OnlineDeltaSGEngine:
                 )
 
                 if is_floor:
-                    # Floor placement: skip relation, just check AABB
+                    # Ground the object from its live extent before checking
+                    # collisions. This avoids treating a temporary spawn Z as
+                    # its eventual manipulation height.
+                    floor_height = self._ground_object_on_floor(obj, placement_attempt)
                     self._step(1)
-                    overlapping = self._check_aabb_overlap(obj, exclude_names=None, margin=0.02, target_room=target_room)
+                    overlapping = self._check_aabb_overlap(
+                        obj,
+                        exclude_names=None,
+                        margin=0.02,
+                        target_room=target_room,
+                        ignore_floor_coverings=generated_support_fixture,
+                    )
                     if not overlapping:
                         # Keep still to prevent floor impact
                         try:
@@ -1699,8 +2162,61 @@ class OnlineDeltaSGEngine:
                         except Exception:
                             pass
                         self._step(2)
+                        if semantic_role == "task_support":
+                            lo, hi, _ = self._safe_aabb(obj)
+                            target_aabb_xy = (
+                                (lo[:2], hi[:2]) if lo and hi else None
+                            )
+                            position, _ = obj.get_position_orientation()
+                            reachability = self._validate_task_approach_position(
+                                position,
+                                {target_room},
+                                target_aabb_xy=target_aabb_xy,
+                                # Keep the support in the blocker set. Otherwise a
+                                # point under the table is falsely accepted.
+                                target_object_id=None,
+                            )
+                            if not reachability["ok"]:
+                                result["errors"].append({
+                                    "error": "task_support_no_collision_free_operation_approach",
+                                    "reachability": reachability,
+                                    "support": "__floor__",
+                                })
+                                continue
+                        else:
+                            reachability = self._validate_task_object_approach(obj)
+                        if semantic_role == "task_object" and not reachability["ok"]:
+                            result["errors"].append({
+                                "error": "task_object_unreachable",
+                                "reachability": reachability,
+                                "support": "__floor__",
+                            })
+                            continue
+                        manipulation_height = self._validate_floor_manipulation_height(
+                            obj, floor_height
+                        )
+                        if semantic_role == "task_object" and not manipulation_height["eligible"]:
+                            result["errors"].append({
+                                "error": "task_object_floor_height_out_of_range",
+                                "manipulation_height": manipulation_height,
+                                "support": "__floor__",
+                            })
+                            continue
+                        primary_view_error = direct_floor_primary_view_error(
+                            manipulation_height["relative_height"]
+                        )
+                        if semantic_role == "task_object" and primary_view_error:
+                            result["errors"].append({
+                                "error": "task_object_floor_primary_view_too_low",
+                                "reason": primary_view_error,
+                                "manipulation_height": manipulation_height,
+                                "support": "__floor__",
+                            })
+                            continue
                         placed = True
                         chosen_placement = copy.deepcopy(placement_attempt)
+                        chosen_placement["robot_approach"] = reachability
+                        chosen_placement["manipulation_height"] = manipulation_height
                         chosen_placement["mode"] = "floor"
                         chosen_placement["support_category"] = "floor"
                         relation_result = {"ok": True, "mode": "floor", "reason": "floor_placement"}
@@ -1713,8 +2229,15 @@ class OnlineDeltaSGEngine:
                         continue
 
                 # Apply relation (OnTop/Inside) — with per-relation timeout
+                support_pose_before = (
+                    support_obj.get_position_orientation()
+                    if support_obj is not None and not support_id.startswith("online_env_")
+                    else None
+                )
                 rel_start = time.time()
-                relation_result = self._apply_relation(obj, placement_attempt)
+                relation_result = self._apply_relation(
+                    obj, placement_attempt, official_fallback=official_fallback
+                )
                 rel_elapsed = time.time() - rel_start
                 self._step(2)  # reduced from 3+1 to 2: relation set_value already handles positioning
 
@@ -1722,6 +2245,22 @@ class OnlineDeltaSGEngine:
                     print(f"\n[relation-timeout] {object_name} on {support_id}: "
                           f"{rel_elapsed:.1f}s > {self.config.per_relation_attempt_timeout_sec}s",
                           flush=True)
+
+                if relation_result.get("fatal_physics_error"):
+                    # An invalid physics view cannot be retried away inside this
+                    # process. Abort the remaining candidates for this object so
+                    # the task attempt fails fast and a clean process can start.
+                    print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: "
+                          f"FATAL physics error in official sampler "
+                          f"({relation_result.get('official_sampler', {}).get('error')})",
+                          end="", flush=True)
+                    result["errors"].append({
+                        "error": "official_sampler_physics_error",
+                        "relation": relation_result,
+                        "support": support_id,
+                    })
+                    result["fatal_physics_error"] = True
+                    break
 
                 if not relation_result.get("ok"):
                     reason = relation_result.get("error") or relation_result.get("reason", "unknown")
@@ -1748,6 +2287,34 @@ class OnlineDeltaSGEngine:
                         self._failed_placement_cache.add((category, support_id))
                         continue
 
+                if semantic_role == "task_object":
+                    floor_height = self._floor_height_for_position(
+                        obj.get_position_orientation()[0]
+                    )
+                    aabb_min, aabb_max, _ = self._safe_aabb(obj)
+                    min_portable_height = (
+                        DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT
+                        if self.config.solvability_profile == "physical_control"
+                        else self.config.min_manipulation_height
+                    )
+                    portable_height = evaluate_manipulation_height(
+                        "GRASP",
+                        aabb_min[2],
+                        aabb_max[2],
+                        floor_height,
+                        min_portable_height,
+                        self.config.max_manipulation_height,
+                    )
+                    portable_height["solvability_profile"] = self.config.solvability_profile
+                    if not portable_height["eligible"]:
+                        result["errors"].append({
+                            "error": "task_object_physical_grasp_height_out_of_range",
+                            "manipulation_height": portable_height,
+                            "support": support_id,
+                        })
+                        continue
+                    placement_attempt["manipulation_height"] = portable_height
+
                 # Verify with AABB overlap check (cheap)
                 overlapping = self._check_aabb_overlap(
                     obj, exclude_names={support_id} if support_id else None, margin=0.02,
@@ -1764,6 +2331,23 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
+                support_tokens = self._tokens(placement_attempt.get("support_category") or "")
+                if semantic_role == "task_object" and support_tokens & {"floor", "floors"}:
+                    floor_height = self._floor_height_for_position(
+                        obj.get_position_orientation()[0]
+                    )
+                    manipulation_height = self._validate_floor_manipulation_height(
+                        obj, floor_height
+                    )
+                    if not manipulation_height["eligible"]:
+                        result["errors"].append({
+                            "error": "task_object_floor_height_out_of_range",
+                            "manipulation_height": manipulation_height,
+                            "support": support_id,
+                        })
+                        continue
+                    placement_attempt["manipulation_height"] = manipulation_height
+
                 # Verify with contact check (catches objects resting on same surface)
                 has_contact, contact_names = self._has_unexpected_contacts(obj, support_obj, settle_steps=3)
                 if has_contact:
@@ -1777,12 +2361,73 @@ class OnlineDeltaSGEngine:
                     self._failed_placement_cache.add((category, support_id))
                     continue
 
+                if support_pose_before is not None:
+                    # Native furniture can begin sliding only after several
+                    # physics frames under load. Observe the same warmup
+                    # window used by final sample validation before accepting
+                    # this support.
+                    self._step(20)
+                    support_position, support_orientation = support_obj.get_position_orientation()
+                    support_displacement = float(
+                        th.linalg.norm(support_position - support_pose_before[0])
+                    )
+                    # Fail early before a slowly sliding support crosses the
+                    # final 5 cm scene-integrity gate during later rendering.
+                    if support_displacement > 0.01:
+                        print(
+                            f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: "
+                            f"native support displaced {support_displacement:.3f}m",
+                            end="",
+                            flush=True,
+                        )
+                        result["errors"].append({
+                            "error": "native_support_displaced_by_placement",
+                            "displacement": support_displacement,
+                            "support": support_id,
+                        })
+                        # Remove the payload before restoring the native fixture;
+                        # otherwise its load can immediately move the fixture again.
+                        object_position, object_orientation = obj.get_position_orientation()
+                        object_position = object_position.clone()
+                        object_position[2] += 2.0
+                        obj.set_position_orientation(
+                            position=object_position, orientation=object_orientation
+                        )
+                        obj.keep_still()
+                        support_obj.set_position_orientation(
+                            position=support_pose_before[0],
+                            orientation=support_pose_before[1],
+                        )
+                        support_obj.keep_still()
+                        self._step(2)
+                        self._failed_placement_cache.add((category, support_id))
+                        continue
+
+                reachability = self._validate_task_object_approach(obj, target_room=target_room)
+                if semantic_role == "task_object" and not reachability["ok"]:
+                    print(
+                        f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: "
+                        f"robot approach FAILED ({reachability.get('reason')}, "
+                        f"distance={reachability.get('horizontal_distance')}, "
+                        f"rooms={reachability.get('target_rooms')}, "
+                        f"component_rooms={reachability.get('component_rooms')})",
+                        end="",
+                        flush=True,
+                    )
+                    result["errors"].append({
+                        "error": "task_object_unreachable",
+                        "reachability": reachability,
+                        "support": support_id,
+                    })
+                    continue
+
                 # All checks passed
                 if attempt_idx > 0:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: OK",
                           flush=True)
                 placed = True
-                chosen_placement = placement_attempt
+                chosen_placement = copy.deepcopy(placement_attempt)
+                chosen_placement["robot_approach"] = reachability
                 break
 
             if not placed:
@@ -2119,6 +2764,7 @@ class OnlineDeltaSGEngine:
         # Toys & misc
         "toy", "teddy_bear", "doll", "ball", "soccer_ball", "basketball",
         "book", "magazine", "newspaper",  # stacks on floor
+        "plywood",  # fire carrier; large flat stock is normally floor-staged
         "pillow", "cushion", "blanket", "cloth_blanket",
         # Large electronics
         "desktop_computer", "computer_tower", "printer", "scanner",
@@ -2151,6 +2797,7 @@ class OnlineDeltaSGEngine:
             "air_filter",
             "air_purifier",
             "space_heater",
+            "plywood",
         }:
             return True
         tokens = set(re.split(r"[_\W]+", cat))
@@ -2206,6 +2853,9 @@ class OnlineDeltaSGEngine:
 
     @staticmethod
     def _record_category_for_affinity(record) -> str:
+        preferred = record.get("_preferred_category")
+        if preferred:
+            return preferred
         categories = record.get("direct_categories") or []
         return categories[0] if categories else record.get("synset", "").split(".")[0].replace("__", "_")
 
@@ -2298,7 +2948,14 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None, None, None
 
-    def _check_aabb_overlap(self, obj, exclude_names=None, margin=0.02, target_room=None):
+    def _check_aabb_overlap(
+        self,
+        obj,
+        exclude_names=None,
+        margin=0.02,
+        target_room=None,
+        ignore_floor_coverings=False,
+    ):
         """Check whether obj's AABB overlaps any other scene object's AABB.
 
         Args:
@@ -2318,7 +2975,10 @@ class OnlineDeltaSGEngine:
         obj_lo = np.asarray(obj_lo, dtype=np.float32) - margin
         obj_hi = np.asarray(obj_hi, dtype=np.float32) + margin
         overlapping = []
-        for other in self._scene_objects():
+        collision_objects = list(self._scene_objects())
+        robots = list(getattr(self.env, "robots", None) or [])
+        collision_objects.extend(robots)
+        for other in collision_objects:
             other_name = getattr(other, "name", None)
             if other_name in exclude:
                 continue
@@ -2326,8 +2986,10 @@ class OnlineDeltaSGEngine:
             other_tokens = self._tokens(other_category)
             if other_tokens & {"floor", "floors"}:
                 continue
+            if ignore_floor_coverings and other_tokens & {"carpet", "rug"}:
+                continue
             # Room filter: only check objects in the same room (fast pre-filter)
-            if target_room:
+            if target_room and other not in robots:
                 other_rooms = self._rooms_for_obj(other)
                 if target_room not in other_rooms:
                     continue
@@ -2569,8 +3231,24 @@ class OnlineDeltaSGEngine:
         # works across changed object topology and prevents cumulative drift.
         try:
             self._remove_spawned_objects_by_prefix(step_after=False)
+            if not og.sim.is_playing():
+                og.sim.play()
             scene_objects = {getattr(obj, "name", ""): obj for obj in self._scene_objects()}
+            robot_names = {
+                getattr(robot_obj, "name", "")
+                for robot_obj in (getattr(self.env, "robots", None) or [])
+            }
             for name, (position, orientation) in self._clean_scene_poses.items():
+                # The robot pose is owned by task-scoped spawn preparation.
+                # Restoring the pre-task robot pose here would silently undo a
+                # target-conditioned spawn the moment generate_env_a() runs its
+                # opening cleanup; the reverted robot then sinks through the
+                # floor during the task warmup (observed as the ~0.62 m robot
+                # scene-integrity drift on Beechwood_0 open_fridge). Scene
+                # integrity still accounts for the robot; only this native
+                # pose restore skips it.
+                if name in robot_names:
+                    continue
                 obj = scene_objects.get(name)
                 if obj is None:
                     continue
@@ -2579,8 +3257,15 @@ class OnlineDeltaSGEngine:
                     obj.keep_still()
                 except Exception:
                     pass
-            if not og.sim.is_playing():
-                og.sim.play()
+            for state_id in list(self._mutated_native_states):
+                name, state_cls = state_id
+                obj = scene_objects.get(name)
+                if obj is None or state_cls not in getattr(obj, "states", {}):
+                    continue
+                baseline = self._native_state_baselines.get(state_id)
+                if baseline is not None:
+                    obj.states[state_cls].set_value(baseline)
+            self._mutated_native_states.clear()
             self._base_graph_cache = None
             self._step(3)
             return
@@ -2629,10 +3314,10 @@ class OnlineDeltaSGEngine:
         Args:
             cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
-        if self.config.allow_repeat_tasks:
-            skip = set(self._rejected_task_cache)
-        else:
-            skip = (skip_tasks or set()) | self._rejected_task_cache
+        # The runner clears cross-sample skips in diversity mode. Any skips it
+        # does pass are therefore hard rejects or per-sample retry exclusions
+        # and must always be honored.
+        skip = (skip_tasks or set()) | self._rejected_task_cache
         graph = cached_graph or self.snapshot()
         scene_furniture = self._build_scene_furniture_dict(graph)
         active_tasks = {
@@ -2715,6 +3400,10 @@ class OnlineDeltaSGEngine:
     def _safe_retrieval_records(self, task_name: str) -> list[dict]:
         """Return one vetted, small physical asset for a retrieval task."""
         categories = SAFE_RETRIEVAL_ASSETS.get(task_name, ())
+        if self.config.target_asset_category:
+            if self.config.target_asset_category not in categories:
+                return []
+            categories = (self.config.target_asset_category,)
         records = []
         for category in categories:
             try:
@@ -2776,7 +3465,7 @@ class OnlineDeltaSGEngine:
         return f"Retrieve the {category} from the {support} in {room}."
 
     def _choose_delivery_destination(self, graph: dict, item: dict) -> dict | None:
-        """Choose a real destination distinct from the object's source support."""
+        """Choose an exact, reachable, manipulation-height-safe destination."""
         placement = item.get("placement") or {}
         source_support = placement.get("support_object_id")
         source_room = placement.get("room_id")
@@ -2785,7 +3474,6 @@ class OnlineDeltaSGEngine:
             "dresser", "bookcase", "nightstand", "island",
         }
         candidates = []
-        floor_candidates = []
         for node in graph.get("nodes", []):
             if node.get("type") != "object" or node.get("id") == source_support:
                 continue
@@ -2797,46 +3485,793 @@ class OnlineDeltaSGEngine:
                 continue
             room = rooms[0]
             if self._tokens(category) & {"floor", "floors"}:
-                if room != source_room:
-                    floor_candidates.append((category, node.get("id"), room))
                 continue
             if not (self._tokens(category) & destination_tokens):
                 continue
             receptacle = ((node.get("semantic") or {}).get("receptacle") or {})
             if not receptacle.get("can_support"):
                 continue
+            destination = self._delivery_destination_from_node(node)
+            if destination is None:
+                continue
             different_room = 0 if room != source_room else 1
-            candidates.append((different_room, category, node.get("id"), room))
+            candidates.append((
+                different_room,
+                category,
+                node.get("id"),
+                room,
+                destination,
+            ))
         if candidates:
             best_rank = min(item[0] for item in candidates)
-            _, category, object_id, room_id = self.rng.choice(
-                sorted(item for item in candidates if item[0] == best_rank)
+            *_, destination = self.rng.choice(
+                sorted(
+                    (item for item in candidates if item[0] == best_rank),
+                    key=lambda item: item[:4],
+                )
             )
-        elif floor_candidates:
-            category, object_id, room_id = self.rng.choice(sorted(floor_candidates))
         else:
             return None
-        return {"object_id": object_id, "category": category, "room_id": room_id}
+        print(
+            f"[delivery-destination] using validated native support "
+            f"id={destination['object_id']} room={destination['room_id']}",
+            flush=True,
+        )
+        return destination
 
-    def _select_native_task_target(self, task_name: str, graph: dict) -> dict | None:
+    def _delivery_destination_from_node(self, node, fallback_room=None):
+        bbox = node.get("bbox") or {}
+        aabb_min = bbox.get("min")
+        aabb_max = bbox.get("max")
+        position = (node.get("pose") or {}).get("position")
+        rooms = node.get("rooms") or ([fallback_room] if fallback_room else [])
+        if not node.get("id") or not aabb_min or not aabb_max or not position or not rooms:
+            print(
+                f"[delivery-destination] reject {node.get('id')}: incomplete geometry "
+                f"aabb={bool(aabb_min and aabb_max)} pose={bool(position)} rooms={rooms}",
+                flush=True,
+            )
+            return None
+        floor_height = self._floor_height_for_position(aabb_min)
+        manipulation_height = evaluate_manipulation_height(
+            "PLACE_ON_TOP",
+            aabb_min[2],
+            aabb_max[2],
+            floor_height,
+            self.config.min_manipulation_height,
+            self.config.max_manipulation_height,
+        )
+        if not manipulation_height.get("eligible"):
+            print(
+                f"[delivery-destination] reject {node['id']}: manipulation height "
+                f"{manipulation_height}",
+                flush=True,
+            )
+            return None
+        if not self._delivery_top_surface_feasible(node):
+            return None
+        xy_diagonal = math.hypot(
+            float(aabb_max[0]) - float(aabb_min[0]),
+            float(aabb_max[1]) - float(aabb_min[1]),
+        )
+        preferred_center_distance = max(
+            1.75,
+            xy_diagonal / (2.0 * math.tan(math.radians(25.0))) + 0.25,
+        )
+        robot_approach = self._validate_task_approach_position(
+            position,
+            set(rooms),
+            target_aabb_xy=(aabb_min[:2], aabb_max[:2]),
+            # The operation pose must be outside the destination support. If
+            # it is excluded here, a point under the table can be accepted.
+            target_object_id=None,
+            preferred_center_distance=preferred_center_distance,
+        )
+        if not robot_approach.get("ok"):
+            print(
+                f"[delivery-destination] reject {node['id']}: no external approach "
+                f"{robot_approach}",
+                flush=True,
+            )
+            return None
+        if not self._primary_camera_operation_visible(node, robot_approach):
+            print(
+                f"[delivery-destination] reject {node['id']}: "
+                "not fully visible from robot operation pose",
+                flush=True,
+            )
+            return None
+        return {
+            "object_id": node["id"],
+            "category": node.get("category"),
+            "room_id": rooms[0],
+            "placement_mode": "on_top",
+            "robot_approach": robot_approach,
+            "manipulation_height": manipulation_height,
+        }
+
+    def _primary_camera_operation_visible(self, node, approach):
+        """Validate a fine PLACE target from its reserved robot approach."""
+        candidate_xy = (approach or {}).get("candidate_position_xy")
+        position = (node.get("pose") or {}).get("position")
+        object_id = node.get("id")
+        if not candidate_xy or not position or not object_id:
+            return False
+        robot = self.env.robots[0]
+        sensors = getattr(robot, "sensors", None) or getattr(robot, "_sensors", None) or {}
+        items = list(sensors.items()) if isinstance(sensors, dict) else [
+            (getattr(sensor, "name", f"sensor_{index}"), sensor)
+            for index, sensor in enumerate(sensors)
+        ]
+        cameras = [item for item in items if self._looks_like_camera_sensor(item[1])]
+        primary = [item for item in cameras if self._is_primary_robot_camera(*item)]
+        selected = primary[0] if primary else (cameras[0] if cameras else None)
+        if selected is None:
+            return False
+        try:
+            _, sensor = selected
+            robot_position, robot_orientation = robot.get_position_orientation()
+            camera_position, camera_orientation = sensor.get_position_orientation()
+            robot_matrix = T.pose2mat((robot_position, robot_orientation))
+            camera_matrix = T.pose2mat((camera_position, camera_orientation))
+            relative_camera = th.linalg.inv(robot_matrix) @ camera_matrix
+            yaw = math.atan2(
+                float(position[1]) - float(candidate_xy[1]),
+                float(position[0]) - float(candidate_xy[0]),
+            )
+            candidate_position = robot_position.clone()
+            candidate_position[:2] = th.as_tensor(candidate_xy, dtype=th.float32)
+            candidate_orientation = T.euler2quat(
+                th.tensor([0.0, 0.0, yaw], dtype=th.float32)
+            )
+            candidate_camera = T.pose2mat(
+                (candidate_position, candidate_orientation)
+            ) @ relative_camera
+            candidate_camera_position = candidate_camera[:3, 3]
+            bbox = node.get("bbox") or {}
+            lower = bbox.get("min") or position
+            upper = bbox.get("max") or position
+            size = np.asarray(upper, dtype=np.float32) - np.asarray(
+                lower, dtype=np.float32
+            )
+            operation_point = np.asarray(
+                [
+                    0.5 * (float(lower[0]) + float(upper[0])),
+                    0.5 * (float(lower[1]) + float(upper[1])),
+                    0.5 * (float(lower[2]) + float(upper[2])),
+                ],
+                dtype=np.float32,
+            )
+            if float(np.linalg.norm(size[:2])) >= 1.0 or float(size[2]) >= 0.6:
+                operation_point[2] = float(lower[2]) + 0.05 * float(size[2])
+            # The expert performs an in-place base/head look-at after MOVE.
+            # Test that reachable aimed view, not the unrelated spawn head pose.
+            candidate_camera_orientation = self._look_at_quat(
+                np.asarray(candidate_camera_position.cpu(), dtype=np.float32),
+                operation_point,
+            )
+            resolution = self._sensor_resolution(sensor) or {}
+            visibility = self._geometric_camera_visibility(
+                candidate_camera_position,
+                th.as_tensor(candidate_camera_orientation, dtype=th.float32),
+                {object_id},
+                width=int(resolution.get("width") or 320),
+                height=int(resolution.get("height") or 240),
+            ).get(object_id)
+            if not visibility:
+                return False
+            x1, y1, x2, _ = visibility["bbox_xyxy"]
+            width, height = visibility["image_size"]
+            margin = max(2, int(round(min(width, height) * 0.01)))
+            # PLACE needs a complete top and lateral extent; floor furniture
+            # may continue below the image exactly as in expert validation.
+            return x1 >= margin and y1 >= margin and x2 < width - margin
+        except Exception as exc:
+            print(
+                f"[delivery-destination] primary camera validation failed for "
+                f"{object_id}: {exc!r}",
+                flush=True,
+            )
+            return False
+
+    def _delivery_top_surface_feasible(self, node) -> bool:
+        """Physically verify that a placeable top surface exists.
+
+        The lexical supports_on_top rule accepts open-top fixtures
+        (Merom_0 bottom_cabinet_no_top_vdedzt_0: deliver_food PLACE
+        SAMPLING_ERROR on both expert attempts — the AABB top is empty air,
+        so the OG onTop sampler finds no pose). Cast a downward raycast fan
+        from just above the live AABB top and require a majority of hits on
+        the destination itself near that height: a real top panel answers on
+        nearly every ray, an open box answers only on its rim. Fail-closed:
+        any exception makes the destination ineligible and the existing
+        resample / spawned-support contract takes over.
+        """
+        object_id = node.get("id")
+        if not object_id:
+            return False
+        try:
+            obj = self.env.scene.object_registry("name", object_id, None)
+            if obj is None:
+                return False
+            target_path = str(getattr(obj, "prim_path", "")).rstrip("/")
+            if not target_path:
+                return False
+            lower, upper = obj.aabb
+            lower = np.asarray(lower.cpu(), dtype=float)
+            upper = np.asarray(upper.cpu(), dtype=float)
+            top_z = float(upper[2])
+            origin_z = top_z + 0.10
+            # Inset the fan 10% so edge rays cannot graze neighboring
+            # fixtures or the fixture's own side walls.
+            x0 = float(lower[0]) + 0.10 * float(upper[0] - lower[0])
+            x1 = float(upper[0]) - 0.10 * float(upper[0] - lower[0])
+            y0 = float(lower[1]) + 0.10 * float(upper[1] - lower[1])
+            y1 = float(upper[1]) - 0.10 * float(upper[1] - lower[1])
+            grid = 5
+            confirmed = 0
+            total = 0
+            for row in range(grid):
+                for col in range(grid):
+                    fx = row / (grid - 1)
+                    fy = col / (grid - 1)
+                    origin = [x0 + fx * (x1 - x0), y0 + fy * (y1 - y0), origin_z]
+                    ray = og.sim.psqi.raycast_closest(
+                        origin=origin,
+                        dir=[0.0, 0.0, -1.0],
+                        distance=3.0,
+                    )
+                    total += 1
+                    if not ray.get("hit"):
+                        continue
+                    hit_path = str(ray.get("rigidBody") or ray.get("collision") or "")
+                    hit_z = origin_z - float(ray.get("distance", 3.0))
+                    if target_path in hit_path and hit_z >= top_z - 0.05:
+                        confirmed += 1
+            feasible = confirmed * 2 > total
+            if not feasible:
+                print(
+                    f"[delivery-destination] physical reject {object_id}: "
+                    f"top-surface raycasts confirmed {confirmed}/{total}",
+                    flush=True,
+                )
+            return feasible
+        except Exception as exc:
+            print(
+                f"[delivery-destination] physical reject {object_id}: "
+                f"feasibility check error {exc!r}",
+                flush=True,
+            )
+            return False
+
+    def _approach_pose_clears_object(self, approach, target_position, blocker):
+        """Check that a previously reserved manipulation pose remains usable."""
+        candidate_xy = (approach or {}).get("candidate_position_xy")
+        if not candidate_xy or blocker is None or not getattr(self.env, "robots", None):
+            return False
+        try:
+            robot = self.env.robots[0]
+            robot_position, robot_orientation = robot.get_position_orientation()
+            robot_position = np.asarray(robot_position.cpu(), dtype=float)
+            live_points = np.asarray(robot.collision_points_world.cpu(), dtype=float)
+            live_rotation = np.asarray(T.quat2mat(robot_orientation).cpu(), dtype=float)
+            local_points = (live_points - robot_position) @ live_rotation
+            yaw = math.atan2(
+                float(target_position[1]) - float(candidate_xy[1]),
+                float(target_position[0]) - float(candidate_xy[0]),
+            )
+            cosine, sine = math.cos(yaw), math.sin(yaw)
+            rotation = np.asarray(
+                [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
+                dtype=float,
+            )
+            candidate_position = np.asarray(
+                [float(candidate_xy[0]), float(candidate_xy[1]), robot_position[2]],
+                dtype=float,
+            )
+            candidate_points = local_points @ rotation.T + candidate_position
+            lower, upper = blocker.aabb
+            lower = np.asarray(lower.cpu(), dtype=float) - 0.10
+            upper = np.asarray(upper.cpu(), dtype=float) + 0.10
+            return not np.any(
+                np.all(candidate_points >= lower, axis=1)
+                & np.all(candidate_points <= upper, axis=1)
+            )
+        except Exception as exc:
+            print(
+                f"[delivery-support] reserved approach check failed: {exc!r}",
+                flush=True,
+            )
+            return False
+
+    def _spawn_delivery_destination_support(self, run_id, graph, source_room, source_item):
+        """Place a real support fixture when a scene has no legal destination."""
+        candidate_rooms = []
+        excluded_rooms = {source_room} if source_room else set()
+        for _ in range(3):
+            room = self._choose_support_bootstrap_room(
+                graph, excluded_rooms=excluded_rooms,
+            )
+            if room is None:
+                break
+            candidate_rooms.append(room)
+            excluded_rooms.add(room)
+        if source_room and source_room not in candidate_rooms:
+            candidate_rooms.append(source_room)
+        if not candidate_rooms:
+            fallback_room = self._choose_support_bootstrap_room(graph)
+            if fallback_room:
+                candidate_rooms.append(fallback_room)
+        if not candidate_rooms:
+            return ({
+                "ok": False,
+                "semantic_role": "delivery_destination",
+                "errors": [{"error": "no_reachable_delivery_support_room"}],
+            }, None)
+
+        # A delivery support is independent of the already accepted source
+        # placement. Retry it locally instead of repeating LLM generation,
+        # source placement, settling, and camera selection. If only one room is
+        # reachable, repeated entries deliberately resample both model and pose.
+        max_local_attempts = 6
+        compact_models = self._compact_support_models("coffee_table")
+        source_placement = (source_item or {}).get("placement") or {}
+        source_pose = (
+            (source_item or {}).get("pose")
+            or (source_item or {}).get("final_pose_before_warmup")
+            or source_placement.get("pose")
+            or {}
+        )
+        attempt_candidates = [
+            (room, model)
+            for room in candidate_rooms
+            for model in compact_models
+            if self._support_model_has_floor_pose(
+                "coffee_table",
+                model,
+                room,
+                graph,
+                avoid_position=source_pose.get("position"),
+            )
+        ][:max_local_attempts]
+        if not attempt_candidates:
+            print(
+                f"[delivery-support] preflight found no footprint-clear model/room "
+                f"candidate rooms={candidate_rooms}",
+                flush=True,
+            )
+            return ({
+                "ok": False,
+                "semantic_role": "delivery_destination",
+                "errors": [{"error": "no_footprint_clear_delivery_support_pose"}],
+            }, None)
+        failures = []
+        for attempt_index, (target_room, preferred_model) in enumerate(
+            attempt_candidates, 1
+        ):
+            record = copy.deepcopy(self._record_for_category("coffee_table"))
+            record["_generated_support_fixture"] = True
+            record["_preferred_models"] = [preferred_model]
+            object_name = f"{run_id}_delivery_support"
+            if attempt_index > 1:
+                object_name = f"{object_name}_{attempt_index:02d}"
+            result = self.add_task_asset(
+                record=record,
+                object_name=object_name,
+                target_room=target_room,
+                semantic_role="task_support",
+                cached_graph=graph,
+                avoid_position=source_pose.get("position"),
+            )
+            if not result.get("ok"):
+                failures.append({
+                    "attempt": attempt_index,
+                    "room": target_room,
+                    "model": result.get("model"),
+                    "errors": result.get("errors") or [],
+                })
+                print(
+                    f"[delivery-support] attempt {attempt_index}/{max_local_attempts} failed "
+                    f"room={target_room} model={result.get('model')} "
+                    f"errors={[item.get('error') for item in result.get('errors') or []]}",
+                    flush=True,
+                )
+                continue
+
+            self._step(10)
+            live_graph = self.snapshot()
+            node = next(
+                (
+                    item for item in live_graph.get("nodes") or []
+                    if item.get("id") == result.get("object_name")
+                ),
+                None,
+            )
+            if node is None:
+                live_object = self.env.scene.object_registry(
+                    "name", result.get("object_name"), None
+                )
+                if live_object is not None:
+                    info = self._collect_object_info(live_object)
+                    node = {
+                        "id": info["name"],
+                        "category": info["category"],
+                        "pose": {"position": info["position"]},
+                        "bbox": {"min": info["aabb_min"], "max": info["aabb_max"]},
+                        "rooms": info["rooms"],
+                    }
+            destination = self._delivery_destination_from_node(
+                node or {}, fallback_room=target_room
+            )
+            live_support = self.env.scene.object_registry(
+                "name", result.get("object_name"), None
+            )
+            if destination is not None and not self._approach_pose_clears_object(
+                source_placement.get("robot_approach")
+                or ((source_item or {}).get("validation") or {}).get("robot_approach"),
+                source_pose.get("position"),
+                live_support,
+            ):
+                print(
+                    f"[delivery-support] attempt {attempt_index}/{max_local_attempts} rejected: "
+                    "occupies source manipulation pose",
+                    flush=True,
+                )
+                destination = None
+            if destination is not None:
+                destination["generated_support"] = True
+                destination["generation_attempt"] = attempt_index
+                return result, destination
+
+            failures.append({
+                "attempt": attempt_index,
+                "room": target_room,
+                "model": result.get("model"),
+                "errors": [{"error": "generated_delivery_support_not_manipulable"}],
+            })
+            self._remove_object_safe_by_name(result.get("object_name"))
+            self._forget_generated_placement(result)
+            self._step(3)
+
+        return ({
+            "ok": False,
+            "semantic_role": "delivery_destination",
+            "errors": [{
+                "error": "delivery_support_attempts_exhausted",
+                "attempts": failures,
+            }],
+        }, None)
+
+    def _compact_support_models(self, category):
+        """Return installed support models that leave room for robot operation."""
+        installed = set(get_all_object_category_models(category=category))
+        metadata_root = Path(get_dataset_path("behavior-1k-assets")) / "objects" / category
+        ranked = []
+        for model in installed:
+            metadata_path = metadata_root / model / "misc" / "metadata.json"
+            try:
+                size = json.loads(metadata_path.read_text(encoding="utf-8"))["bbox_size"]
+                width, depth, height = (float(value) for value in size[:3])
+            except (OSError, KeyError, TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in (width, depth, height)):
+                continue
+            if min(width, depth) < 0.30 or max(width, depth) > 0.75:
+                continue
+            if not (
+                self.config.min_manipulation_height
+                <= height
+                <= self.config.max_manipulation_height
+            ):
+                continue
+            ranked.append((width * depth, model))
+        return [model for _, model in sorted(ranked)[:12]]
+
+    def _support_model_has_floor_pose(
+        self, category, model, target_room, graph, avoid_position=None
+    ):
+        """Preflight a support footprint before importing its USD asset."""
+        metadata_path = (
+            Path(get_dataset_path("behavior-1k-assets"))
+            / "objects"
+            / category
+            / model
+            / "misc"
+            / "metadata.json"
+        )
+        try:
+            size = json.loads(metadata_path.read_text(encoding="utf-8"))["bbox_size"]
+            half_extent = np.asarray(size[:2], dtype=float) * 0.5 + 0.02
+            if not np.all(np.isfinite(half_extent)):
+                return False
+            room_pixels = self._robot_reachable_room_pixels().get(target_room) or []
+            if not room_pixels:
+                return False
+            blockers = []
+            for node in graph.get("nodes", []):
+                if node.get("type") != "object":
+                    continue
+                rooms = node.get("rooms") or []
+                if rooms and target_room not in rooms:
+                    continue
+                if self._tokens(node.get("category") or "") & NON_BLOCKING_NAVIGATION_CATEGORIES:
+                    continue
+                bbox = node.get("bbox") or {}
+                lower = bbox.get("min")
+                upper = bbox.get("max")
+                if lower and upper:
+                    blockers.append((
+                        np.asarray(lower[:2], dtype=float),
+                        np.asarray(upper[:2], dtype=float),
+                    ))
+            for robot in getattr(self.env, "robots", None) or []:
+                lower, upper, _ = self._safe_aabb(robot)
+                if lower and upper:
+                    blockers.append((
+                        np.asarray(lower[:2], dtype=float),
+                        np.asarray(upper[:2], dtype=float),
+                    ))
+            trav_map = self.env.scene.trav_map
+            avoid_xy = (
+                np.asarray(avoid_position[:2], dtype=float)
+                if avoid_position is not None
+                else None
+            )
+            for pixel in room_pixels:
+                center = np.asarray(trav_map.map_to_world(pixel).cpu(), dtype=float)[:2]
+                if avoid_xy is not None and float(np.linalg.norm(center - avoid_xy)) < 1.0:
+                    continue
+                proposed_lo = center - half_extent
+                proposed_hi = center + half_extent
+                if any(
+                    np.all(proposed_lo < blocker_hi)
+                    and np.all(proposed_hi > blocker_lo)
+                    for blocker_lo, blocker_hi in blockers
+                ):
+                    continue
+                if self._hypothetical_support_has_operation_approach(
+                    room_pixels, center, proposed_lo, proposed_hi
+                ):
+                    return True
+            return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+
+    def _forget_generated_placement(self, result):
+        """Remove placement accounting for an object rejected after spawning."""
+        object_name = result.get("object_name")
+        placement = result.get("placement") or {}
+        support_id = placement.get("support_object_id")
+        support_key = support_id or "__floor__"
+        if self._placed_on_support.get(support_key, 0) > 0:
+            self._placed_on_support[support_key] -= 1
+            if self._placed_on_support[support_key] == 0:
+                self._placed_on_support.pop(support_key, None)
+        self._placement_support_map.pop(object_name, None)
+        self._floor_placed_objects.discard(object_name)
+
+    def prepare_native_task_robot_spawn(self, task_name: str) -> str | None:
+        """Choose the official native target before a serial task is generated."""
+        if task_name not in NATIVE_TASK_TARGET_TOKENS:
+            return None
+        self._cleanup_spawned_objects(prefer_reset=True)
+        self._robot_component_cache = {}
+        self._reachable_room_pixels_cache = {}
+        self._base_graph_cache = None
+        target = self._select_native_task_target(
+            task_name, self.snapshot(), require_robot_approach=False,
+        )
+        if target is not None:
+            target["task_name"] = task_name
+        self._prepared_native_target = target
+        self._prepared_native_target_id = target.get("object_id") if target else None
+        return self._prepared_native_target_id
+
+    def bind_prepared_native_task_spawn(self, task_name: str) -> bool:
+        """Bind the physically validated target-conditioned robot pose."""
+        target = self._prepared_native_target
+        if not target or target.get("task_name") != task_name:
+            return False
+        obj = self.env.scene.object_registry("name", target["object_id"], None)
+        if obj is None:
+            return False
+        robot_position, _ = self.env.robots[0].get_position_orientation()
+        robot_room = self.env.scene.seg_map.get_room_instance_by_point(robot_position[:2])
+        lower, upper = obj.aabb
+        nearest_xy = th.minimum(th.maximum(robot_position[:2], lower[:2]), upper[:2])
+        distance = float(th.linalg.norm(robot_position[:2] - nearest_xy))
+        if robot_room != target.get("room_id") or distance > 1.35:
+            print(
+                f"[robot-spawn] target binding rejected task={task_name} "
+                f"target={target['object_id']} room={robot_room} distance={distance:.3f}",
+                flush=True,
+            )
+            return False
+        target["robot_approach"] = {
+            "ok": True,
+            "reason": "target_conditioned_spawn",
+            "horizontal_distance": distance,
+            "distance_reference": "aabb_edge",
+            "max_horizontal_distance": 1.35,
+            "candidate_position_xy": self._to_list(robot_position[:2]),
+            "candidate_room": robot_room,
+            "target_rooms": [target["room_id"]],
+            "native_occupancy_rejections": 0,
+        }
+        print(
+            f"[robot-spawn] target binding accepted task={task_name} "
+            f"target={target['object_id']} distance={distance:.3f}",
+            flush=True,
+        )
+        return True
+
+    def invalidate_robot_reachability(self) -> None:
+        """Refresh component-dependent caches after an in-process robot move."""
+        self._robot_component_cache = {}
+        self._reachable_room_pixels_cache = {}
+        self._base_graph_cache = None
+
+    def _select_native_task_target(
+        self, task_name: str, graph: dict, require_robot_approach: bool = True,
+    ) -> dict | None:
         """Find a real stateful scene object compatible with the task verb."""
+        if (
+            require_robot_approach
+            and self._prepared_native_target
+            and self._prepared_native_target.get("task_name") == task_name
+            and (self._prepared_native_target.get("robot_approach") or {}).get("ok")
+        ):
+            target = self._prepared_native_target
+            self._prepared_native_target = None
+            self._prepared_native_target_id = None
+            return target
+        self._last_native_target_rejection = None
         tokens = NATIVE_TASK_TARGET_TOKENS.get(task_name, ())
         required_state = "Open" if task_name.startswith(("open_", "close_")) else "ToggledOn"
         candidates = []
+        exact_seen = False
         for node in graph.get("nodes", []):
             if node.get("type") != "object":
                 continue
+            if (
+                self.config.target_native_object_id
+                and node.get("id") != self.config.target_native_object_id
+            ):
+                continue
+            if (
+                require_robot_approach
+                and self._prepared_native_target_id
+                and node.get("id") != self._prepared_native_target_id
+            ):
+                continue
+            if (
+                not self.config.target_native_object_id
+                and node.get("id") in self._rejected_native_target_cache
+            ):
+                continue
+            if self.config.target_native_object_id:
+                exact_seen = True
             category = str(node.get("category") or "").lower()
             if not any(token in category for token in tokens):
+                if self.config.target_native_object_id:
+                    self._last_native_target_rejection = {
+                        "stage": "identity",
+                        "object_id": node.get("id"),
+                        "category": category,
+                        "task": task_name,
+                        "reason": "category is incompatible with the requested task",
+                    }
                 continue
             if required_state not in set(node.get("available_states") or []):
+                if self.config.target_native_object_id:
+                    self._last_native_target_rejection = {
+                        "stage": "state_capability",
+                        "object_id": node.get("id"),
+                        "required_state": required_state,
+                        "reason": "required state is unavailable",
+                    }
                 continue
             rooms = node.get("rooms") or []
             if not rooms:
+                if self.config.target_native_object_id:
+                    self._last_native_target_rejection = {
+                        "stage": "room",
+                        "object_id": node.get("id"),
+                        "reason": "target has no official room assignment",
+                    }
+                continue
+            position = (node.get("pose") or {}).get("position")
+            if not position:
+                if self.config.target_native_object_id:
+                    self._last_native_target_rejection = {
+                        "stage": "pose",
+                        "object_id": node.get("id"),
+                        "reason": "target pose is missing",
+                    }
+                continue
+            manipulation_height = self._native_target_manipulation_height(task_name, node)
+            if not manipulation_height.get("eligible"):
+                if self.config.target_native_object_id:
+                    print(
+                        f"[native-target] rejected exact object={node.get('id')} "
+                        f"height={manipulation_height}",
+                        flush=True,
+                    )
+                    self._last_native_target_rejection = {
+                        "stage": "manipulation_height",
+                        "object_id": node.get("id"),
+                        "detail": manipulation_height,
+                    }
+                continue
+            bbox = node.get("bbox") or {}
+            aabb_min = bbox.get("min")
+            aabb_max = bbox.get("max")
+            target_aabb_xy = (
+                (aabb_min[:2], aabb_max[:2]) if aabb_min and aabb_max else None
+            )
+            robot_approach = None
+            prepared_current_pose = (
+                require_robot_approach
+                and node.get("id") == self._prepared_native_target_id
+                and target_aabb_xy is not None
+            )
+            if prepared_current_pose:
+                robot_position, _ = self.env.robots[0].get_position_orientation()
+                robot_room = self.env.scene.seg_map.get_room_instance_by_point(
+                    robot_position[:2]
+                )
+                nearest_xy = th.minimum(
+                    th.maximum(robot_position[:2].cpu(), th.as_tensor(target_aabb_xy[0])),
+                    th.as_tensor(target_aabb_xy[1]),
+                )
+                distance = float(th.linalg.norm(robot_position[:2].cpu() - nearest_xy))
+                if robot_room in set(rooms) and distance <= 1.35:
+                    robot_approach = {
+                        "ok": True,
+                        "reason": "target_conditioned_spawn",
+                        "horizontal_distance": distance,
+                        "distance_reference": "aabb_edge",
+                        "max_horizontal_distance": 1.35,
+                        "candidate_position_xy": self._to_list(robot_position[:2]),
+                        "candidate_room": robot_room,
+                        "target_rooms": sorted(set(rooms)),
+                        "native_occupancy_rejections": 0,
+                    }
+            if require_robot_approach and robot_approach is None:
+                robot_approach = self._validate_task_approach_position(
+                    position,
+                    set(rooms),
+                    target_aabb_xy=target_aabb_xy,
+                    max_horizontal_distance=1.35,
+                    # Keep the fixture in the blocker set so the saved pose
+                    # cannot intersect the object it will actuate.
+                    target_object_id=None,
+                )
+            if require_robot_approach and not robot_approach.get("ok"):
+                if self.config.target_native_object_id:
+                    print(
+                        f"[native-target] rejected exact object={node.get('id')} "
+                        f"approach={robot_approach}",
+                        flush=True,
+                    )
+                    self._last_native_target_rejection = {
+                        "stage": "robot_approach",
+                        "object_id": node.get("id"),
+                        "detail": robot_approach,
+                    }
                 continue
             exact = 0 if category in tokens else 1
-            candidates.append((exact, category, node.get("id"), rooms[0]))
+            candidates.append((
+                exact, category, node.get("id"), rooms[0], robot_approach,
+                manipulation_height,
+            ))
         if not candidates:
+            if self.config.target_native_object_id and not exact_seen:
+                self._last_native_target_rejection = {
+                    "stage": "identity",
+                    "object_id": self.config.target_native_object_id,
+                    "reason": "exact target is absent from the live scene graph",
+                }
             return None
         used_object_ids = Counter()
         for sample in self._checkpoint.get("successful_samples", []):
@@ -2847,8 +4282,130 @@ class OnlineDeltaSGEngine:
                 used_object_ids[object_id] += 1
         min_used = min(used_object_ids.get(item[2], 0) for item in candidates)
         least_used = [item for item in candidates if used_object_ids.get(item[2], 0) == min_used]
-        _, category, object_id, room_id = self.rng.choice(sorted(least_used))
-        return {"object_id": object_id, "category": category, "room_id": room_id}
+        _, category, object_id, room_id, robot_approach, manipulation_height = self.rng.choice(
+            sorted(least_used, key=lambda item: item[:4])
+        )
+        if require_robot_approach:
+            self._prepared_native_target_id = None
+        return {
+            "object_id": object_id,
+            "category": category,
+            "room_id": room_id,
+            "robot_approach": robot_approach,
+            "manipulation_height": manipulation_height,
+        }
+
+    def reject_native_target(self, object_id: str | None, reason: str) -> None:
+        """Avoid reselecting a failed automatic fixture in the same scene process."""
+        if not object_id or self.config.target_native_object_id:
+            return
+        self._rejected_native_target_cache.add(object_id)
+        print(
+            f"[native-target] cached rejection object={object_id} reason={reason} "
+            f"count={len(self._rejected_native_target_cache)}",
+            flush=True,
+        )
+
+    @staticmethod
+    def _native_task_state_spec(task_name):
+        if task_name.startswith(("open_", "close_")):
+            state_cls = object_states.Open
+            state_key = "open"
+            desired_final = task_name.startswith("open_")
+        else:
+            state_cls = object_states.ToggledOn
+            state_key = "toggled_on"
+            desired_final = task_name.startswith("turn_on_")
+        return state_cls, state_key, desired_final
+
+    def _prepare_native_task_initial_state(self, task_name, target):
+        """Preflight the official state setter both ways, ending at task initial state."""
+        object_id = target["object_id"]
+        obj = self.env.scene.object_registry("name", object_id, None)
+        state_cls, state_key, desired_final = self._native_task_state_spec(task_name)
+        result = {
+            "ok": False,
+            "object_id": object_id,
+            "category": target.get("category"),
+            "room_id": target.get("room_id"),
+            "states": {state_key: not desired_final},
+            "expected_task_final_states": {state_key: desired_final},
+            "semantic_roles": ["task_target", "task_initial_state"],
+        }
+        if obj is None or state_cls not in getattr(obj, "states", {}):
+            result["error"] = "native state target is unavailable"
+            return result
+        state_id = (object_id, state_cls)
+        try:
+            current = bool(obj.states[state_cls].get_value())
+            self._native_state_baselines.setdefault(state_id, current)
+            required_initial = not desired_final
+            transitions = []
+
+            def apply_and_observe(label, requested):
+                before = bool(obj.states[state_cls].get_value())
+                setter_returned = True
+                if before != requested:
+                    setter_returned = bool(obj.states[state_cls].set_value(requested))
+                    self._mutated_native_states.add(state_id)
+                immediate = bool(obj.states[state_cls].get_value())
+                self._clear_usd_selection()
+                self._step(5)
+                settled = bool(obj.states[state_cls].get_value())
+                transition = {
+                    "phase": label,
+                    "requested": requested,
+                    "before": before,
+                    "setter_returned": setter_returned,
+                    "immediate": immediate,
+                    "settled": settled,
+                    "ok": setter_returned and immediate == requested and settled == requested,
+                }
+                transitions.append(transition)
+                return transition["ok"]
+
+            initial_ok = apply_and_observe("task_initial", required_initial)
+            final_ok = initial_ok and apply_and_observe("task_final_preflight", desired_final)
+            restore_ok = apply_and_observe("restore_task_initial", required_initial)
+            observed = bool(obj.states[state_cls].get_value())
+            result["official_state_transition_preflight"] = transitions
+            result["observed_initial_state"] = observed
+            result["ok"] = initial_ok and final_ok and restore_ok and observed == required_initial
+            if not result["ok"]:
+                result["error"] = "official native state transition is not stable and reversible"
+        except Exception as exc:
+            result["error"] = repr(exc)
+            result["traceback"] = traceback.format_exc()
+        return result
+
+    def _native_target_manipulation_height(self, task_name, node):
+        bbox = node.get("bbox") or {}
+        aabb_min = bbox.get("min")
+        aabb_max = bbox.get("max")
+        if not aabb_min or not aabb_max:
+            return {"required": True, "eligible": False, "reason": "native target AABB missing"}
+        heights = [float(value) for value in self.env.scene.trav_map.floor_heights]
+        lower_z = float(aabb_min[2])
+        below = [height for height in heights if height <= lower_z + 0.10]
+        floor_height = max(below) if below else min(
+            heights, key=lambda height: abs(height - lower_z)
+        )
+        if task_name.startswith("open_"):
+            primitive = "OPEN"
+        elif task_name.startswith("close_"):
+            primitive = "CLOSE"
+        elif task_name.startswith("turn_on_"):
+            primitive = "TOGGLE_ON"
+        else:
+            primitive = "TOGGLE_OFF"
+        return evaluate_manipulation_height(
+            primitive,
+            aabb_min[2],
+            aabb_max[2],
+            floor_height,
+            self.config.min_manipulation_height,
+            self.config.max_manipulation_height,
+        )
 
     @staticmethod
     def _native_task_instruction(task_name: str, target: dict) -> str:
@@ -2880,9 +4437,117 @@ class OnlineDeltaSGEngine:
             priority += 2
         return priority
 
+    def _robot_component_pixels(self, floor: int):
+        """Return the initial robot's eroded traversability component."""
+        if not getattr(self.env, "robots", None):
+            return None
+        robot = self.env.robots[0]
+        cache_key = (floor, getattr(robot, "name", "robot"))
+        cached = self._robot_component_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        trav_map = self.env.scene.trav_map
+        traversable = trav_map._erode_trav_map(
+            th.clone(trav_map.floor_map[floor]), robot=robot
+        )
+        extra_clearance = float(self.config.expert_base_clearance_margin)
+        if extra_clearance > 0:
+            clearance_pixels = int(
+                math.ceil(extra_clearance / float(trav_map.map_resolution))
+            )
+            kernel_size = max(1, 2 * clearance_pixels + 1)
+            traversable = th.as_tensor(
+                cv2.erode(
+                    traversable.cpu().numpy(),
+                    np.ones((kernel_size, kernel_size), dtype=np.uint8),
+                ),
+                device=traversable.device,
+            )
+        free = traversable.cpu().numpy() != 0
+        robot_position, _ = robot.get_position_orientation()
+        source_pixel = trav_map.world_to_map(robot_position[:2]).to(traversable.device).long()
+        source_pixel[0].clamp_(0, traversable.shape[0] - 1)
+        source_pixel[1].clamp_(0, traversable.shape[1] - 1)
+        start = (int(source_pixel[0]), int(source_pixel[1]))
+        if not free[start]:
+            traversable_pixels = np.argwhere(free)
+            if not len(traversable_pixels):
+                return None
+            nearest = int(
+                np.argmin(
+                    np.linalg.norm(
+                        traversable_pixels.astype(float) - np.asarray(start, dtype=float),
+                        axis=1,
+                    )
+                )
+            )
+            start = tuple(int(value) for value in traversable_pixels[nearest])
+
+        # Match the physical expert's path graph exactly: diagonal motion is
+        # valid only when both adjacent orthogonal cells are free. Generic
+        # 8-connected components can cross the corner of two obstacles and
+        # accept placements that the physical base can never reach.
+        reachable = np.zeros(free.shape, dtype=bool)
+        reachable[start] = True
+        queue = deque([start])
+        neighbors = (
+            (-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (-1, 1), (1, -1), (1, 1),
+        )
+        while queue:
+            row, col = queue.popleft()
+            for drow, dcol in neighbors:
+                nrow, ncol = row + drow, col + dcol
+                if not (0 <= nrow < free.shape[0] and 0 <= ncol < free.shape[1]):
+                    continue
+                if not free[nrow, ncol] or reachable[nrow, ncol]:
+                    continue
+                if drow and dcol and (
+                    not free[row + drow, col] or not free[row, col + dcol]
+                ):
+                    continue
+                reachable[nrow, ncol] = True
+                queue.append((nrow, ncol))
+        cached = {
+            "source_label": 1,
+            "pixels": th.nonzero(th.as_tensor(reachable, device=traversable.device)),
+        }
+        self._robot_component_cache[cache_key] = cached
+        return cached
+
+    def _robot_reachable_room_pixels(self, floor: int | None = None) -> dict:
+        """Group connected robot navigation pixels by official room instance."""
+        if not getattr(self.env, "robots", None):
+            return {}
+        trav_map = self.env.scene.trav_map
+        if floor is None:
+            robot_position, _ = self.env.robots[0].get_position_orientation()
+            floor = min(
+                range(trav_map.n_floors),
+                key=lambda index: abs(
+                    float(trav_map.floor_heights[index]) - float(robot_position[2])
+                ),
+            )
+        if floor in self._reachable_room_pixels_cache:
+            return self._reachable_room_pixels_cache[floor]
+        component = self._robot_component_pixels(floor)
+        room_pixels = defaultdict(list)
+        if component is not None:
+            for pixel in component["pixels"]:
+                xy = trav_map.map_to_world(pixel)
+                room = self.env.scene.seg_map.get_room_instance_by_point(xy[:2])
+                if room:
+                    room_pixels[room].append(pixel)
+        result = dict(room_pixels)
+        self._reachable_room_pixels_cache[floor] = result
+        return result
+
     def _choose_safe_target_room(self, record: dict, graph: dict, preferred_room: str | None = None) -> str | None:
         """Balance source rooms while retaining a physically valid fallback."""
         rooms = [node["name"] for node in graph.get("nodes", []) if node.get("type") == "room"]
+        reachable_rooms = set(self._robot_reachable_room_pixels())
+        if not reachable_rooms:
+            return None
         room_counts = Counter()
         for sample in self._checkpoint.get("successful_samples", []):
             diversity = sample.get("diversity") or {}
@@ -2893,26 +4558,125 @@ class OnlineDeltaSGEngine:
             elif diversity.get("target_room"):
                 room_counts[diversity["target_room"]] += 1
         candidates = []
+        category = self._choose_category(record)
         for room in rooms:
-            support = self._choose_support_node(record, room, graph).get("node")
+            if reachable_rooms and room not in reachable_rooms:
+                continue
+            if room in self._rejected_rooms:
+                continue
+            support_result = self._choose_support_node(record, room, graph)
+            support_nodes = [
+                node
+                for node in [support_result.get("node"), *support_result.get("candidates", [])]
+                if node is not None
+                and (
+                    self._category_prefers_floor(category)
+                    or not self._tokens(node.get("category", "")) & {"floor", "floors"}
+                )
+            ]
+            support = support_nodes[0] if support_nodes else None
             if support:
+                approach_quality = 1
+                for support_node in support_nodes:
+                    bbox = support_node.get("bbox") or {}
+                    position = (support_node.get("pose") or {}).get("position")
+                    if not position:
+                        continue
+                    support_aabb_min = bbox.get("min")
+                    support_aabb_max = bbox.get("max")
+                    support_aabb_xy = (
+                        (support_aabb_min[:2], support_aabb_max[:2])
+                        if support_aabb_min and support_aabb_max
+                        else None
+                    )
+                    proposed = [
+                        float(position[0]),
+                        float(position[1]),
+                        float((bbox.get("max") or position)[2]) + 0.15,
+                    ]
+                    if self._validate_task_approach_position(
+                        proposed,
+                        {room},
+                        target_aabb_xy=support_aabb_xy,
+                        # The robot must stand outside the support footprint.
+                        target_object_id=None,
+                    ).get("ok"):
+                        approach_quality = 0
+                        break
+                if approach_quality:
+                    continue
                 quality = 1 if self._tokens(support.get("category", "")) & {"floor", "floors"} else 0
-            elif self._floor_fallback_allowed(record, self._choose_category(record)):
+            elif self._category_prefers_floor(category) and self._floor_fallback_allowed(record, category):
+                approach_quality = 0
                 quality = 2
             else:
                 continue
             camera_priority = self._room_camera_priority(room, graph)
             preferred_penalty = 0 if room == preferred_room else 1
-            candidates.append((camera_priority, quality, room_counts.get(room, 0), preferred_penalty, room))
+            support_capacity = -min(len(support_nodes), 6)
+            candidates.append((
+                approach_quality,
+                support_capacity,
+                camera_priority,
+                quality,
+                room_counts.get(room, 0),
+                preferred_penalty,
+                room,
+            ))
         if not candidates:
-            return preferred_room
-        best_camera = min(item[0] for item in candidates)
-        camera_safe = [item for item in candidates if item[0] == best_camera]
-        best_quality = min(item[1] for item in camera_safe)
-        quality_safe = [item for item in camera_safe if item[1] == best_quality]
-        best_usage = min(item[2] for item in quality_safe)
-        best = [item for item in quality_safe if item[2] == best_usage]
-        return self.rng.choice(sorted(best))[4]
+            return None
+        best_approach = min(item[0] for item in candidates)
+        approach_safe = [item for item in candidates if item[0] == best_approach]
+        best_capacity = min(item[1] for item in approach_safe)
+        capacity_safe = [item for item in approach_safe if item[1] == best_capacity]
+        best_camera = min(item[2] for item in capacity_safe)
+        camera_safe = [item for item in capacity_safe if item[2] == best_camera]
+        best_quality = min(item[3] for item in camera_safe)
+        quality_safe = [item for item in camera_safe if item[3] == best_quality]
+        best_usage = min(item[4] for item in quality_safe)
+        best = [item for item in quality_safe if item[4] == best_usage]
+        return self.rng.choice(sorted(best))[6]
+
+    def _choose_support_bootstrap_room(
+        self, graph: dict, excluded_rooms: set[str] | None = None,
+    ) -> str | None:
+        """Choose an open reachable room for a generated support fixture."""
+        excluded_rooms = set(excluded_rooms or [])
+        room_pixels = self._robot_reachable_room_pixels()
+        rooms = {
+            node["name"]
+            for node in graph.get("nodes", [])
+            if node.get("type") == "room"
+            and node.get("name") in room_pixels
+            and node.get("name") not in excluded_rooms
+        }
+        candidates = []
+        for room in rooms:
+            pixel_count = len(room_pixels.get(room) or [])
+            # Sparse corridors can still fit a compact generated support. A
+            # large arbitrary pixel-count gate previously removed them before
+            # the actual fixture footprint and operation-pose checks ran,
+            # forcing two delivery supports into the same small room.
+            if pixel_count < 8:
+                continue
+            room_lower = room.lower()
+            if "empty" in room_lower:
+                semantic_penalty = 0
+            elif any(token in room_lower for token in ("living", "bedroom", "kitchen", "dining")):
+                semantic_penalty = 1
+            elif "entryway" in room_lower:
+                semantic_penalty = 2
+            elif any(token in room_lower for token in ("bathroom", "corridor", "closet")):
+                semantic_penalty = 4
+            else:
+                semantic_penalty = 3
+            candidates.append((
+                semantic_penalty,
+                self._room_camera_priority(room, graph),
+                -pixel_count,
+                room,
+            ))
+        return min(candidates)[3] if candidates else None
 
     def _match_required_objects(self, required_objs: list[dict]) -> list[dict]:
         """Match LLM-returned required objects to asset database records.
@@ -2927,12 +4691,15 @@ class OnlineDeltaSGEngine:
         if not required_objs:
             return []
 
-        scene_cats = self._get_scene_categories()
+        def normalize(value):
+            return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
+
+        scene_cats = {normalize(category) for category in self._get_scene_categories()}
         selected = []
         scene_native_count = 0  # track objects skipped because they're already in scene
         for obj in required_objs:
-            hint = obj.get("category_hint", "").lower().replace(" ", "_")
-            name = obj.get("name", "").lower().replace(" ", "_")
+            hint = normalize(obj.get("category_hint", ""))
+            name = normalize(obj.get("name", ""))
             role = obj.get("role", "").lower()
 
             # Check if this object already exists in the scene.
@@ -2960,9 +4727,12 @@ class OnlineDeltaSGEngine:
                     found_in_scene = True
                 else:
                     for sc in scene_cats:
-                        if len(name) >= 4 and (name in sc or sc in name):
-                            name_words = set(name.split("_"))
-                            sc_words = set(sc.split("_"))
+                        name_words = set(name.split("_"))
+                        sc_words = set(sc.split("_"))
+                        exact_word_match = bool(name_words) and name_words <= sc_words
+                        if exact_word_match or (
+                            len(name) >= 4 and (name in sc or sc in name)
+                        ):
                             if name_words & sc_words:
                                 found_in_scene = True
                                 break
@@ -2992,7 +4762,7 @@ class OnlineDeltaSGEngine:
             for task_name, records in self.asset_db.tasks.items():
                 for r in self._usable_records(records):
                     score = 0
-                    r_cats = {c.lower() for c in r.get("direct_categories", [])}
+                    r_cats = {normalize(c) for c in r.get("direct_categories", [])}
                     r_synset = r.get("synset", "").lower()
                     r_def = r.get("definition", "").lower()
 
@@ -3801,6 +5571,9 @@ class OnlineDeltaSGEngine:
         "knife": {"countertop", "counter", "table", "cutting_board", "drawer", "dishwasher"},
         "spoon": {"countertop", "counter", "table", "drawer", "dishwasher"},
         "cutting_board": {"countertop", "counter", "table", "dining_table"},
+        # Bathroom medicine retrieval can legitimately use a sink basin in
+        # sparse scenes that have no counter or cabinet.
+        "bottle_of_medicine": {"countertop", "counter", "table", "shelf", "cabinet", "sink", "wall_mounted_sink"},
         "pot": {"stove", "countertop", "counter", "table", "sink", "cabinet", "oven", "dishwasher"},
         "pan": {"stove", "countertop", "counter", "table", "sink", "cabinet", "oven", "dishwasher"},
         "tray": {"countertop", "counter", "table", "dining_table", "shelf"},
@@ -3829,6 +5602,8 @@ class OnlineDeltaSGEngine:
         "book": {"table", "desk", "shelf", "bookcase", "nightstand", "bed"},
         "laptop": {"desk", "table", "countertop", "counter"},
         "phone": {"table", "desk", "nightstand", "countertop", "counter"},
+        "key_chain": {"table", "desk", "nightstand", "countertop", "counter", "shelf", "dresser", "cabinet"},
+        "keys": {"table", "desk", "nightstand", "countertop", "counter", "shelf", "dresser", "cabinet"},
         "remote": {"table", "desk", "nightstand", "sofa", "coffee_table"},
         # Clothing
         "cloth": {"bed", "chair", "sofa", "dresser", "shelf", "floor", "hamper", "basket"},
@@ -3891,7 +5666,7 @@ class OnlineDeltaSGEngine:
             return 0.3
         return 0.2
 
-    def _choose_support_node(self, record, target_room, graph, top_n=4, preferred_position=None):
+    def _choose_support_node(self, record, target_room, graph, top_n=8, preferred_position=None):
         """Choose the best support node for placing an object.
 
         Returns a dict with:
@@ -3930,6 +5705,8 @@ class OnlineDeltaSGEngine:
             support_cat = node.get("category", "")
             affinity = self._object_support_affinity_score(obj_cat, support_cat)
             support_tokens = self._tokens(support_cat)
+            if support_tokens & {"carpet", "rug", "mat", "doormat"}:
+                continue
             # Scene categories are commonly named "floors" (plural). Treat
             # both spellings as controlled low-priority floor supports.
             if support_tokens & {"floor", "floors"} and not self._floor_fallback_allowed(record, obj_cat):
@@ -4019,12 +5796,488 @@ class OnlineDeltaSGEngine:
         except Exception:
             return None
 
-    def _build_floor_placement(self, record, target_room, graph=None, preferred_position=None):
+    def _validate_task_approach_position(
+        self,
+        target_position,
+        target_rooms,
+        target_aabb_xy=None,
+        max_horizontal_distance=None,
+        target_object_id=None,
+        preferred_center_distance=None,
+    ):
+        """Estimate a manipulation approach from an object or proposed pose."""
+        if not self.config.require_task_object_reachability:
+            return {"ok": True, "reason": "disabled"}
+        if not getattr(self.env, "robots", None):
+            return {"ok": False, "reason": "missing_robot"}
+        try:
+            target_position = th.as_tensor(target_position, dtype=th.float32)
+            trav_map = self.env.scene.trav_map
+            floor = min(
+                range(trav_map.n_floors),
+                key=lambda index: abs(
+                    float(trav_map.floor_heights[index]) - float(target_position[2])
+                ),
+            )
+            cached = self._robot_component_pixels(floor)
+            if cached is None:
+                return {"ok": False, "reason": "no_traversable_pixels", "floor": floor}
+
+            pixels = cached["pixels"]
+            if pixels.numel() == 0:
+                return {
+                    "ok": False,
+                    "reason": "empty_robot_component",
+                    "floor": floor,
+                    "source_label": cached["source_label"],
+                }
+            target_rooms = (
+                {target_rooms} if isinstance(target_rooms, str) else set(target_rooms or [])
+            )
+            room_pixels = self._robot_reachable_room_pixels(floor)
+            if target_rooms:
+                allowed_pixels = [
+                    pixel
+                    for room in sorted(target_rooms)
+                    for pixel in room_pixels.get(room, [])
+                ]
+                candidate_pixels = (
+                    th.stack(allowed_pixels).to(pixels.device)
+                    if allowed_pixels
+                    else None
+                )
+            else:
+                candidate_pixels = pixels
+            if candidate_pixels is None or candidate_pixels.numel() == 0:
+                return {
+                    "ok": False,
+                    "reason": "no_same_room_approach",
+                    "floor": floor,
+                    "source_label": cached["source_label"],
+                    "target_rooms": sorted(target_rooms),
+                    "component_rooms": sorted(room_pixels),
+                }
+            threshold = float(
+                self.config.max_task_object_approach_distance
+                if max_horizontal_distance is None
+                else max_horizontal_distance
+            )
+            target_pixel = trav_map.world_to_map(target_position[:2]).to(candidate_pixels.device)
+            distances = th.linalg.norm(candidate_pixels.float() - target_pixel.float(), dim=1)
+            if target_aabb_xy is not None:
+                candidate_world_xy = trav_map.map_to_world(candidate_pixels)
+                aabb_min_device = th.as_tensor(
+                    target_aabb_xy[0], dtype=th.float32, device=candidate_world_xy.device
+                )
+                aabb_max_device = th.as_tensor(
+                    target_aabb_xy[1], dtype=th.float32, device=candidate_world_xy.device
+                )
+                nearest_world_xy = th.minimum(
+                    th.maximum(candidate_world_xy, aabb_min_device), aabb_max_device
+                )
+                edge_distances = th.linalg.norm(
+                    candidate_world_xy - nearest_world_xy, dim=1
+                )
+                eligible_distance_mask = edge_distances <= threshold
+                if not bool(th.any(eligible_distance_mask)):
+                    nearest_index = int(th.argmin(edge_distances))
+                    nearest_candidate = candidate_world_xy[nearest_index]
+                    return {
+                        "ok": False,
+                        "reason": "approach_too_far",
+                        "floor": floor,
+                        "source_label": cached["source_label"],
+                        "horizontal_distance": float(edge_distances[nearest_index]),
+                        "distance_reference": "aabb_edge",
+                        "max_horizontal_distance": threshold,
+                        "candidate_position_xy": self._to_list(nearest_candidate),
+                        "candidate_room": self.env.scene.seg_map.get_room_instance_by_point(
+                            nearest_candidate
+                        ),
+                        "target_rooms": sorted(target_rooms),
+                        "native_occupancy_rejections": 0,
+                    }
+                candidate_pixels = candidate_pixels[eligible_distance_mask]
+                distances = distances[eligible_distance_mask]
+            if preferred_center_distance is not None:
+                preferred_pixels = float(preferred_center_distance) / float(
+                    trav_map.map_resolution
+                )
+                candidate_order = th.abs(distances - preferred_pixels)
+            else:
+                candidate_order = distances
+            candidate_xy, occupancy_rejections = self._collision_free_approach_candidate(
+                candidate_pixels,
+                candidate_order,
+                target_position,
+                target_object_id,
+            )
+            if candidate_xy is None:
+                return {
+                    "ok": False,
+                    "reason": "no_collision_free_approach",
+                    "floor": floor,
+                    "source_label": cached["source_label"],
+                    "target_rooms": sorted(target_rooms),
+                    "native_occupancy_rejections": occupancy_rejections,
+                }
+            candidate_room = self.env.scene.seg_map.get_room_instance_by_point(candidate_xy[:2])
+            if target_aabb_xy is None:
+                horizontal_distance = float(
+                    th.linalg.norm(target_position[:2].cpu() - candidate_xy[:2].cpu())
+                )
+                distance_reference = "object_center"
+            else:
+                aabb_min_xy = th.as_tensor(target_aabb_xy[0], dtype=th.float32)
+                aabb_max_xy = th.as_tensor(target_aabb_xy[1], dtype=th.float32)
+                nearest_xy = th.minimum(
+                    th.maximum(candidate_xy[:2].cpu(), aabb_min_xy), aabb_max_xy
+                )
+                horizontal_distance = float(
+                    th.linalg.norm(candidate_xy[:2].cpu() - nearest_xy)
+                )
+                distance_reference = "aabb_edge"
+            return {
+                "ok": horizontal_distance <= threshold,
+                "reason": "reachable" if horizontal_distance <= threshold else "approach_too_far",
+                "floor": floor,
+                "source_label": cached["source_label"],
+                "horizontal_distance": horizontal_distance,
+                "distance_reference": distance_reference,
+                "max_horizontal_distance": threshold,
+                "candidate_position_xy": self._to_list(candidate_xy[:2]),
+                "candidate_room": candidate_room,
+                "target_rooms": sorted(target_rooms),
+                "native_occupancy_rejections": occupancy_rejections,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": "reachability_check_error",
+                "error": repr(exc),
+            }
+
+    def _collision_free_approach_candidate(
+        self, candidate_pixels, distances, target_position, target_object_id,
+    ):
+        """Choose the nearest candidate whose real robot boundary clears scene objects."""
+        robot = self.env.robots[0]
+        robot_position, robot_orientation = robot.get_position_orientation()
+        robot_position = np.asarray(robot_position.cpu(), dtype=float)
+        live_points = np.asarray(robot.collision_points_world.cpu(), dtype=float)
+        live_rotation = np.asarray(T.quat2mat(robot_orientation).cpu(), dtype=float)
+        local_points = (live_points - robot_position) @ live_rotation
+        target = self.env.scene.object_registry("name", target_object_id, None)
+        blockers = []
+        for scene_object in self._scene_objects():
+            if scene_object is robot or scene_object is target:
+                continue
+            category = str(getattr(scene_object, "category", "") or "").lower()
+            if category in NON_BLOCKING_NAVIGATION_CATEGORIES:
+                continue
+            try:
+                lower, upper = scene_object.aabb
+                lower = np.asarray(lower.cpu(), dtype=float)
+                upper = np.asarray(upper.cpu(), dtype=float)
+            except Exception:
+                continue
+            if np.all(np.isfinite(lower)) and np.all(np.isfinite(upper)):
+                blockers.append((lower, upper))
+
+        trav_map = self.env.scene.trav_map
+        occupancy_rejections = 0
+        for index in th.argsort(distances).cpu().tolist():
+            candidate_xy = trav_map.map_to_world(candidate_pixels[index])
+            yaw = math.atan2(
+                float(target_position[1] - candidate_xy[1]),
+                float(target_position[0] - candidate_xy[0]),
+            )
+            cosine, sine = math.cos(yaw), math.sin(yaw)
+            rotation = np.asarray(
+                [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
+                dtype=float,
+            )
+            candidate_position = np.asarray(
+                [float(candidate_xy[0]), float(candidate_xy[1]), robot_position[2]],
+                dtype=float,
+            )
+            candidate_points = local_points @ rotation.T + candidate_position
+            occupied = any(
+                np.any(
+                    np.all(candidate_points >= lower - 0.10, axis=1)
+                    & np.all(candidate_points <= upper + 0.10, axis=1)
+                )
+                for lower, upper in blockers
+            )
+            if not occupied:
+                return candidate_xy, occupancy_rejections
+            occupancy_rejections += 1
+        return None, occupancy_rejections
+
+    def _validate_task_object_approach(self, obj, target_room=None):
+        """Validate a manipulation approach in the initial robot component."""
+        try:
+            target_position, _ = obj.get_position_orientation()
+            target_rooms = {target_room} if target_room else set(
+                getattr(obj, "in_rooms", None) or self._rooms_for_obj(obj)
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reason": "reachability_check_error",
+                "error": repr(exc),
+            }
+        aabb_min, aabb_max, _ = self._safe_aabb(obj)
+        target_aabb_xy = (
+            (aabb_min[:2], aabb_max[:2]) if aabb_min and aabb_max else None
+        )
+        return self._validate_task_approach_position(
+            target_position,
+            target_rooms,
+            target_aabb_xy=target_aabb_xy,
+            target_object_id=obj.name,
+        )
+
+    def _floor_height_for_position(self, position):
+        """Return the closest official traversability floor height."""
+        heights = [float(value) for value in self.env.scene.trav_map.floor_heights]
+        if not heights:
+            return 0.0
+        z = float(position[2])
+        below = [height for height in heights if height <= z + 0.10]
+        return max(below) if below else min(heights, key=lambda height: abs(height - z))
+
+    def _ground_object_on_floor(self, obj, placement):
+        position = list(placement["pose"]["position"])
+        orientation = placement["pose"]["orientation_xyzw"]
+        floor_height = self._floor_height_for_position(position)
+        try:
+            live_lo, live_hi = obj.aabb
+            lo = self._to_list(live_lo)
+            hi = self._to_list(live_hi)
+        except Exception:
+            lo, hi, _ = self._safe_aabb(obj)
+        extent_z = float(hi[2] - lo[2]) if lo and hi else 0.10
+        current_position, _ = obj.get_position_orientation()
+        if lo and hi:
+            aabb_center = th.tensor(
+                [(lo[index] + hi[index]) / 2.0 for index in range(3)],
+                dtype=th.float32,
+            )
+            center_offset = aabb_center - current_position.to(dtype=th.float32)
+        else:
+            center_offset = th.zeros(3, dtype=th.float32)
+        target_center = th.tensor(
+            [
+                float(position[0]),
+                float(position[1]),
+                floor_height + max(extent_z, 0.01) / 2.0 + 0.005,
+            ],
+            dtype=th.float32,
+        )
+        position = self._to_list(target_center - center_offset)
+        obj.set_position_orientation(
+            position=th.tensor(position, dtype=th.float32),
+            orientation=th.tensor(orientation, dtype=th.float32),
+        )
+        placement["pose"]["position"] = position
+        return floor_height
+
+    def _validate_floor_manipulation_height(self, obj, floor_height):
+        lo, hi, _ = self._safe_aabb(obj)
+        if not lo or not hi:
+            return {
+                "required": True,
+                "eligible": False,
+                "primitive": "GRASP",
+                "reason": "object AABB unavailable after floor placement",
+                "min_height": float(self.config.min_manipulation_height),
+                "max_height": float(self.config.max_manipulation_height),
+            }
+        return evaluate_manipulation_height(
+            "GRASP",
+            lo[2],
+            hi[2],
+            floor_height,
+            self.config.min_manipulation_height,
+            self.config.max_manipulation_height,
+        )
+
+    def _build_floor_placement(
+        self,
+        record,
+        target_room,
+        graph=None,
+        preferred_position=None,
+        avoid_position=None,
+        spread_across_room=False,
+        placement_obj=None,
+        require_footprint_clear=False,
+    ):
         """Last-resort placement: on the floor in the target room."""
         try:
             graph = graph or self.snapshot()
             room_center = (graph.get("navigation") or {}).get("room_centers", {}).get(target_room)
-            if preferred_position is not None:
+            room_pixels = self._robot_reachable_room_pixels()
+            pixels = room_pixels.get(target_room) or []
+            if pixels and placement_obj is not None:
+                try:
+                    operation_pixels = list(pixels)
+                    trav_map = self.env.scene.trav_map
+                    reference = room_center or preferred_position
+                    ranked_pixels = list(pixels)
+                    if reference is not None:
+                        reference_pixel = trav_map.world_to_map(
+                            th.as_tensor(reference[:2], dtype=th.float32)
+                        )
+                        ranked_pixels.sort(
+                            key=lambda pixel: float(
+                                th.linalg.norm(
+                                    pixel.float().cpu() - reference_pixel.float().cpu()
+                                )
+                            )
+                        )
+                    if avoid_position is not None:
+                        avoid_pixel = trav_map.world_to_map(
+                            th.as_tensor(avoid_position[:2], dtype=th.float32)
+                        )
+                        min_separation_pixels = 1.0 / float(trav_map.map_resolution)
+                        separated = [
+                            pixel
+                            for pixel in ranked_pixels
+                            if float(
+                                th.linalg.norm(
+                                    pixel.float().cpu() - avoid_pixel.float().cpu()
+                                )
+                            )
+                            >= min_separation_pixels
+                        ]
+                        if separated:
+                            ranked_pixels = separated
+                    # Full-room footprint x operation-pose scans become
+                    # quadratic. The best central, source-separated poses are
+                    # sufficient; live post-placement validation remains final.
+                    pixels = ranked_pixels[:96]
+                    live_lo, live_hi = placement_obj.aabb
+                    live_lo = np.asarray(live_lo.cpu(), dtype=float)
+                    live_hi = np.asarray(live_hi.cpu(), dtype=float)
+                    live_position = np.asarray(
+                        placement_obj.get_position_orientation()[0].cpu(), dtype=float
+                    )
+                    center_offset = (live_lo + live_hi) * 0.5 - live_position
+                    half_extent = (live_hi - live_lo)[:2] * 0.5 + 0.02
+                    blockers = []
+                    seen = set()
+                    robots = list(getattr(self.env, "robots", None) or [])
+                    for other in [
+                        *self._scene_objects(),
+                        *robots,
+                    ]:
+                        if other is placement_obj or id(other) in seen:
+                            continue
+                        seen.add(id(other))
+                        is_robot = other in robots
+                        tokens = self._tokens(getattr(other, "category", "") or "")
+                        if not is_robot and tokens & NON_BLOCKING_NAVIGATION_CATEGORIES:
+                            continue
+                        if not is_robot:
+                            rooms = self._rooms_for_obj(other)
+                            if rooms and target_room not in rooms:
+                                continue
+                        other_lo, other_hi, _ = self._safe_aabb(other)
+                        if other_lo is None or other_hi is None:
+                            continue
+                        blockers.append((
+                            np.asarray(other_lo[:2], dtype=float),
+                            np.asarray(other_hi[:2], dtype=float),
+                        ))
+
+                    footprint_clear_pixels = []
+                    for pixel in pixels:
+                        xy = np.asarray(trav_map.map_to_world(pixel).cpu(), dtype=float)
+                        center = xy + center_offset[:2]
+                        proposed_lo = center - half_extent
+                        proposed_hi = center + half_extent
+                        if not any(
+                            np.all(proposed_lo < other_hi)
+                            and np.all(proposed_hi > other_lo)
+                            for other_lo, other_hi in blockers
+                        ) and self._hypothetical_support_has_operation_approach(
+                            operation_pixels,
+                            center,
+                            proposed_lo,
+                            proposed_hi,
+                        ):
+                            footprint_clear_pixels.append(pixel)
+                    if footprint_clear_pixels:
+                        pixels = footprint_clear_pixels
+                    elif require_footprint_clear:
+                        print(
+                            f"[floor-placement] no footprint-clear pose for "
+                            f"{getattr(placement_obj, 'name', '?')}",
+                            flush=True,
+                        )
+                        return None
+                    else:
+                        # The conservative 2-D footprint / operation preflight
+                        # can reject every pixel in a small room even when the
+                        # live 3-D AABB and robot-approach checks accept a pose.
+                        # Stay on official reachable pixels and let those
+                        # existing final gates decide; do not fall back to an
+                        # unvetted Gaussian point near the room center.
+                        pixels = ranked_pixels
+                        print(
+                            f"[floor-placement] conservative footprint preflight "
+                            f"found no pose for {getattr(placement_obj, 'name', '?')}; "
+                            f"using {len(pixels)} reachable candidates",
+                            flush=True,
+                        )
+                except Exception as exc:
+                    print(
+                        f"[floor-placement] footprint preflight failed for "
+                        f"{getattr(placement_obj, 'name', '?')}: {exc!r}",
+                        flush=True,
+                    )
+            if pixels:
+                trav_map = self.env.scene.trav_map
+                reference = preferred_position if preferred_position is not None else room_center
+                if reference is not None:
+                    reference_pixel = trav_map.world_to_map(
+                        th.as_tensor(reference[:2], dtype=th.float32)
+                    )
+                    ordered = sorted(
+                        pixels,
+                        key=lambda pixel: float(
+                            th.linalg.norm(pixel.float().cpu() - reference_pixel.float().cpu())
+                        ),
+                    )
+                    if avoid_position is not None:
+                        avoid_pixel = trav_map.world_to_map(
+                            th.as_tensor(avoid_position[:2], dtype=th.float32)
+                        )
+                        min_separation_pixels = 1.0 / float(trav_map.map_resolution)
+                        separated = [
+                            pixel
+                            for pixel in ordered
+                            if float(
+                                th.linalg.norm(
+                                    pixel.float().cpu() - avoid_pixel.float().cpu()
+                                )
+                            )
+                            >= min_separation_pixels
+                        ]
+                        if separated:
+                            ordered = separated
+                        pool = ordered[: min(25, len(ordered))]
+                    else:
+                        pool = ordered if spread_across_room else ordered[: min(25, len(ordered))]
+                    pixel = self.rng.choice(pool)
+                else:
+                    pixel = self.rng.choice(pixels)
+                xy = trav_map.map_to_world(pixel)
+                pos = [float(xy[0]), float(xy[1]), 0.5]
+                pose_source = "robot_reachable_floor"
+            elif preferred_position is not None:
                 angle = self.rng.uniform(-math.pi, math.pi)
                 radius = self.rng.uniform(0.8, 1.4)
                 pos = [
@@ -4032,14 +6285,17 @@ class OnlineDeltaSGEngine:
                     float(preferred_position[1]) + math.sin(angle) * radius,
                     0.5,
                 ]
+                pose_source = "floor_fallback"
             elif room_center:
                 pos = [
                     float(room_center[0]) + self.rng.gauss(0, 0.3),
                     float(room_center[1]) + self.rng.gauss(0, 0.3),
                     0.5,
                 ]
+                pose_source = "floor_fallback"
             else:
                 pos = [self.rng.gauss(0, 0.3), self.rng.gauss(0, 0.3), 0.5]
+                pose_source = "floor_fallback"
             return {
                 "room_id": target_room,
                 "mode": "floor",
@@ -4050,18 +6306,77 @@ class OnlineDeltaSGEngine:
                     "position": pos,
                     "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
                 },
-                "pose_source": "floor_fallback",
+                "pose_source": pose_source,
             }
         except Exception:
             return None
 
-    def _apply_relation(self, obj, placement):
+    def _hypothetical_support_has_operation_approach(
+        self, room_pixels, target_center, proposed_lo, proposed_hi
+    ):
+        """Reserve a Tiago operation pose before a generated support is spawned."""
+        if not room_pixels or not getattr(self.env, "robots", None):
+            return False
+        try:
+            robot = self.env.robots[0]
+            robot_position, robot_orientation = robot.get_position_orientation()
+            robot_position = np.asarray(robot_position.cpu(), dtype=float)
+            live_points = np.asarray(robot.collision_points_world.cpu(), dtype=float)
+            live_rotation = np.asarray(T.quat2mat(robot_orientation).cpu(), dtype=float)
+            local_points = (live_points - robot_position) @ live_rotation
+            target_center = np.asarray(target_center[:2], dtype=float)
+            proposed_lo = np.asarray(proposed_lo[:2], dtype=float)
+            proposed_hi = np.asarray(proposed_hi[:2], dtype=float)
+            trav_map = self.env.scene.trav_map
+            candidates = []
+            for pixel in room_pixels:
+                xy = np.asarray(trav_map.map_to_world(pixel).cpu(), dtype=float)[:2]
+                nearest = np.minimum(np.maximum(xy, proposed_lo), proposed_hi)
+                distance = float(np.linalg.norm(xy - nearest))
+                if distance <= self.config.max_task_object_approach_distance:
+                    candidates.append((distance, xy))
+            for _, xy in sorted(candidates, key=lambda item: item[0])[:64]:
+                yaw = math.atan2(target_center[1] - xy[1], target_center[0] - xy[0])
+                cosine, sine = math.cos(yaw), math.sin(yaw)
+                rotation = np.asarray(
+                    [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
+                    dtype=float,
+                )
+                candidate_position = np.asarray(
+                    [xy[0], xy[1], robot_position[2]], dtype=float
+                )
+                candidate_points = local_points @ rotation.T + candidate_position
+                occupied = np.any(
+                    np.all(candidate_points[:, :2] >= proposed_lo - 0.10, axis=1)
+                    & np.all(candidate_points[:, :2] <= proposed_hi + 0.10, axis=1)
+                )
+                if not occupied:
+                    return True
+            return False
+        except Exception as exc:
+            print(
+                f"[floor-placement] operation preflight failed: {exc!r}",
+                flush=True,
+            )
+            return False
+
+    def _apply_relation(self, obj, placement, official_fallback=None):
         support_id = placement.get("support_object_id")
         if not support_id:
             return {"ok": False, "mode": placement.get("mode"), "reason": "no_support_object"}
         support_obj = self.env.scene.object_registry("name", support_id, None)
         if support_obj is None:
             return {"ok": False, "mode": placement.get("mode"), "support": support_id, "reason": "support_missing"}
+        support_tokens = self._tokens(getattr(support_obj, "category", "") or "")
+        if placement.get("mode") == "on_top" and support_tokens & {
+            "floor", "floors", "carpet", "rug", "mat", "doormat",
+        }:
+            return {
+                "ok": False,
+                "mode": placement.get("mode"),
+                "support": support_id,
+                "reason": "structural_surface_requires_floor_mode",
+            }
         state_cls = object_states.Inside if placement.get("mode") == "inside" else object_states.OnTop
         if state_cls not in obj.states:
             return {
@@ -4072,6 +6387,7 @@ class OnlineDeltaSGEngine:
                 "reason": "state_not_available",
             }
         try:
+            official_sampler = None
             if state_cls is object_states.OnTop:
                 support_aabb = support_obj.aabb
                 sup_x_min = float(support_aabb[0][0])
@@ -4083,13 +6399,25 @@ class OnlineDeltaSGEngine:
                 obj_aabb = obj.aabb
                 obj_w = max(float(obj_aabb[1][0] - obj_aabb[0][0]), 0.06)
                 obj_d = max(float(obj_aabb[1][1] - obj_aabb[0][1]), 0.06)
-                margin = 0.03
+                obj_h = max(float(obj_aabb[1][2] - obj_aabb[0][2]), 0.02)
+                margin = max(0.03, min(0.08, 0.5 * min(obj_w, obj_d)))
 
                 # Collect obstacles: objects ON the support + objects NEAR the support
                 obstacles = []
                 for other in self._scene_objects():
                     other_name = getattr(other, "name", "")
-                    if other is obj or other_name == support_id:
+                    if (
+                        other is obj
+                        or other_name == support_id
+                        or other in (getattr(self.env, "robots", None) or [])
+                    ):
+                        continue
+                    other_tokens = self._tokens(getattr(other, "category", "") or "")
+                    if other_tokens & {
+                        "agent",
+                        "floor", "floors", "carpet", "rug",
+                        "wall", "walls", "ceiling", "ceilings",
+                    }:
                         continue
                     other_aabb = other.aabb
                     ox_min = float(other_aabb[0][0]); ox_max = float(other_aabb[1][0])
@@ -4110,8 +6438,11 @@ class OnlineDeltaSGEngine:
                             is_obstacle = True
                     if is_obstacle:
                         obstacles.append({
+                            "name": other_name,
+                            "category": getattr(other, "category", None),
                             "x_min": ox_min, "x_max": ox_max,
                             "y_min": oy_min, "y_max": oy_max,
+                            "z_min": oz_min, "z_max": oz_max,
                         })
 
                 # Grid-scan for a clear spot
@@ -4133,23 +6464,48 @@ class OnlineDeltaSGEngine:
                 d_range = ed - sd
 
                 n_steps = 10
+                grid_indices = sorted(
+                    range(n_steps), key=lambda index: abs(index + 0.5 - n_steps / 2.0)
+                )
+                access_xy = None
+                if placement.get("prefer_robot_access"):
+                    support_position, _ = support_obj.get_position_orientation()
+                    support_rooms = set(getattr(support_obj, "in_rooms", None) or [])
+                    access = self._validate_task_approach_position(
+                        support_position,
+                        support_rooms,
+                        target_aabb_xy=((sup_x_min, sup_y_min), (sup_x_max, sup_y_max)),
+                        target_object_id=None,
+                    )
+                    if access.get("ok"):
+                        access_xy = access.get("candidate_position_xy")
                 best_cx, best_cy = None, None
-                for ix in range(n_steps):
-                    for iy in range(n_steps):
-                        cx = sw + w_range * (ix + 0.5) / n_steps
-                        cy = sd + d_range * (iy + 0.5) / n_steps
-                        ok_spot = True
-                        for obs in obstacles:
-                            if (cx - obj_w/2 - margin < obs["x_max"] and
-                                cx + obj_w/2 + margin > obs["x_min"] and
-                                cy - obj_d/2 - margin < obs["y_max"] and
-                                cy + obj_d/2 + margin > obs["y_min"]):
-                                ok_spot = False
-                                break
-                        if ok_spot:
-                            best_cx, best_cy = cx, cy
+                grid_points = [
+                    (
+                        sw + w_range * (ix + 0.5) / n_steps,
+                        sd + d_range * (iy + 0.5) / n_steps,
+                    )
+                    for ix in grid_indices
+                    for iy in grid_indices
+                ]
+                if access_xy is not None:
+                    grid_points.sort(
+                        key=lambda point: math.hypot(
+                            point[0] - float(access_xy[0]),
+                            point[1] - float(access_xy[1]),
+                        )
+                    )
+                for cx, cy in grid_points:
+                    ok_spot = True
+                    for obs in obstacles:
+                        if (cx - obj_w/2 - margin < obs["x_max"] and
+                            cx + obj_w/2 + margin > obs["x_min"] and
+                            cy - obj_d/2 - margin < obs["y_max"] and
+                            cy + obj_d/2 + margin > obs["y_min"]):
+                            ok_spot = False
                             break
-                    if best_cx is not None:
+                    if ok_spot:
+                        best_cx, best_cy = cx, cy
                         break
 
                 if best_cx is None:
@@ -4160,12 +6516,28 @@ class OnlineDeltaSGEngine:
                         "state": state_cls.__name__,
                         "reason": "support_surface_occupied",
                         "num_obstacles": len(obstacles),
+                        "obstacles": obstacles,
+                        "support_bounds": {
+                            "x_min": sup_x_min, "x_max": sup_x_max,
+                            "y_min": sup_y_min, "y_max": sup_y_max,
+                            "z_top": sup_z_top,
+                        },
                     }
 
-                drop_z = sup_z_top + 0.02
+                # Asset origins need not coincide with their AABB centers.
+                # Preserve the live offset so the requested bottom height and
+                # XY footprint are correct for every USD model.
+                obj_position, obj_orientation = obj.get_position_orientation()
+                obj_center = (obj_aabb[0] + obj_aabb[1]) / 2.0
+                center_offset = obj_center - obj_position
+                target_center = th.tensor(
+                    [best_cx, best_cy, sup_z_top + obj_h / 2.0 + 0.01],
+                    dtype=th.float32,
+                )
+                target_position = target_center - center_offset.to(dtype=th.float32)
                 obj.set_position_orientation(
-                    position=th.tensor([best_cx, best_cy, drop_z], dtype=th.float32),
-                    orientation=th.tensor([0.0, 0.0, 0.0, 1.0], dtype=th.float32),
+                    position=target_position,
+                    orientation=obj_orientation,
                 )
                 try:
                     obj.keep_still()
@@ -4178,15 +6550,117 @@ class OnlineDeltaSGEngine:
                     pass
                 self._step(3)
                 ok = bool(obj.states[state_cls].get_value(support_obj))
+                try:
+                    _diag_pos = obj.get_position_orientation()[0]
+                    _diag_pose = self._validate_on_top_pose(obj, support_obj)
+                    _diag_sup_pos = support_obj.get_position_orientation()[0]
+                    print(
+                        f"[ontop-diag] support={support_id} ontop_state={ok} "
+                        f"sup_aabb_top_z={sup_z_top:.3f} "
+                        f"sup_xy=({sup_x_min:.2f},{sup_y_min:.2f})-({sup_x_max:.2f},{sup_y_max:.2f}) "
+                        f"sup_pos={[round(float(v), 3) for v in _diag_sup_pos]} "
+                        f"drop_xy=({best_cx:.3f},{best_cy:.3f}) obj_h={obj_h:.3f} "
+                        f"obj_pos={[round(float(v), 3) for v in _diag_pos]} "
+                        f"pose_check={_diag_pose.get('ok')}({_diag_pose.get('reason', '')})",
+                        flush=True,
+                    )
+                except Exception as _diag_exc:
+                    print(f"[ontop-diag] diagnostic error: {_diag_exc!r}", flush=True)
+                used_official_resample = False
+                if not ok:
+                    # The direct geometric drop is the fast path. When an
+                    # articulated or offset-origin support rejects it,
+                    # OmniGibson's official relation sampler may resample at
+                    # most once per object: the blocking call is
+                    # uninterruptible, so it is budgeted and measured here
+                    # instead of being retried behind a timeout that only logs
+                    # after the call returns.
+                    #
+                    # If the object clearly missed (it settled well below the
+                    # intended support-top drop height), the support's AABB top
+                    # was not a usable surface. The blocking official sampler
+                    # cannot correct a wrong surface and would only burn the
+                    # whole placement budget (~100s), so fail fast and let the
+                    # outer loop try another candidate/support/room.
+                    clear_miss = False
+                    settled_bottom_z = None
+                    try:
+                        settled_bottom_z = float(obj.aabb[0][2])
+                        if settled_bottom_z < (sup_z_top + 0.01) - 0.06:
+                            clear_miss = True
+                    except Exception:
+                        clear_miss = False
+                    if clear_miss:
+                        official_sampler = {
+                            "attempted": False,
+                            "reason": "geometric_drop_clear_miss",
+                            "settled_bottom_z": settled_bottom_z,
+                            "intended_bottom_z": sup_z_top + 0.01,
+                        }
+                    elif official_fallback is not None and official_fallback["calls"] >= 1:
+                        official_sampler = {
+                            "attempted": False,
+                            "reason": "official_sampler_budget_exhausted",
+                            "calls": official_fallback["calls"],
+                            "total_seconds": official_fallback["seconds"],
+                        }
+                    else:
+                        sampler_start = time.time()
+                        sampler_error = None
+                        try:
+                            ok = bool(
+                                obj.states[state_cls].set_value(
+                                    support_obj, True, reset_before_sampling=True,
+                                )
+                            )
+                        except Exception as exc:
+                            sampler_error = repr(exc)
+                            ok = False
+                        sampler_seconds = time.time() - sampler_start
+                        if official_fallback is not None:
+                            official_fallback["calls"] += 1
+                            official_fallback["seconds"] += sampler_seconds
+                        official_sampler = {
+                            "attempted": True,
+                            "calls": (official_fallback or {}).get("calls", 1),
+                            "seconds": sampler_seconds,
+                            "total_seconds": (official_fallback or {}).get("seconds", sampler_seconds),
+                            "exceeded_relation_budget": (
+                                sampler_seconds > self.config.per_relation_attempt_timeout_sec
+                            ),
+                            "error": sampler_error,
+                        }
+                    used_official_resample = ok
+                    if official_sampler.get("error") is not None:
+                        # Illegal BroadPhaseUpdateData / invalid physics views
+                        # surface here; retrying inside this process poisons it.
+                        official_sampler["fatal"] = True
             else:
                 # Inside: use set_value with sampling (only option for inside placement)
                 ok = bool(obj.states[state_cls].set_value(support_obj, True, reset_before_sampling=True))
-            return {
+                used_official_resample = False
+            result = {
                 "ok": ok,
                 "mode": placement.get("mode"),
                 "support": support_id,
                 "state": state_cls.__name__,
             }
+            if used_official_resample:
+                result["reason"] = "official_on_top_resample"
+            if official_sampler is not None:
+                result["official_sampler"] = official_sampler
+                if official_sampler.get("fatal"):
+                    result["fatal_physics_error"] = True
+            if not ok and state_cls is object_states.OnTop:
+                pose_check = self._validate_on_top_pose(obj, support_obj)
+                result["pose_check"] = pose_check
+                result["object_aabb"] = self._to_list(obj.aabb)
+                result["support_aabb"] = self._to_list(support_obj.aabb)
+                if pose_check.get("ok"):
+                    result["ok"] = True
+                    result["reason"] = "geometric_on_top_fallback"
+                    result["state_reported"] = False
+            return result
         except Exception as exc:
             return {
                 "ok": False,
@@ -4210,7 +6684,7 @@ class OnlineDeltaSGEngine:
             obj_d = oy_max - oy_min
             sup_w = sx_max - sx_min
             sup_d = sy_max - sy_min
-            clearance = 0.015
+            clearance = max(0.03, min(0.08, 0.5 * min(obj_w, obj_d)))
 
             if obj_w + 2 * clearance > sup_w or obj_d + 2 * clearance > sup_d:
                 return {
@@ -4220,10 +6694,10 @@ class OnlineDeltaSGEngine:
                     "support_bounds": [sup_w, sup_d],
                 }
             if (
-                ox_min < sx_min - clearance
-                or ox_max > sx_max + clearance
-                or oy_min < sy_min - clearance
-                or oy_max > sy_max + clearance
+                ox_min < sx_min + clearance
+                or ox_max > sx_max - clearance
+                or oy_min < sy_min + clearance
+                or oy_max > sy_max - clearance
             ):
                 return {
                     "ok": False,
@@ -4301,8 +6775,13 @@ class OnlineDeltaSGEngine:
                 floor_placement = name in self._floor_placed_objects
                 contacting = []
                 if floor_placement:
+                    expected_children = {
+                        child_name
+                        for child_name, support_name in self._placement_support_map.items()
+                        if support_name == name
+                    }
                     for other_name, other_obj in scene_objs_by_name.items():
-                        if other_name == name:
+                        if other_name == name or other_name in expected_children:
                             continue
                         try:
                             if RigidContactAPI.is_in_contact(
@@ -4345,7 +6824,152 @@ class OnlineDeltaSGEngine:
             "contact_issues": contact_issues,
         }
 
-    def _build_task_instance(self, run_id, primary_task, target_room, created_objects, instruction=None, required_objs=None, task_category=None):
+    @staticmethod
+    def _fallback_enva_solution_plan(
+        primary_task,
+        target_room,
+        task_objects,
+        native_target=None,
+        delivery_destination=None,
+    ):
+        """Return the minimal exact-ID plan for a validated Env-A contract."""
+        if native_target:
+            object_id = native_target["object_id"]
+            room = native_target["room_id"]
+            return [
+                {
+                    "step_id": 1,
+                    "primitive": "MOVE",
+                    "nl": f"Move to {object_id}",
+                    "target_object": object_id,
+                    "target_room": room,
+                },
+                {
+                    "step_id": 2,
+                    "primitive": "INTERACT",
+                    "nl": primary_task.replace("_", " "),
+                    "target_object": object_id,
+                    "target_room": room,
+                },
+            ]
+        if not task_objects:
+            return []
+        task_object = task_objects[0]
+        object_id = task_object["object_name"]
+        source_room = (task_object.get("placement") or {}).get("room_id") or target_room
+        plan = [
+            {
+                "step_id": 1,
+                "primitive": "MOVE",
+                "nl": f"Move to {object_id}",
+                "target_object": object_id,
+                "target_room": source_room,
+            },
+            {
+                "step_id": 2,
+                "primitive": "PICK",
+                "nl": f"Pick up {object_id}",
+                "target_object": object_id,
+                "target_room": source_room,
+            },
+        ]
+        if primary_task.startswith("deliver_") and delivery_destination:
+            destination_id = delivery_destination["object_id"]
+            destination_room = delivery_destination["room_id"]
+            plan.extend([
+                {
+                    "step_id": 3,
+                    "primitive": "MOVE",
+                    "nl": f"Move to {destination_id}",
+                    "target_object": destination_id,
+                    "target_room": destination_room,
+                },
+                {
+                    "step_id": 4,
+                    "primitive": "PLACE",
+                    "nl": f"Place {object_id} on {destination_id}",
+                    "target_object": destination_id,
+                    "target_room": destination_room,
+                    "placement_mode": delivery_destination.get("placement_mode", "on_top"),
+                },
+            ])
+        return plan
+
+    def _enforce_enva_solution_plan(
+        self,
+        plan,
+        primary_task,
+        task_category,
+        target_room,
+        plan_objects,
+        task_objects,
+        native_target=None,
+        delivery_destination=None,
+    ):
+        """Keep a valid LLM plan, otherwise replace it with an exact-ID plan."""
+        fallback = self._fallback_enva_solution_plan(
+            primary_task,
+            target_room,
+            task_objects,
+            native_target=native_target,
+            delivery_destination=delivery_destination,
+        )
+        task_object_id = task_objects[0]["object_name"] if task_objects else None
+        destination_id = (
+            delivery_destination.get("object_id") if delivery_destination else None
+        )
+        native_target_id = native_target.get("object_id") if native_target else None
+
+        if task_category == "retrieval_delivery" and (
+            not task_object_id
+            or (primary_task.startswith("deliver_") and not destination_id)
+        ):
+            # The enclosing generation result is already marked rejected. Keep
+            # it serializable instead of turning a structured placement failure
+            # into a process-level exception.
+            return fallback
+
+        def validate(candidate):
+            run = {
+                "ok": True,
+                "task_environment": {
+                    "task": {
+                        "primary_behavior_task": primary_task,
+                        "plan_objects": plan_objects,
+                    },
+                    "solution_plan": candidate,
+                },
+            }
+            return validate_env_a_plan_contract(
+                run,
+                task_object_id=task_object_id,
+                destination_object_id=destination_id,
+                native_target_id=native_target_id,
+            )
+
+        try:
+            validate(plan)
+            return plan
+        except ExpertPlanError as exc:
+            print(
+                f"[plan-contract] replacing invalid LLM plan for {primary_task}: {exc}",
+                flush=True,
+            )
+        validate(fallback)
+        return fallback
+
+    def _build_task_instance(
+        self,
+        run_id,
+        primary_task,
+        target_room,
+        created_objects,
+        instruction=None,
+        required_objs=None,
+        task_category=None,
+        native_target=None,
+        delivery_destination=None,
+    ):
         task_objects = [item for item in created_objects if item.get("semantic_role") == "task_object"]
 
         # Build object info for LLM plan generation — includes actual placement info
@@ -4355,6 +6979,7 @@ class OnlineDeltaSGEngine:
             obj_info = {
                 "object_id": item["object_name"],
                 "category": item["category"],
+                "model": item.get("model"),
                 "room": placement.get("room_id", target_room),
                 "reused": item.get("reused", False),
             }
@@ -4369,10 +6994,37 @@ class OnlineDeltaSGEngine:
                     obj_info["reused_object_name"] = reused_name
             plan_objects.append(obj_info)
 
+        if native_target:
+            plan_objects.append({
+                "object_id": native_target["object_id"],
+                "category": native_target["category"],
+                "room": native_target["room_id"],
+                "reused": True,
+                "reference_only": True,
+                "semantic_role": "target",
+                "robot_approach": native_target.get("robot_approach"),
+                "manipulation_height": native_target.get("manipulation_height"),
+            })
+
+        if delivery_destination:
+            plan_objects.append({
+                "object_id": delivery_destination["object_id"],
+                "category": delivery_destination["category"],
+                "room": delivery_destination["room_id"],
+                "reused": True,
+                "reference_only": True,
+                "semantic_role": "delivery_destination",
+                "placement_mode": delivery_destination.get("placement_mode", "on_top"),
+                "robot_approach": delivery_destination.get("robot_approach"),
+                "manipulation_height": delivery_destination.get("manipulation_height"),
+            })
+
         # Find scene objects referenced by the instruction but not in task_objects.
         # These are objects the LLM might need to reference in the plan (e.g., fridge,
         # countertop) that exist in the scene but weren't selected as task objects.
-        if instruction and self._llm_client:
+        if instruction and self._llm_client and task_category not in {
+            "retrieval_delivery", "open_close", "appliance",
+        }:
             task_cats = {o["category"].lower() for o in plan_objects}
             instruction_lower = instruction.lower()
             for obj in self._scene_objects_prefer_room(target_room):
@@ -4394,7 +7046,10 @@ class OnlineDeltaSGEngine:
         # Also search for scene objects by required_objs hints.
         # This catches cases like "electric_switch" for "turn_on_light"
         # where the instruction doesn't mention the exact category name.
-        if required_objs and instruction:
+        if required_objs and instruction and task_category not in {
+            "retrieval_delivery", "open_close", "appliance",
+        }:
+            task_cats = {o["category"].lower() for o in plan_objects}
             for robj in required_objs:
                 hint = robj.get("category_hint", "").lower().replace("_", " ")
                 name = robj.get("name", "").lower().replace("_", " ")
@@ -4490,8 +7145,19 @@ class OnlineDeltaSGEngine:
                 if reasoning:
                     print(f"[llm] plan reasoning: {reasoning[:200]}", flush=True)
 
-        # Fallback: mechanical template
-        if not plan:
+        if task_category in {"retrieval_delivery", "open_close", "appliance"}:
+            plan = self._enforce_enva_solution_plan(
+                plan,
+                primary_task,
+                task_category,
+                target_room,
+                plan_objects,
+                task_objects,
+                native_target=native_target,
+                delivery_destination=delivery_destination,
+            )
+        # Legacy fallback for non-Env-A contracts.
+        elif not plan:
             plan = [{"step_id": 1, "primitive": "MOVE", "nl": f"Move to {target_room}", "target_room": target_room}]
             step_id = 2
             for item in task_objects:
@@ -4566,6 +7232,29 @@ class OnlineDeltaSGEngine:
         scene_model = self._scene_model()
         added_objects = self._standard_added_objects(created_objects, validation)
         state_changed_objects = state_changed_objects or []
+        robot_record = self._robot_record(target_room, graph)
+        cameras, camera_coverage = self._camera_records(
+            target_room=target_room,
+            graph=graph,
+            initial_room=robot_record.get("initial_room") if robot_record else None,
+            task_instance=task_instance,
+            added_objects=added_objects,
+            state_changed_objects=state_changed_objects,
+        )
+        validation["camera_coverage"] = camera_coverage
+        if not camera_coverage.get("ok"):
+            validation["ok"] = False
+            task_name = task_instance.get("primary_behavior_task", "")
+            if (
+                target_room
+                and self._category_for_task(task_name) == "retrieval_delivery"
+            ):
+                self._rejected_rooms.add(target_room)
+                print(
+                    f"[room-memory] rejecting room {target_room} for this process "
+                    f"(initial_camera_coverage); rejected={sorted(self._rejected_rooms)}",
+                    flush=True,
+                )
         return {
             "schema_version": "task_environment.v1",
             "env_id": env_id,
@@ -4574,6 +7263,12 @@ class OnlineDeltaSGEngine:
                 "scene_model": scene_model,
                 "base_env_usd": f"{scene_model}.usd" if scene_model else None,
                 "source": "live_omnigibson_env",
+            },
+            "generation": {
+                "llm_enabled": self._llm_client is not None,
+                "llm_model": self.config.llm_model,
+                "solution_plan_policy": "llm_with_exact_env_a_contract_fallback",
+                "solvability_profile": self.config.solvability_profile,
             },
             "task": {
                 "task_id": task_instance["task_id"],
@@ -4585,11 +7280,8 @@ class OnlineDeltaSGEngine:
                 "semantic_reasoning": task_instance.get("semantic_reasoning"),
                 "plan_objects": task_instance.get("plan_objects", []),
             },
-            "robot": (robot_record := self._robot_record(target_room, graph)),
-            "camera": self._camera_records(
-                target_room, graph,
-                initial_room=robot_record.get("initial_room") if robot_record else None,
-            ),
+            "robot": robot_record,
+            "camera": cameras,
             "added_objects": added_objects,
             "context_objects": [
                 ao for ao in added_objects
@@ -4636,6 +7328,10 @@ class OnlineDeltaSGEngine:
                         "support_category": (item.get("placement") or {}).get("support_category"),
                         "pose": (item.get("placement") or {}).get("pose"),
                         "pose_source": (item.get("placement") or {}).get("pose_source"),
+                        "robot_approach": (item.get("placement") or {}).get("robot_approach"),
+                        "manipulation_height": (item.get("placement") or {}).get(
+                            "manipulation_height"
+                        ),
                     },
                     "final_pose_before_warmup": pose,
                     "pose": {
@@ -4647,6 +7343,10 @@ class OnlineDeltaSGEngine:
                     "validation": {
                         "spawn_ok": item.get("ok", False),
                         "settling": settled or None,
+                        "robot_approach": (item.get("placement") or {}).get("robot_approach"),
+                        "manipulation_height": (item.get("placement") or {}).get(
+                            "manipulation_height"
+                        ),
                     },
                 }
             )
@@ -4664,6 +7364,7 @@ class OnlineDeltaSGEngine:
             if isinstance(validation.get("failed_objects"), list)
             else None,
             "settling": validation.get("settling"),
+            "camera_coverage": validation.get("camera_coverage"),
             "failure_summary": [
                 {
                     "object_name": item.get("object_name"),
@@ -4704,8 +7405,21 @@ class OnlineDeltaSGEngine:
             "navigation_hint": self._room_path(graph, initial_room, target_room) if initial_room else None,
         }
 
-    def _camera_records(self, target_room, graph, initial_room=None):
+    def _camera_records(
+        self,
+        target_room,
+        graph,
+        initial_room=None,
+        task_instance=None,
+        added_objects=None,
+        state_changed_objects=None,
+    ):
         cameras = []
+        targets = self._camera_target_objects(
+            task_instance or {}, graph, added_objects or [], state_changed_objects or [],
+        )
+        target_names = set(targets)
+        robot_visible = {}
         if getattr(self.env, "robots", None):
             robot = self.env.robots[0]
             sensors = getattr(robot, "sensors", None) or getattr(robot, "_sensors", None) or {}
@@ -4719,6 +7433,7 @@ class OnlineDeltaSGEngine:
             for name, sensor in sensor_items:
                 if not self._looks_like_camera_sensor(sensor):
                     continue
+                is_primary = self._is_primary_robot_camera(name, sensor)
                 cameras.append(
                     {
                         "camera_id": str(name),
@@ -4728,23 +7443,173 @@ class OnlineDeltaSGEngine:
                         "pose": self._object_pose_record(sensor),
                         "modalities": self._sensor_modalities(sensor),
                         "resolution": self._sensor_resolution(sensor),
+                        "is_primary": is_primary,
                     }
                 )
+            robot_visible = self._robot_camera_visibility(robot, target_names)
 
-        # Global cameras for robot's initial room and task target room
+        for camera in cameras:
+            if camera.get("is_primary"):
+                camera["visible_task_objects"] = sorted(robot_visible)
+                camera["visibility"] = robot_visible
+
         room_centers = (graph.get("navigation") or {}).get("room_centers", {})
-        rooms_to_cover = []
-        if initial_room and initial_room != target_room:
-            rooms_to_cover.append(initial_room)
-        rooms_to_cover.append(target_room)
+        primary_task = str((task_instance or {}).get("primary_behavior_task") or "")
+        # A robot view that covers delivery targets only at reset is not
+        # persistent: after navigating to the source, the destination can
+        # disappear even when both objects are in the same room.
+        persistent_global_targets = (
+            set(target_names)
+            if primary_task.startswith("deliver_")
+            else set()
+        )
+        uncovered = (target_names - set(robot_visible)) | persistent_global_targets
+        placed_rooms = set()
+        global_visible = {}
+        errors = []
 
-        for room_id in rooms_to_cover:
-            if not room_id:
-                continue
+        # When the robot already sees every task object, keep one randomized
+        # official room camera so the instance still has a global viewpoint.
+        pending_rooms = []
+        if not uncovered:
+            available_rooms = sorted(room_centers)
+            if available_rooms:
+                pending_rooms.append(self.rng.choice(available_rooms))
+
+        while uncovered or pending_rooms:
+            if len(placed_rooms) >= self.config.max_global_cameras:
+                errors.append({
+                    "error": "max_global_cameras_reached",
+                    "limit": self.config.max_global_cameras,
+                    "uncovered_objects": sorted(uncovered),
+                })
+                break
+            if pending_rooms:
+                room_id = pending_rooms.pop(0)
+            else:
+                object_id = sorted(uncovered)[0]
+                target_rooms = targets[object_id].get("room_ids") or [
+                    targets[object_id].get("room_id")
+                ]
+                target_rooms = [room for room in target_rooms if room]
+                room_id = next((room for room in target_rooms if room not in placed_rooms), None)
+                if not target_rooms:
+                    errors.append({"error": "target_room_unknown", "object_id": object_id})
+                    break
+                if room_id is None:
+                    errors.append({
+                        "error": "target_not_visible_from_room_camera",
+                        "object_id": object_id,
+                        "room_ids": target_rooms,
+                    })
+                    break
             center = room_centers.get(room_id)
-            if not center:
+            if room_id in placed_rooms:
                 continue
-            cam_pos, orientation = self._compute_global_camera_pose(room_id, center)
+            if not center:
+                errors.append({"error": "room_camera_pose_unavailable", "room_id": room_id})
+                break
+            best_camera = None
+            room_targets = {
+                name for name in uncovered
+                if room_id in (targets[name].get("room_ids") or [targets[name].get("room_id")])
+            }
+            camera_candidates = self._global_camera_candidates(room_id, center)
+            if primary_task.startswith("deliver_") and room_targets:
+                graph_nodes = {
+                    node.get("id"): node
+                    for node in graph.get("nodes", [])
+                    if node.get("type") == "object"
+                }
+                focus_points = []
+                for name in room_targets:
+                    node = graph_nodes.get(name) or {}
+                    bbox = node.get("bbox") or {}
+                    lower = bbox.get("min")
+                    upper = bbox.get("max")
+                    if lower and upper:
+                        focus_points.append(
+                            0.5
+                            * (
+                                np.asarray(lower[:3], dtype=np.float32)
+                                + np.asarray(upper[:3], dtype=np.float32)
+                            )
+                        )
+                    else:
+                        position = (node.get("pose") or {}).get("position")
+                        if position:
+                            focus_points.append(np.asarray(position[:3], dtype=np.float32))
+                if focus_points:
+                    task_focus = np.mean(focus_points, axis=0)
+                    camera_candidates = [
+                        (
+                            position,
+                            self._look_at_quat(position, task_focus),
+                            f"{method}_task_aim",
+                        )
+                        for position, _, method in camera_candidates
+                    ]
+                    print(
+                        f"[camera-coverage] task-aimed delivery candidates "
+                        f"room={room_id} targets={sorted(room_targets)}",
+                        flush=True,
+                    )
+            full_height_fixture = any(
+                self._tokens(targets[name].get("category")) & {"door", "doors", "window", "windows"}
+                for name in room_targets
+            )
+            if full_height_fixture:
+                graph_nodes = {
+                    node.get("id"): node for node in graph.get("nodes", [])
+                    if node.get("type") == "object"
+                }
+                focus_points = [
+                    (graph_nodes.get(name, {}).get("pose") or {}).get("position")
+                    for name in room_targets
+                ]
+                focus_points = [point for point in focus_points if point]
+                focus_xy = np.mean(
+                    [np.asarray(point[:2], dtype=np.float32) for point in focus_points], axis=0,
+                ) if focus_points else None
+
+                def full_height_rank(item):
+                    if not item[2].endswith("_20"):
+                        return (1, 0.0, item[2])
+                    distance = (
+                        float(np.linalg.norm(np.asarray(item[0][:2]) - focus_xy))
+                        if focus_xy is not None else 0.0
+                    )
+                    return (0, -distance, item[2])
+
+                camera_candidates.sort(
+                    key=full_height_rank
+                )
+            if not uncovered:
+                camera_candidates = camera_candidates[:1]
+            else:
+                camera_candidates = camera_candidates[
+                    : self.config.max_camera_pose_attempts_per_room
+                ]
+            for cam_pos, orientation, method in camera_candidates:
+                print(
+                    f"[camera-coverage] testing room={room_id} pose={method}",
+                    flush=True,
+                )
+                visibility = self._global_camera_visibility(cam_pos, orientation, target_names)
+                print(
+                    f"[camera-coverage] tested room={room_id} pose={method} "
+                    f"visible={sorted(visibility)}",
+                    flush=True,
+                )
+                score = (
+                    len(set(visibility) & uncovered),
+                    sum(item.get("pixel_count", 0) for item in visibility.values()),
+                )
+                if best_camera is None or score > best_camera[0]:
+                    best_camera = (score, cam_pos, orientation, method, visibility)
+                if room_targets and room_targets <= set(visibility):
+                    break
+            _, cam_pos, orientation, camera_method, visibility = best_camera
             camera_id = f"global_{room_id}"
             cameras.append(
                 {
@@ -4752,18 +7617,385 @@ class OnlineDeltaSGEngine:
                     "camera_type": "global_camera",
                     "room_id": room_id,
                     "pose": {
-                        "position": list(cam_pos),
-                        "orientation_xyzw": list(orientation),
+                        "position": [float(value) for value in cam_pos],
+                        "orientation_xyzw": [float(value) for value in orientation],
                     },
-                    "modalities": ["rgb", "depth", "seg_semantic"],
-                    "resolution": {"height": 480, "width": 640},
-                    "status": "active",
+                    "modalities": ["rgb", "seg_instance"],
+                    "resolution": {"height": 720, "width": 1280},
+                    "status": "visibility_validated",
+                    "placement_method": camera_method,
+                    "visible_task_objects": sorted(visibility),
+                    "visibility": visibility,
                 }
             )
-            # Spawn the camera in the simulation
-            self._spawn_global_camera(camera_id, room_id, list(cam_pos), list(orientation))
+            placed_rooms.add(room_id)
+            global_visible.update(visibility)
+            uncovered -= set(visibility)
 
-        return cameras
+        visible = set(robot_visible) | set(global_visible)
+        coverage = {
+            "ok": bool(target_names) and not errors and visible >= target_names
+            and set(global_visible) >= persistent_global_targets,
+            "policy": "robot_first_iterative_room_camera_v2_persistent_delivery",
+            "max_global_cameras": self.config.max_global_cameras,
+            "target_objects": sorted(target_names),
+            "robot_visible_objects": sorted(robot_visible),
+            "global_visible_objects": sorted(global_visible),
+            "persistent_global_targets": sorted(persistent_global_targets),
+            "visible_objects": sorted(visible),
+            "uncovered_objects": sorted(target_names - visible),
+            "global_camera_rooms": sorted(placed_rooms),
+            "errors": errors,
+        }
+        if not target_names:
+            coverage["errors"].append({"error": "no_task_objects_for_visibility"})
+        print(
+            "[camera-coverage] "
+            f"ok={coverage['ok']} targets={coverage['target_objects']} "
+            f"robot={coverage['robot_visible_objects']} "
+            f"global={coverage['global_visible_objects']} "
+            f"rooms={coverage['global_camera_rooms']} "
+            f"uncovered={coverage['uncovered_objects']} errors={coverage['errors']}",
+            flush=True,
+        )
+        return cameras, coverage
+
+    def _global_camera_candidates(self, room_id, room_center):
+        candidates = []
+        preferred_pos, preferred_ori = self._compute_global_camera_pose(room_id, room_center)
+        candidates.append((preferred_pos, preferred_ori, "official_preferred"))
+        corners = self._get_room_corners_from_objects(room_id)
+        if corners is not None:
+            opposite = {"SW": "NE", "SE": "NW", "NW": "SE", "NE": "SW"}
+            room_xy = np.asarray(room_center[:2], dtype=np.float32)
+            room_diagonal = float(
+                np.linalg.norm(np.asarray(corners["NE"][:2]) - np.asarray(corners["SW"][:2]))
+            )
+            walls = (
+                ("SW_SE", corners["SW"], corners["SE"]),
+                ("SE_NE", corners["SE"], corners["NE"]),
+                ("NE_NW", corners["NE"], corners["NW"]),
+                ("NW_SW", corners["NW"], corners["SW"]),
+            )
+
+            # Spend the bounded visibility budget on spatial coverage first.
+            # The four object-derived corners are stable across scenes. Extra
+            # wall midpoints remain fallbacks because an inferred wall point
+            # can land inside geometry in cluttered rooms.
+            corner_names = ("SW", "SE", "NW", "NE") if np.isfinite(room_diagonal) and room_diagonal >= 1e-6 else ()
+            for corner_name in corner_names:
+                pos, ori = self._compute_corner_camera(
+                    corners[corner_name], corners[opposite[corner_name]], v_angle=20,
+                )
+                candidates.append((pos, ori, f"official_corner_{corner_name}_20"))
+            for corner_name in corner_names:
+                pos, ori = self._compute_corner_camera(
+                    corners[corner_name], corners[opposite[corner_name]], v_angle=45,
+                )
+                candidates.append((pos, ori, f"official_corner_{corner_name}_45"))
+
+            for angle in (30, 60):
+                for corner_name in corner_names:
+                    pos, ori = self._compute_corner_camera(
+                        corners[corner_name], corners[opposite[corner_name]], v_angle=angle,
+                    )
+                    candidates.append((pos, ori, f"official_corner_{corner_name}_{angle}"))
+            for angle in (45, 30, 60):
+                for wall_name, c1, c2 in walls:
+                    pose = self._compute_inward_wall_camera(c1, c2, room_xy, v_angle=angle)
+                    if pose is not None:
+                        candidates.append((*pose, f"official_wall_{wall_name}_{angle}"))
+        unique = []
+        seen = set()
+        for pos, ori, method in candidates:
+            key = tuple(np.round(np.concatenate((pos, ori)), 3))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((pos, ori, method))
+        return unique
+
+    @classmethod
+    def _compute_inward_wall_camera(cls, c1, c2, room_center, v_angle=45.0, inward=0.2, height=2.2):
+        wall_center = np.asarray([(c1[0] + c2[0]) * 0.5, (c1[1] + c2[1]) * 0.5], dtype=np.float32)
+        wall_dir = np.asarray([c2[0] - c1[0], c2[1] - c1[1]], dtype=np.float32)
+        norm = float(np.linalg.norm(wall_dir))
+        if norm < 1e-6:
+            return None
+        wall_dir /= norm
+        normals = (
+            np.asarray([-wall_dir[1], wall_dir[0]], dtype=np.float32),
+            np.asarray([wall_dir[1], -wall_dir[0]], dtype=np.float32),
+        )
+        normal = max(normals, key=lambda value: float(np.dot(value, room_center - wall_center)))
+        cam_pos = np.asarray([
+            wall_center[0] + normal[0] * inward,
+            wall_center[1] + normal[1] * inward,
+            height,
+        ], dtype=np.float32)
+        look_at = np.asarray([room_center[0], room_center[1], 0.6], dtype=np.float32)
+        return cam_pos, cls._look_at_quat(cam_pos, look_at)
+
+    def _camera_target_objects(self, task_instance, graph, added_objects, state_changed_objects):
+        by_id = {}
+        for item in added_objects:
+            object_id = item.get("object_id") or item.get("object_name")
+            if object_id:
+                by_id[object_id] = {"room_id": item.get("room_id"), "category": item.get("category")}
+        for item in state_changed_objects:
+            object_id = item.get("object_id") or item.get("object_name")
+            if object_id:
+                by_id[object_id] = {"room_id": item.get("room_id"), "category": item.get("category")}
+        for item in task_instance.get("plan_objects") or []:
+            object_id = item.get("object_id")
+            if object_id:
+                by_id.setdefault(object_id, {
+                    "room_id": item.get("room") or item.get("room_id"),
+                    "category": item.get("category"),
+                })
+        graph_nodes = {
+            node.get("id"): node for node in graph.get("nodes", [])
+            if node.get("type") == "object"
+        }
+        actionable = {
+            step.get(key)
+            for step in task_instance.get("solution_plan") or []
+            for key in ("target_object", "tool_object")
+            if step.get(key)
+        }
+        actionable.update(
+            item.get("object_id") for item in task_instance.get("task_objects") or []
+            if item.get("object_id")
+        )
+        targets = {}
+        for object_id in sorted(actionable):
+            node = graph_nodes.get(object_id) or {}
+            record = dict(by_id.get(object_id) or {})
+            rooms = node.get("rooms") or []
+            recorded_rooms = record.get("room_ids") or record.get("room_id") or []
+            if isinstance(recorded_rooms, str):
+                recorded_rooms = [recorded_rooms]
+            all_rooms = list(dict.fromkeys([*recorded_rooms, *rooms]))
+            record["room_ids"] = all_rooms
+            record["room_id"] = all_rooms[0] if all_rooms else None
+            record["category"] = record.get("category") or node.get("category")
+            targets[object_id] = record
+        return targets
+
+    @staticmethod
+    def _is_primary_robot_camera(name, sensor):
+        label = f"{name} {getattr(sensor, 'name', '')}".lower()
+        return any(token in label for token in ("eyes", "head")) and not any(
+            token in label for token in ("eef", "wrist")
+        )
+
+    def _robot_camera_visibility(self, robot, target_names):
+        sensors = getattr(robot, "sensors", None) or getattr(robot, "_sensors", None) or {}
+        items = list(sensors.items()) if isinstance(sensors, dict) else [
+            (getattr(sensor, "name", f"sensor_{index}"), sensor)
+            for index, sensor in enumerate(sensors)
+        ]
+        cameras = [item for item in items if self._looks_like_camera_sensor(item[1])]
+        primary = [item for item in cameras if self._is_primary_robot_camera(*item)]
+        selected = primary[0] if primary else (cameras[0] if cameras else None)
+        if selected is None:
+            print("[camera-coverage] robot has no primary camera", flush=True)
+            return {}
+        name, sensor = selected
+        try:
+            position, orientation = sensor.get_position_orientation()
+            resolution = self._sensor_resolution(sensor) or {}
+            width = int(resolution.get("width") or 1280)
+            height = int(resolution.get("height") or 720)
+            visibility = self._geometric_camera_visibility(
+                position, orientation, target_names, width=width, height=height
+            )
+            print(
+                f"[camera-coverage] geometric robot probe on {name} "
+                f"visible={sorted(visibility)}",
+                flush=True,
+            )
+            return visibility
+        except Exception as exc:
+            print(f"[camera-coverage] robot geometric probe failed: {exc}", flush=True)
+            traceback.print_exc()
+            return {}
+
+    def _global_camera_visibility(self, position, orientation, target_names):
+        try:
+            return self._geometric_camera_visibility(
+                position, orientation, target_names, width=1280, height=720
+            )
+        except Exception as exc:
+            print(f"[camera-coverage] global geometric probe failed: {exc}", flush=True)
+            traceback.print_exc()
+            return {}
+
+    def _geometric_camera_visibility(
+        self, position, orientation, target_names, width, height, horizontal_fov_deg=65.0
+    ):
+        camera_position = np.asarray(position, dtype=np.float64)
+        rotation = T.quat2mat(th.as_tensor(orientation, dtype=th.float32)).cpu().numpy()
+        focal = 0.5 * float(width) / math.tan(math.radians(horizontal_fov_deg) * 0.5)
+        visibility = {}
+        for name in sorted(target_names):
+            obj = self.env.scene.object_registry("name", name, None)
+            if obj is None:
+                continue
+            lower, upper = obj.aabb
+            lower = np.asarray(lower.cpu() if hasattr(lower, "cpu") else lower, dtype=np.float64)
+            upper = np.asarray(upper.cpu() if hasattr(upper, "cpu") else upper, dtype=np.float64)
+            corners = np.asarray([
+                [x, y, z]
+                for x in (lower[0], upper[0])
+                for y in (lower[1], upper[1])
+                for z in (lower[2], upper[2])
+            ])
+            camera_points = (corners - camera_position) @ rotation
+            in_front = camera_points[:, 2] < -0.05
+            if not np.any(in_front):
+                print(f"[camera-coverage] geometric reject {name}: behind_camera", flush=True)
+                continue
+            points = camera_points[in_front]
+            depth = -points[:, 2]
+            pixels_x = focal * points[:, 0] / depth + width * 0.5
+            pixels_y = height * 0.5 - focal * points[:, 1] / depth
+            x1 = max(0, int(math.floor(float(np.min(pixels_x)))))
+            y1 = max(0, int(math.floor(float(np.min(pixels_y)))))
+            x2 = min(width - 1, int(math.ceil(float(np.max(pixels_x)))))
+            y2 = min(height - 1, int(math.ceil(float(np.max(pixels_y)))))
+            if x2 <= x1 or y2 <= y1:
+                print(
+                    f"[camera-coverage] geometric reject {name}: outside_frame "
+                    f"raw_bbox={[float(np.min(pixels_x)), float(np.min(pixels_y)), float(np.max(pixels_x)), float(np.max(pixels_y))]}",
+                    flush=True,
+                )
+                continue
+            pixel_count = (x2 - x1 + 1) * (y2 - y1 + 1)
+            if pixel_count < self.config.visibility_min_pixels:
+                print(
+                    f"[camera-coverage] geometric reject {name}: pixels={pixel_count}",
+                    flush=True,
+                )
+                continue
+            center = (lower + upper) * 0.5
+            target_path = str(getattr(obj, "prim_path", ""))
+            ray_points = [center, np.asarray([center[0], center[1], upper[2]]), *corners]
+            visible_hit_path = None
+            surface_visible = False
+            blocked_paths = []
+            for ray_point in ray_points:
+                distance = float(np.linalg.norm(ray_point - camera_position))
+                if distance < 1e-6:
+                    visible_hit_path = "camera_inside_target"
+                    surface_visible = True
+                    break
+                ray = og.sim.psqi.raycast_closest(
+                    origin=camera_position.tolist(),
+                    dir=((ray_point - camera_position) / distance).tolist(),
+                    distance=distance,
+                )
+                hit_path = str(ray.get("rigidBody") or ray.get("collision") or "")
+                hit_distance = float(ray.get("distance", distance))
+                blocked = bool(
+                    ray.get("hit")
+                    and target_path not in hit_path
+                    and hit_distance > 0.35
+                    and hit_distance < distance - 0.03
+                )
+                if not blocked:
+                    visible_hit_path = hit_path or None
+                    surface_visible = True
+                    break
+                blocked_paths.append(f"{hit_path}@{hit_distance:.2f}m")
+            if not surface_visible:
+                print(
+                    f"[camera-coverage] geometric reject {name}: occluded_by="
+                    f"{sorted(set(blocked_paths))[:5]}",
+                    flush=True,
+                )
+                continue
+            margin = max(2, int(round(min(width, height) * 0.01)))
+            visibility[name] = {
+                "pixel_count": int(pixel_count),
+                "bbox_xyxy": [x1, y1, x2, y2],
+                "image_size": [int(width), int(height)],
+                "bbox_clipped": bool(
+                    x1 < margin or y1 < margin
+                    or x2 >= width - margin or y2 >= height - margin
+                ),
+                "visibility_source": "official_camera_frustum_physx_raycast",
+                "occlusion_hit_path": visible_hit_path,
+            }
+        return visibility
+
+    @classmethod
+    def _iter_instance_observations(cls, obs, info, path=()):
+        if not isinstance(obs, dict):
+            return
+        if "seg_instance" in obs:
+            label_map = info.get("seg_instance", {}) if isinstance(info, dict) else {}
+            yield path, obs["seg_instance"], label_map
+        for key, value in obs.items():
+            if isinstance(value, dict):
+                child_info = info.get(key, {}) if isinstance(info, dict) else {}
+                yield from cls._iter_instance_observations(value, child_info, path + (str(key),))
+
+    @staticmethod
+    def _instance_target_stats(seg, label_map, target_names):
+        try:
+            if hasattr(seg, "detach"):
+                seg = seg.detach()
+            if hasattr(seg, "cpu"):
+                seg = seg.cpu()
+            array = np.asarray(seg)
+            array = np.squeeze(array)
+        except Exception:
+            return {}
+        if array.ndim != 2 or not isinstance(label_map, dict):
+            return {}
+        target_instance_ids = defaultdict(list)
+        for raw_id, raw_label in label_map.items():
+            label = str(raw_label)
+            path_parts = set(label.rstrip("/").split("/"))
+            name = next(
+                (target for target in target_names if target == label or target in path_parts),
+                None,
+            )
+            if name is None:
+                continue
+            try:
+                instance_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            target_instance_ids[name].append(instance_id)
+
+        stats = {}
+        for name, instance_ids in target_instance_ids.items():
+            ys, xs = np.where(np.isin(array, instance_ids))
+            if not len(xs):
+                continue
+            width, height = int(array.shape[1]), int(array.shape[0])
+            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+            stats[name] = {
+                "pixel_count": int(len(xs)),
+                "bbox_xyxy": [x1, y1, x2, y2],
+                "image_size": [width, height],
+            }
+        return stats
+
+    def _visibility_from_instance(self, seg, label_map, target_names):
+        visibility = {}
+        for name, stats in self._instance_target_stats(seg, label_map, target_names).items():
+            if stats["pixel_count"] < self.config.visibility_min_pixels:
+                continue
+            x1, y1, x2, y2 = stats["bbox_xyxy"]
+            width, height = stats["image_size"]
+            margin = max(2, int(round(min(width, height) * 0.01)))
+            if x1 < margin or y1 < margin or x2 >= width - margin or y2 >= height - margin:
+                continue
+            visibility[name] = stats
+        return visibility
 
     def _object_pose_record(self, obj):
         try:
@@ -4907,6 +8139,8 @@ class OnlineDeltaSGEngine:
         """Camera at room corner, looking inward along diagonal. h_offset=0."""
         diagonal = np.array([opposite[0] - corner[0], opposite[1] - corner[1]])
         diag_len = np.sqrt(diagonal[0]**2 + diagonal[1]**2)
+        if not np.isfinite(diag_len) or diag_len < 1e-6:
+            raise ValueError("invalid room diagonal")
         cam_pos = np.array([
             corner[0] + (diagonal[0] / diag_len) * inward,
             corner[1] + (diagonal[1] / diag_len) * inward,
@@ -4985,13 +8219,15 @@ class OnlineDeltaSGEngine:
         else:
             up = np.array([0.0, 0.0, 1.0])
 
-        right = np.cross(up, d)
+        right = np.cross(d, up)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-8:
             right = np.array([1.0, 0.0, 0.0])
         else:
             right = right / right_norm
-        up = np.cross(d, right)
+        # Camera local -Z is the view direction. Build an upright right-handed
+        # basis: right x up = -view and the projected up axis follows world up.
+        up = np.cross(-d, right)
         up = up / np.linalg.norm(up)
         R = np.column_stack([right, up, -d])
         # Matrix to quaternion
@@ -5146,7 +8382,7 @@ class OnlineDeltaSGEngine:
                 self._category_models_cache[category] = False
         return self._category_models_cache[category]
 
-    def _choose_target_model(self, category):
+    def _choose_target_model(self, category, preferred_models=None):
         """Choose a least-used model so large batches cover task assets evenly."""
         try:
             models = sorted(get_all_object_category_models(category=category))
@@ -5154,6 +8390,20 @@ class OnlineDeltaSGEngine:
             models = []
         if not models:
             raise ValueError(f"No available models found for category {category}")
+        if self.config.target_asset_model and category == self.config.target_asset_category:
+            if self.config.target_asset_model not in models:
+                raise ValueError(
+                    f"Model {self.config.target_asset_model!r} is not installed for {category!r}"
+                )
+            return self.config.target_asset_model
+        if preferred_models is not None:
+            preferred = [model for model in preferred_models if model in models]
+            if not preferred:
+                raise ValueError(
+                    f"No preferred models are installed for category {category}: "
+                    f"{preferred_models}"
+                )
+            models = preferred
         eligible = [
             model for model in models
             if self._failed_target_models.get((category, model), 0)
@@ -5380,6 +8630,131 @@ class OnlineDeltaSGEngine:
                 set_selected([], False)
         except Exception:
             pass
+
+    def _capture_physics_rebuild_poses(self):
+        """Capture live poses that a stop/play physics rebuild would revert.
+
+        ``og.sim.stop()`` followed by ``og.sim.play()`` re-initializes PhysX
+        from the USD stage and ``play()`` additionally calls ``Robot.reset()``
+        on every robot. Poses written only to the GPU tensor view during play
+        (a generated object's confirmed placement, the stabilized robot spawn)
+        are NOT persisted to USD, so the rebuild silently reverts them:
+        observed in enva_gen5_pbfix2 as a placed nightstand teleporting back
+        to its import pose at the scene origin (under a door prim, which then
+        read as ``support_surface_occupied``) and the robot teleporting 7.7 m
+        back to its initial pose (tripping scene_integrity on every sample).
+        Record the live poses here so they can be re-applied right after the
+        rebuild. Native movable furniture must be included: Benevolence_1's
+        ``bookcase_owvfik_3`` shifts 15 cm on rebuild even when the generated
+        object is placed on a different bookcase.
+        """
+        saved = []
+        try:
+            robots = list(getattr(self.env, "robots", None) or [])
+        except Exception:
+            robots = []
+        targets = list(robots)
+        try:
+            targets.extend(self._scene_objects())
+        except Exception:
+            pass
+        seen = set()
+        for obj in targets:
+            key = getattr(obj, "prim_path", None) or getattr(obj, "name", None) or id(obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                position, orientation = obj.get_position_orientation()
+                saved.append((obj, position.clone(), orientation.clone()))
+            except Exception:
+                continue
+        return saved
+
+    def _restore_physics_rebuild_poses(self, saved):
+        """Re-apply poses displaced by a stop/play physics rebuild."""
+        for obj, position, orientation in saved or []:
+            try:
+                current_position, current_orientation = obj.get_position_orientation()
+                position_changed = float(((current_position - position) ** 2).sum() ** 0.5) > 1e-4
+                orientation_delta = min(
+                    float(((current_orientation - orientation) ** 2).sum() ** 0.5),
+                    float(((current_orientation + orientation) ** 2).sum() ** 0.5),
+                )
+                if not position_changed and orientation_delta <= 1e-4:
+                    continue
+                obj.set_position_orientation(position=position, orientation=orientation)
+            except Exception:
+                continue
+            try:
+                if getattr(obj, "name", "") not in self._anchored_native_fixtures:
+                    obj.keep_still()
+            except Exception:
+                pass
+
+    def _stabilize_rebuilt_native_fixtures(self, saved):
+        """Anchor only native, jointless fixtures destabilized by rebuild."""
+        candidates = []
+        robots = set(getattr(self.env, "robots", None) or [])
+        for obj, position, orientation in saved or []:
+            name = str(getattr(obj, "name", "") or "")
+            tokens = self._tokens(getattr(obj, "category", "") or "")
+            try:
+                has_joints = bool(obj.joints)
+            except Exception:
+                has_joints = True
+            if (
+                obj in robots
+                or name.startswith("online_env_")
+                or has_joints
+                or tokens & STRUCTURAL_CATEGORIES
+            ):
+                continue
+            candidates.append((obj, position, orientation))
+        if not candidates:
+            return
+        self._step(20)
+        anchored = []
+        for obj, position, orientation in candidates:
+            try:
+                current_position, _ = obj.get_position_orientation()
+                displacement = float(th.linalg.norm(current_position - position))
+            except Exception:
+                continue
+            if displacement <= 0.01:
+                continue
+            print(
+                f"[physics-rebuild] anchoring unstable native fixture "
+                f"{obj.name} displacement={displacement:.3f}m",
+                flush=True,
+            )
+            try:
+                obj.set_position_orientation(position=position, orientation=orientation)
+                obj.root_link.set_attribute("physics:kinematicEnabled", True)
+                self._anchored_native_fixtures.add(obj.name)
+                anchored.append(obj.name)
+            except Exception as exc:
+                print(
+                    f"[physics-rebuild] failed to anchor {obj.name}: {exc!r}",
+                    flush=True,
+                )
+        if not anchored:
+            return
+
+        # A generated object already resting on a fixture follows that fixture
+        # during the diagnostic settle window.  Once the fixture is restored
+        # and anchored, restore generated objects from the same rebuild
+        # transaction as well so their support relation is unchanged.
+        for obj, position, orientation in saved or []:
+            name = str(getattr(obj, "name", "") or "")
+            if not name.startswith("online_env_"):
+                continue
+            try:
+                obj.set_position_orientation(position=position, orientation=orientation)
+                obj.keep_still()
+            except Exception:
+                continue
+        self._step(2)
 
     def _tokens(self, text):
         return {token for token in re.split(r"[_\-\W]+", str(text).lower()) if token}

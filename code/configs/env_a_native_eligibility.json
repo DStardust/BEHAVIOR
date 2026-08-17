@@ -1,0 +1,4665 @@
+{
+  "scenes": {
+    "Beechwood_0_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_immwzb_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "bottom_cabinet_immwzb_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_nddvba_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qudfwe_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_2": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_ufhpbn_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_qacthv_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_rvpunw_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "private_office_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "dining_room_0",
+            "living_room_1"
+          ]
+        },
+        "door_ohagsq_2": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_12": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "floor_lamp_jcbvfi_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_1": {
+          "category": "floor_lamp",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_2": {
+          "category": "floor_lamp",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_3": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "fridge_dszchb_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "openable_window_ulnafj_10": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_11": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_5": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_6": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "openable_window_ulnafj_7": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "openable_window_ulnafj_8": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "openable_window_ulnafj_9": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "wall_mounted_tv_ylvjhb_0": {
+          "category": "wall_mounted_tv",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_immwzb_1",
+          "bottom_cabinet_nddvba_0",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_qudfwe_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1",
+          "bottom_cabinet_no_top_spojpj_2",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_qacthv_0",
+          "bottom_cabinet_rvpunw_0",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0",
+          "door_ohagsq_1",
+          "door_ohagsq_2"
+        ],
+        "close_fridge": [
+          "fridge_dszchb_0"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_11",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_immwzb_1",
+          "bottom_cabinet_nddvba_0",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_qudfwe_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1",
+          "bottom_cabinet_no_top_spojpj_2",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_qacthv_0",
+          "bottom_cabinet_rvpunw_0",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0",
+          "door_ohagsq_1",
+          "door_ohagsq_2"
+        ],
+        "open_fridge": [
+          "fridge_dszchb_0"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_11",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jcbvfi_0",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "floor_lamp_vdxlda_2",
+          "floor_lamp_vdxlda_3"
+        ],
+        "turn_off_tv": [
+          "wall_mounted_tv_ylvjhb_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jcbvfi_0",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "floor_lamp_vdxlda_2",
+          "floor_lamp_vdxlda_3"
+        ],
+        "turn_on_tv": [
+          "wall_mounted_tv_ylvjhb_0"
+        ]
+      },
+      "graph_nodes": 200
+    },
+    "Beechwood_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "television_room_0"
+          ]
+        },
+        "bottom_cabinet_jhymlr_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_jhymlr_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "childs_room_1"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "bottom_cabinet_kubcdk_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "bottom_cabinet_kubcdk_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_kubcdk_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_nddvba_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_nddvba_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "bottom_cabinet_rvpunw_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "television_room_0"
+          ]
+        },
+        "bottom_cabinet_rvpunw_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "television_room_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1",
+            "closet_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_10": {
+          "category": "door",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "door_lvgliq_11": {
+          "category": "door",
+          "rooms": [
+            "childs_room_1"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "childs_room_1",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "childs_room_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "television_room_0"
+          ]
+        },
+        "door_lvgliq_6": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "playroom_0"
+          ]
+        },
+        "door_lvgliq_7": {
+          "category": "door",
+          "rooms": [
+            "childs_room_1",
+            "playroom_0"
+          ]
+        },
+        "door_lvgliq_8": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_9": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "electric_switch_wseglt_12": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_13": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_14": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "electric_switch_wseglt_15": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_2"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "childs_room_1"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "television_room_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_1": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_2": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_3": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "childs_room_1"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "openable_window_ithrgo_2": {
+          "category": "openable_window",
+          "rooms": [
+            "television_room_0"
+          ]
+        },
+        "openable_window_ithrgo_3": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "wall_mounted_tv_ylvjhb_0": {
+          "category": "wall_mounted_tv",
+          "rooms": [
+            "television_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jhymlr_1",
+          "bottom_cabinet_jhymlr_2",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_kubcdk_0",
+          "bottom_cabinet_kubcdk_1",
+          "bottom_cabinet_kubcdk_2",
+          "bottom_cabinet_nddvba_0",
+          "bottom_cabinet_nddvba_1",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_pluwfl_1",
+          "bottom_cabinet_rvpunw_0",
+          "bottom_cabinet_rvpunw_1",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_10",
+          "door_lvgliq_11",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_lvgliq_9",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2",
+          "openable_window_ithrgo_3",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jhymlr_1",
+          "bottom_cabinet_jhymlr_2",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_kubcdk_0",
+          "bottom_cabinet_kubcdk_1",
+          "bottom_cabinet_kubcdk_2",
+          "bottom_cabinet_nddvba_0",
+          "bottom_cabinet_nddvba_1",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_pluwfl_1",
+          "bottom_cabinet_rvpunw_0",
+          "bottom_cabinet_rvpunw_1",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_10",
+          "door_lvgliq_11",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_lvgliq_9",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2",
+          "openable_window_ithrgo_3",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_15",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "floor_lamp_vdxlda_2",
+          "floor_lamp_vdxlda_3",
+          "table_lamp_xbfgjc_0"
+        ],
+        "turn_off_tv": [
+          "wall_mounted_tv_ylvjhb_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_15",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "floor_lamp_vdxlda_2",
+          "floor_lamp_vdxlda_3",
+          "table_lamp_xbfgjc_0"
+        ],
+        "turn_on_tv": [
+          "wall_mounted_tv_ylvjhb_0"
+        ]
+      },
+      "graph_nodes": 199
+    },
+    "Benevolence_0_int": {
+      "eligible_target_objects": {
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "empty_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "entryway_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "empty_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "empty_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "empty_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_ohagsq_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_ohagsq_0"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3"
+        ]
+      },
+      "graph_nodes": 38
+    },
+    "Benevolence_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_no_top_qudfwe_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_ufhpbn_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_ufhpbn_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_vzzafs_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "pantry_room_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "fridge_xyejdx_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_no_top_qudfwe_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_no_top_ufhpbn_1",
+          "bottom_cabinet_no_top_vzzafs_0"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0",
+          "door_ohagsq_0"
+        ],
+        "close_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "close_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_no_top_qudfwe_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_no_top_ufhpbn_1",
+          "bottom_cabinet_no_top_vzzafs_0"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0",
+          "door_ohagsq_0"
+        ],
+        "open_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "open_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "floor_lamp_vdxlda_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "floor_lamp_vdxlda_0"
+        ]
+      },
+      "graph_nodes": 94
+    },
+    "Benevolence_2_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1",
+            "bedroom_1"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "openable_window_ithrgo_2": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2",
+          "openable_window_ulnafj_0"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_slgzfc_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2",
+          "openable_window_ulnafj_0"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "floor_lamp_vdxlda_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "floor_lamp_vdxlda_0"
+        ]
+      },
+      "graph_nodes": 88
+    },
+    "Ihlen_0_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "garage_0"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "storage_room_0",
+            "storage_room_1"
+          ]
+        },
+        "door_ktydvs_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_0"
+          ]
+        },
+        "door_ktydvs_2": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "storage_room_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "living_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "garage_0",
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "garage_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_jrhgeu_0"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_ktydvs_2",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_jrhgeu_0"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_ktydvs_2",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9"
+        ]
+      },
+      "graph_nodes": 97
+    },
+    "Ihlen_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_bamfsz_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_no_top_bmsclc_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_ufhpbn_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_10": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_1"
+          ]
+        },
+        "door_lvgliq_11": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_1"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "bedroom_2",
+            "corridor_1"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0",
+            "staircase_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1",
+            "storage_room_2"
+          ]
+        },
+        "door_lvgliq_6": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_7": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_8": {
+          "category": "door",
+          "rooms": [
+            "bedroom_2",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_9": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_1"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "electric_switch_wseglt_12": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_13": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_14": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "staircase_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "floor_lamp_jqsuky_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "fridge_xyejdx_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_5": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "openable_window_ulnafj_7": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "openable_window_ulnafj_9": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_1": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_2": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "table_lamp_xbfgjc_3": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "table_lamp_xbfgjc_4": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "table_lamp_xbfgjc_5": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "table_lamp_xbfgjc_6": {
+          "category": "table_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_jrhgeu_1",
+          "bottom_cabinet_jrhgeu_2",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_10",
+          "door_lvgliq_11",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_lvgliq_9"
+        ],
+        "close_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_9"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_jrhgeu_1",
+          "bottom_cabinet_jrhgeu_2",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_10",
+          "door_lvgliq_11",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_lvgliq_9"
+        ],
+        "open_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_9"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jqsuky_0",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3",
+          "table_lamp_xbfgjc_4",
+          "table_lamp_xbfgjc_5",
+          "table_lamp_xbfgjc_6"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jqsuky_0",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3",
+          "table_lamp_xbfgjc_4",
+          "table_lamp_xbfgjc_5",
+          "table_lamp_xbfgjc_6"
+        ]
+      },
+      "graph_nodes": 189
+    },
+    "Merom_0_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_dajebq_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "bottom_cabinet_immwzb_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "bottom_cabinet_no_top_vdedzt_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "bottom_cabinet_nyfebf_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_0",
+            "playroom_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "standing_tv_udotid_0": {
+          "category": "standing_tv",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_no_top_vdedzt_0",
+          "bottom_cabinet_nyfebf_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_ohagsq_0"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_no_top_vdedzt_0",
+          "bottom_cabinet_nyfebf_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_ohagsq_0"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6"
+        ],
+        "turn_off_tv": [
+          "standing_tv_udotid_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6"
+        ],
+        "turn_on_tv": [
+          "standing_tv_udotid_0"
+        ]
+      },
+      "graph_nodes": 112
+    },
+    "Merom_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "bottom_cabinet_dajebq_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_3": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_4": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "empty_room_0",
+            "living_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "childs_room_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "door_lvgliq_6": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_7": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "door_lvgliq_8": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "staircase_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "empty_room_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "empty_room_1"
+          ]
+        },
+        "electric_switch_wseglt_12": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_13": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_14": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_15": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "staircase_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "floor_lamp_vdxlda_1": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "fridge_xyejdx_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_5": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_6": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_7": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "stove_rgpphy_0": {
+          "category": "stove",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "childs_room_0"
+          ]
+        },
+        "table_lamp_xbfgjc_1": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_2": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_3": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_jrhgeu_1",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1",
+          "bottom_cabinet_slgzfc_2",
+          "bottom_cabinet_slgzfc_3",
+          "bottom_cabinet_slgzfc_4"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_jrhgeu_1",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1",
+          "bottom_cabinet_slgzfc_2",
+          "bottom_cabinet_slgzfc_3",
+          "bottom_cabinet_slgzfc_4"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_lvgliq_8",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_15",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3"
+        ],
+        "turn_off_stove": [
+          "stove_rgpphy_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_15",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_vdxlda_0",
+          "floor_lamp_vdxlda_1",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3"
+        ],
+        "turn_on_stove": [
+          "stove_rgpphy_0"
+        ]
+      },
+      "graph_nodes": 166
+    },
+    "Pomaria_0_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_6": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "standing_tv_udotid_0": {
+          "category": "standing_tv",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_4"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_4"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9"
+        ],
+        "turn_off_tv": [
+          "standing_tv_udotid_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9"
+        ],
+        "turn_on_tv": [
+          "standing_tv_udotid_0"
+        ]
+      },
+      "graph_nodes": 115
+    },
+    "Pomaria_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_bmsclc_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_bmsclc_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "pantry_room_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_spojpj_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "pantry_room_0"
+          ]
+        },
+        "bottom_cabinet_no_top_ufhpbn_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_vdedzt_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_vzzafs_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "utility_room_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "pantry_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "fridge_xyejdx_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "fridge_xyejdx_1": {
+          "category": "fridge",
+          "rooms": [
+            "pantry_room_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_bmsclc_1",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_no_top_vdedzt_0",
+          "bottom_cabinet_no_top_vzzafs_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_fridge": [
+          "fridge_xyejdx_0",
+          "fridge_xyejdx_1"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_3"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_bmsclc_1",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_spojpj_0",
+          "bottom_cabinet_no_top_spojpj_1",
+          "bottom_cabinet_no_top_ufhpbn_0",
+          "bottom_cabinet_no_top_vdedzt_0",
+          "bottom_cabinet_no_top_vzzafs_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_fridge": [
+          "fridge_xyejdx_0",
+          "fridge_xyejdx_1"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_3"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8"
+        ]
+      },
+      "graph_nodes": 128
+    },
+    "Pomaria_2_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_rntwkg_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "bathroom_1"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1",
+            "storage_room_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "standing_tv_udotid_0": {
+          "category": "standing_tv",
+          "rooms": [
+            "bedroom_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_rntwkg_0"
+        ],
+        "close_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_rntwkg_0"
+        ],
+        "open_door": [
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ulnafj_0"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "floor_lamp_vdxlda_0"
+        ],
+        "turn_off_tv": [
+          "standing_tv_udotid_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "floor_lamp_vdxlda_0"
+        ],
+        "turn_on_tv": [
+          "standing_tv_udotid_0"
+        ]
+      },
+      "graph_nodes": 83
+    },
+    "Rs_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_bamfsz_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_dajebq_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "entryway_0"
+          ]
+        },
+        "bottom_cabinet_slgzfc_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "entryway_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "entryway_0"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "floor_lamp_vdxlda_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "fridge_xyejdx_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ithrgo_1": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ithrgo_2": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "standing_tv_udotid_0": {
+          "category": "standing_tv",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "living_room_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0"
+        ],
+        "close_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_slgzfc_0",
+          "bottom_cabinet_slgzfc_1"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_lvgliq_0"
+        ],
+        "open_fridge": [
+          "fridge_xyejdx_0"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ithrgo_1",
+          "openable_window_ithrgo_2"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "floor_lamp_vdxlda_0",
+          "table_lamp_xbfgjc_0"
+        ],
+        "turn_off_tv": [
+          "standing_tv_udotid_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "floor_lamp_vdxlda_0",
+          "table_lamp_xbfgjc_0"
+        ],
+        "turn_on_tv": [
+          "standing_tv_udotid_0"
+        ]
+      },
+      "graph_nodes": 87
+    },
+    "Wainscott_0_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_dajebq_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_2"
+          ]
+        },
+        "bottom_cabinet_jrhgeu_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "bottom_cabinet_lwjdmj_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "bottom_cabinet_lwjdmj_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "bottom_cabinet_no_top_bmsclc_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_pluwfl_2": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_2": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_ktydvs_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "living_room_2",
+            "storage_room_1"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0",
+            "storage_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "living_room_2"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1",
+            "living_room_2"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "storage_room_2"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0",
+            "corridor_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_2"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "dining_room_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "floor_lamp_jqsuky_0": {
+          "category": "floor_lamp",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "fridge_dszchb_0": {
+          "category": "fridge",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_10": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "openable_window_ulnafj_11": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_1"
+          ]
+        },
+        "openable_window_ulnafj_13": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_2"
+          ]
+        },
+        "openable_window_ulnafj_14": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_2"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_5": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "openable_window_ulnafj_7": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_8": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_9": {
+          "category": "openable_window",
+          "rooms": [
+            "living_room_0"
+          ]
+        },
+        "stove_igwqpj_0": {
+          "category": "stove",
+          "rooms": [
+            "kitchen_0"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_1": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_2": {
+          "category": "table_lamp",
+          "rooms": [
+            "living_room_2"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_lwjdmj_0",
+          "bottom_cabinet_lwjdmj_1",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_pluwfl_1",
+          "bottom_cabinet_no_top_pluwfl_2",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_qohxjq_2"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "close_fridge": [
+          "fridge_dszchb_0"
+        ],
+        "close_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_11",
+          "openable_window_ulnafj_13",
+          "openable_window_ulnafj_14",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_dajebq_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jrhgeu_0",
+          "bottom_cabinet_lwjdmj_0",
+          "bottom_cabinet_lwjdmj_1",
+          "bottom_cabinet_no_top_bmsclc_0",
+          "bottom_cabinet_no_top_pluwfl_0",
+          "bottom_cabinet_no_top_pluwfl_1",
+          "bottom_cabinet_no_top_pluwfl_2",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_no_top_qohxjq_2"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_ohagsq_0",
+          "door_ohagsq_1"
+        ],
+        "open_fridge": [
+          "fridge_dszchb_0"
+        ],
+        "open_window": [
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_11",
+          "openable_window_ulnafj_13",
+          "openable_window_ulnafj_14",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jqsuky_0",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2"
+        ],
+        "turn_off_stove": [
+          "stove_igwqpj_0"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "floor_lamp_jqsuky_0",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2"
+        ],
+        "turn_on_stove": [
+          "stove_igwqpj_0"
+        ]
+      },
+      "graph_nodes": 218
+    },
+    "Wainscott_1_int": {
+      "eligible_target_objects": {
+        "bottom_cabinet_bamfsz_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "bottom_cabinet_bamfsz_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_bamfsz_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_immwzb_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "bottom_cabinet_jhymlr_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "bottom_cabinet_jhymlr_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_nnvyol_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "bottom_cabinet_nnvyol_1": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_nnvyol_2": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_nnvyol_3": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_nnvyol_4": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_0": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_no_top_qohxjq_1": {
+          "category": "bottom_cabinet_no_top",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "bottom_cabinet_nyfebf_0": {
+          "category": "bottom_cabinet",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "door_ktydvs_0": {
+          "category": "door",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "door_ktydvs_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_2",
+            "corridor_0"
+          ]
+        },
+        "door_lvgliq_1": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "utility_room_0"
+          ]
+        },
+        "door_lvgliq_2": {
+          "category": "door",
+          "rooms": [
+            "corridor_0",
+            "exercise_room_0"
+          ]
+        },
+        "door_lvgliq_3": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_4": {
+          "category": "door",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "door_lvgliq_5": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_lvgliq_6": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "door_lvgliq_7": {
+          "category": "door",
+          "rooms": [
+            "bathroom_1",
+            "corridor_0"
+          ]
+        },
+        "door_ohagsq_0": {
+          "category": "door",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "door_ohagsq_1": {
+          "category": "door",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "door_ohagsq_2": {
+          "category": "door",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "electric_switch_wseglt_0": {
+          "category": "electric_switch",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "electric_switch_wseglt_1": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_0"
+          ]
+        },
+        "electric_switch_wseglt_10": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_1"
+          ]
+        },
+        "electric_switch_wseglt_11": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "electric_switch_wseglt_12": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "electric_switch_wseglt_13": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_3"
+          ]
+        },
+        "electric_switch_wseglt_14": {
+          "category": "electric_switch",
+          "rooms": [
+            "storage_room_2"
+          ]
+        },
+        "electric_switch_wseglt_2": {
+          "category": "electric_switch",
+          "rooms": [
+            "closet_1"
+          ]
+        },
+        "electric_switch_wseglt_3": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "electric_switch_wseglt_4": {
+          "category": "electric_switch",
+          "rooms": [
+            "bathroom_1"
+          ]
+        },
+        "electric_switch_wseglt_5": {
+          "category": "electric_switch",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "electric_switch_wseglt_6": {
+          "category": "electric_switch",
+          "rooms": [
+            "utility_room_0"
+          ]
+        },
+        "electric_switch_wseglt_7": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_8": {
+          "category": "electric_switch",
+          "rooms": [
+            "corridor_0"
+          ]
+        },
+        "electric_switch_wseglt_9": {
+          "category": "electric_switch",
+          "rooms": [
+            "exercise_room_0"
+          ]
+        },
+        "openable_window_ithrgo_0": {
+          "category": "openable_window",
+          "rooms": [
+            "bathroom_0"
+          ]
+        },
+        "openable_window_ulnafj_0": {
+          "category": "openable_window",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "openable_window_ulnafj_1": {
+          "category": "openable_window",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "openable_window_ulnafj_10": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "openable_window_ulnafj_2": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_3": {
+          "category": "openable_window",
+          "rooms": [
+            "playroom_0"
+          ]
+        },
+        "openable_window_ulnafj_4": {
+          "category": "openable_window",
+          "rooms": [
+            "exercise_room_0"
+          ]
+        },
+        "openable_window_ulnafj_5": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_6": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "openable_window_ulnafj_7": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "openable_window_ulnafj_8": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "openable_window_ulnafj_9": {
+          "category": "openable_window",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "table_lamp_xbfgjc_0": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "table_lamp_xbfgjc_1": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_2"
+          ]
+        },
+        "table_lamp_xbfgjc_2": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "table_lamp_xbfgjc_3": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_1"
+          ]
+        },
+        "table_lamp_xbfgjc_4": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "table_lamp_xbfgjc_5": {
+          "category": "table_lamp",
+          "rooms": [
+            "bedroom_0"
+          ]
+        },
+        "top_cabinet_fqhdne_0": {
+          "category": "top_cabinet",
+          "rooms": [
+            "private_office_0"
+          ]
+        },
+        "top_cabinet_jvdbxh_0": {
+          "category": "top_cabinet",
+          "rooms": [
+            "private_office_0"
+          ]
+        }
+      },
+      "eligible_tasks": {
+        "close_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_bamfsz_2",
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jhymlr_1",
+          "bottom_cabinet_nnvyol_0",
+          "bottom_cabinet_nnvyol_1",
+          "bottom_cabinet_nnvyol_2",
+          "bottom_cabinet_nnvyol_3",
+          "bottom_cabinet_nnvyol_4",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_nyfebf_0",
+          "top_cabinet_fqhdne_0",
+          "top_cabinet_jvdbxh_0"
+        ],
+        "close_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_ohagsq_0",
+          "door_ohagsq_1",
+          "door_ohagsq_2"
+        ],
+        "close_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "open_cabinet": [
+          "bottom_cabinet_bamfsz_0",
+          "bottom_cabinet_bamfsz_1",
+          "bottom_cabinet_bamfsz_2",
+          "bottom_cabinet_immwzb_0",
+          "bottom_cabinet_jhymlr_0",
+          "bottom_cabinet_jhymlr_1",
+          "bottom_cabinet_nnvyol_0",
+          "bottom_cabinet_nnvyol_1",
+          "bottom_cabinet_nnvyol_2",
+          "bottom_cabinet_nnvyol_3",
+          "bottom_cabinet_nnvyol_4",
+          "bottom_cabinet_no_top_qohxjq_0",
+          "bottom_cabinet_no_top_qohxjq_1",
+          "bottom_cabinet_nyfebf_0",
+          "top_cabinet_fqhdne_0",
+          "top_cabinet_jvdbxh_0"
+        ],
+        "open_door": [
+          "door_ktydvs_0",
+          "door_ktydvs_1",
+          "door_lvgliq_0",
+          "door_lvgliq_1",
+          "door_lvgliq_2",
+          "door_lvgliq_3",
+          "door_lvgliq_4",
+          "door_lvgliq_5",
+          "door_lvgliq_6",
+          "door_lvgliq_7",
+          "door_ohagsq_0",
+          "door_ohagsq_1",
+          "door_ohagsq_2"
+        ],
+        "open_window": [
+          "openable_window_ithrgo_0",
+          "openable_window_ulnafj_0",
+          "openable_window_ulnafj_1",
+          "openable_window_ulnafj_10",
+          "openable_window_ulnafj_2",
+          "openable_window_ulnafj_3",
+          "openable_window_ulnafj_4",
+          "openable_window_ulnafj_5",
+          "openable_window_ulnafj_6",
+          "openable_window_ulnafj_7",
+          "openable_window_ulnafj_8",
+          "openable_window_ulnafj_9"
+        ],
+        "turn_off_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3",
+          "table_lamp_xbfgjc_4",
+          "table_lamp_xbfgjc_5"
+        ],
+        "turn_on_light": [
+          "electric_switch_wseglt_0",
+          "electric_switch_wseglt_1",
+          "electric_switch_wseglt_10",
+          "electric_switch_wseglt_11",
+          "electric_switch_wseglt_12",
+          "electric_switch_wseglt_13",
+          "electric_switch_wseglt_14",
+          "electric_switch_wseglt_2",
+          "electric_switch_wseglt_3",
+          "electric_switch_wseglt_4",
+          "electric_switch_wseglt_5",
+          "electric_switch_wseglt_6",
+          "electric_switch_wseglt_7",
+          "electric_switch_wseglt_8",
+          "electric_switch_wseglt_9",
+          "table_lamp_xbfgjc_0",
+          "table_lamp_xbfgjc_1",
+          "table_lamp_xbfgjc_2",
+          "table_lamp_xbfgjc_3",
+          "table_lamp_xbfgjc_4",
+          "table_lamp_xbfgjc_5"
+        ]
+      },
+      "graph_nodes": 200
+    }
+  },
+  "schema_version": "deltasg_enva_scene_eligibility.v1"
+}

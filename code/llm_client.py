@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Default configuration
 # ---------------------------------------------------------------------------
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL = "qwen3.7-max"
+DEFAULT_MODEL = "qwen3.8-max"
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_MAX_RETRIES = 1
 DEFAULT_TIMEOUT = 300.0

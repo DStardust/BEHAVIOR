@@ -176,3 +176,18 @@ orientation = quat_multiply(q_yaw, q_pitch)           # 先 pitch 后 yaw
 2. 查看预览图，选择每个房间的最佳视角（墙角/墙面 + v_angle）
 3. 更新本文档的配置表
 4. 后续 `_compute_global_camera_pose` 和 `capture_batch10_camera.py` 自动读取配置
+
+---
+
+## 5. 专家求解阶段的传感器生命周期
+
+任务生成阶段只使用上述官方候选位姿做视锥投影和 PhysX 射线可见性检查，避免在高频生成循环中反复创建 Replicator 图。
+
+专家求解阶段必须保存真实渲染结果，并遵守以下约束：
+
+1. 机器人主相机使用机器人自带的官方 `VisionSensor`。
+2. 机器人主相机是进程内唯一的实例分割 annotator；语义分割由该官方实例分割标签稳定派生，用于精细操作 bbox 验证。
+3. 每个已选全局位姿分别创建一个固定 RGB `VisionSensor`。全局可见性和 bbox 复用任务生成阶段已经通过视锥投影与 PhysX 射线检查的几何证据，并按实际输出分辨率缩放。
+4. 每个采样事件保存机器人 RGB、实例分割、语义分割、bbox，以及所有全局相机 RGB 和几何可见性证据；审计必须实际解码这些文件并拒绝空白、损坏或全背景结果。
+
+原因：Isaac Sim 5.1 在移动已挂载实例分割 annotator 的相机后，或在同一进程挂载第二个实例分割流后，可能在 `SyntheticData._post_process_graph_tick` 中发生进程级崩溃。唯一分割流加固定 RGB 全局相机既保留官方位姿策略，也避免该生命周期问题。

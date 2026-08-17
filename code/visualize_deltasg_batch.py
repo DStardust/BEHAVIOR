@@ -316,6 +316,7 @@ def target_object_metadata(run):
             "role": ao.get("role") or ao.get("semantic_role") or role_by_name.get(name),
             "placement": ao.get("placement"),
             "target_kind": "added_object",
+            "room": ao.get("room_id") or ao.get("room"),
         }
     for item in te.get("state_changed_objects", []):
         name = object_name(item)
@@ -327,21 +328,39 @@ def target_object_metadata(run):
             "role": next(iter(item.get("semantic_roles") or []), None),
             "states": item.get("states"),
             "target_kind": "state_changed_object",
+            "room": item.get("room_id") or item.get("room"),
         }
     task = te.get("task", {}) or {}
+    solution_plan = te.get("solution_plan") or run.get("solution_plan") or []
+    action_targets = {
+        step.get(key)
+        for step in solution_plan
+        for key in ("target_object", "tool_object")
+        if step.get(key)
+    }
     for item in task.get("plan_objects", []) or []:
-        if item.get("reference_only"):
-            continue
         name = object_name(item)
+        semantic_role = item.get("semantic_role") or role_by_name.get(name)
+        if item.get("reference_only") and not semantic_role and name not in action_targets:
+            continue
         if not name or name in metadata:
             continue
         metadata[name] = {
             "object_name": name,
             "category": item.get("category"),
-            "role": "reference_target" if item.get("reference_only") else item.get("role"),
+            "role": semantic_role or item.get("role") or "action_target",
             "target_kind": "plan_object",
+            "room": item.get("room_id") or item.get("room"),
         }
     return metadata
+
+
+def target_camera_rooms(run, target_metadata):
+    rooms = {meta.get("room") for meta in target_metadata.values() if meta.get("room")}
+    primary = camera_room_for_run(run)
+    if primary:
+        rooms.add(primary)
+    return sorted(rooms)
 
 
 def get_camera_obs(viewer, cam_pos, cam_ori):
@@ -504,6 +523,11 @@ def optimize_camera_for_visible_target_objects(env, viewer, run, initial_camera,
 
     camera_room = camera_room_for_run(run)
     candidates = official_camera_candidates(env, camera_room)
+    for target_room in target_camera_rooms(run, target_metadata):
+        if target_room == camera_room:
+            continue
+        for cam_pos, cam_ori, method in official_camera_candidates(env, target_room):
+            candidates.append((cam_pos, cam_ori, f"{target_room}: {method}"))
     for nearby_room in nearby_camera_rooms(env, run, camera_room):
         for cam_pos, cam_ori, method in official_camera_candidates(env, nearby_room):
             candidates.append((cam_pos, cam_ori, f"{nearby_room}: {method}"))
@@ -511,6 +535,7 @@ def optimize_camera_for_visible_target_objects(env, viewer, run, initial_camera,
         candidates = [initial_camera]
 
     best = None
+    viable = []
     results = []
     for cam_pos, cam_ori, method in candidates:
         try:
@@ -521,6 +546,7 @@ def optimize_camera_for_visible_target_objects(env, viewer, run, initial_camera,
             continue
         bboxes = compute_instance_bboxes(obs, info, target_metadata, min_pixels=min_pixels)
         visible_count = len({item["object_name"] for item in bboxes})
+        visible_names = sorted({item["object_name"] for item in bboxes})
         pixel_count = sum(int(item.get("pixel_count", 0)) for item in bboxes)
         native_count = len(extract_native_bboxes(obs, info).get("bbox_2d_tight", {}).get("boxes", []))
         score = (visible_count, pixel_count, native_count)
@@ -529,22 +555,82 @@ def optimize_camera_for_visible_target_objects(env, viewer, run, initial_camera,
             "visible_count": visible_count,
             "pixel_count": pixel_count,
             "native_bbox_count": native_count,
+            "visible_objects": visible_names,
+            "camera": {
+                "position": [float(v) for v in cam_pos],
+                "orientation_xyzw": [float(v) for v in cam_ori],
+            },
         }
         results.append(result)
+        viable.append((result, cam_pos, cam_ori, method))
         if best is None or score > best[0]:
             best = (score, cam_pos, cam_ori, method)
-        if visible_count == len(target_metadata):
-            break
 
     if best is None:
         return (*initial_camera, {"visible_count": 0, "target_count": len(target_metadata), "candidates": results})
     _, cam_pos, cam_ori, method = best
+    primary = next(
+        item for item in viable
+        if item[3] == method and np.allclose(item[1], cam_pos) and np.allclose(item[2], cam_ori)
+    )
+    selected = [primary[0]]
+    covered = set(primary[0]["visible_objects"])
+    remaining = [item for item in viable if item is not primary]
+    while remaining and len(covered) < len(target_metadata):
+        choice = max(
+            remaining,
+            key=lambda item: (
+                len(set(item[0]["visible_objects"]) - covered),
+                item[0]["pixel_count"],
+            ),
+        )
+        new_names = set(choice[0]["visible_objects"]) - covered
+        if not new_names:
+            break
+        selected.append(choice[0])
+        covered.update(choice[0]["visible_objects"])
+        remaining.remove(choice)
     diagnostics = {
         "visible_count": int(best[0][0]),
         "target_count": len(target_metadata),
+        "aggregate_visible_count": len(covered),
+        "selected_views": selected,
         "candidates": results,
     }
     return cam_pos, cam_ori, f"{method} optimized_visible={diagnostics['visible_count']}/{diagnostics['target_count']}", diagnostics
+
+
+def save_additional_bbox_views(run, stem, output_dir, viewer, diagnostics, draw_overlay=True):
+    selected = diagnostics.get("selected_views") or []
+    if len(selected) <= 1:
+        return
+    bbox_path = output_dir / f"{stem}_after_bboxes.json"
+    with bbox_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    metadata = target_object_metadata(run)
+    views = []
+    aggregate = {item["object_name"]: item for item in payload.get("objects") or []}
+    for idx, selected_view in enumerate(selected[1:], 1):
+        camera = selected_view["camera"]
+        cam_pos = camera["position"]
+        cam_ori = camera["orientation_xyzw"]
+        obs, info = capture_obs(viewer, cam_pos, cam_ori, output_dir / f"{stem}_after_view_{idx}.png")
+        boxes = compute_instance_bboxes(obs, info, metadata)
+        for item in boxes:
+            aggregate.setdefault(item["object_name"], item)
+        if draw_overlay and isinstance(obs, dict) and "rgb" in obs:
+            draw_bbox_overlay(obs["rgb"], boxes, output_dir / f"{stem}_after_view_{idx}_bboxes.png")
+        views.append({
+            "index": idx,
+            "method": selected_view.get("method"),
+            "camera": camera,
+            "objects": boxes,
+        })
+    payload["additional_views"] = views
+    payload["all_visible_target_objects"] = sorted(aggregate)
+    payload["missing_target_objects"] = sorted(set(payload.get("target_objects") or []) - set(aggregate))
+    with bbox_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def apply_state_changes(env, run):
@@ -656,6 +742,14 @@ def visualize_one(
             payload["camera_selection"] = camera_diagnostics
             with bbox_json_path.open("w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
+            save_additional_bbox_views(
+                run,
+                stem,
+                output_dir,
+                viewer,
+                camera_diagnostics,
+                draw_overlay=draw_bboxes,
+            )
     else:
         capture(viewer, cam_pos, cam_ori, str(output_dir / f"{stem}_after.png"))
 
@@ -703,7 +797,8 @@ def main():
     if not files:
         hard_exit(0)
 
-    robot_model = None if str(args.robot).lower() in {"none", "null", ""} else args.robot
+    robot_name = str(args.robot).lower()
+    robot_model = None if robot_name in {"none", "null", ""} else robot_name
     # This renderer captures through OmniGibson's official viewer camera. Robot
     # vision sensors are unused and can overflow Replicator graphs in large scenes.
     env = create_env(

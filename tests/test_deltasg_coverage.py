@@ -39,18 +39,35 @@ def sample(scene):
                 "model": "model_a",
                 "semantic_roles": ["task_object"],
                 "room_id": "office_0",
-                "placement": {"support_category": "desk"},
+                "placement": {
+                    "support_category": "desk",
+                    "robot_approach": {
+                        "ok": True,
+                        "horizontal_distance": 0.5,
+                        "max_horizontal_distance": 1.0,
+                    },
+                },
             }],
             "validation": {
                 "ok": True,
                 "scene_integrity": {"ok": True},
                 "settling": {"all_within_threshold": True},
+                "camera_coverage": {
+                    "ok": True,
+                    "target_objects": ["book_0"],
+                    "visible_objects": ["book_0"],
+                },
             },
         },
         "validation": {
             "ok": True,
             "scene_integrity": {"ok": True},
             "settling": {"all_within_threshold": True},
+            "camera_coverage": {
+                "ok": True,
+                "target_objects": ["book_0"],
+                "visible_objects": ["book_0"],
+            },
             "sample_fingerprint": "unique",
         },
         "diversity": {
@@ -84,12 +101,31 @@ def run_audit(root):
 def main():
     pairs = eligible_native_task_pairs("envA_open_close", {
         "before_graph": {
-            "nodes": [{
-                "type": "object",
-                "id": "door_0",
-                "category": "door",
-                "available_states": ["Open"],
-            }],
+            "nodes": [
+                {
+                    "type": "object",
+                    "id": "door_0",
+                    "category": "door",
+                    "available_states": ["Open"],
+                    "rooms": ["room_0"],
+                    "bbox": {"min": [0, 0, 0], "max": [1, 1, 2.2]},
+                },
+                {
+                    "type": "object",
+                    "id": "floors_0",
+                    "category": "floors",
+                    "rooms": ["room_0"],
+                    "bbox": {"min": [0, 0, -0.3], "max": [1, 1, 0]},
+                },
+                {
+                    "type": "object",
+                    "id": "top_cabinet_0",
+                    "category": "top_cabinet",
+                    "available_states": ["Open"],
+                    "rooms": ["room_0"],
+                    "bbox": {"min": [0, 0, 1.6], "max": [1, 1, 2.4]},
+                },
+            ],
         },
     })
     assert pairs == {("open_door", "door_0"), ("close_door", "door_0")}

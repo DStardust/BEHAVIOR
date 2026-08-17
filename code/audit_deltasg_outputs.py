@@ -8,6 +8,8 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from deltasg_expert import ExpertPlanError, validate_env_a_plan_contract
+
 
 EXPECTED_LABELS = {
     "envA_retrieval_delivery": {"env_type": "Env-A", "category": "retrieval_delivery"},
@@ -20,7 +22,6 @@ EXPECTED_LABELS = {
     "envC_appliance": {"env_type": "Env-C", "category": "appliance"},
     "envC_all": {"env_type": "Env-C", "category": "mixed"},
 }
-
 
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
@@ -84,6 +85,11 @@ def check_run(path: Path, run: dict):
         issues.append("missing_settling_report")
     elif not settling.get("all_within_threshold", False):
         issues.append("settling_or_contact_failed")
+    camera_coverage = validation.get("camera_coverage") or {}
+    if not camera_coverage:
+        issues.append("missing_initial_camera_coverage")
+    elif not camera_coverage.get("ok", False):
+        issues.append("initial_camera_coverage_failed")
 
     if env_type == "Env-A":
         primary = task.get("primary_behavior_task") or ""
@@ -109,23 +115,159 @@ def check_run(path: Path, run: dict):
             instruction_lower = str(task.get("instruction") or "").lower()
             for obj in added_objects:
                 placement = obj.get("placement") or {}
-                support = str(placement.get("support_category") or "").lower().replace("_", " ")
-                if support == "floors":
-                    support = "floor"
-                if support and support not in instruction_lower:
-                    issues.append("envA_retrieval_instruction_support_mismatch")
-                    break
+                roles = set(obj.get("semantic_roles") or [])
+                if "task_object" in roles:
+                    approach = placement.get("robot_approach") or (
+                        (obj.get("validation") or {}).get("robot_approach")
+                    )
+                    if not approach:
+                        issues.append("envA_retrieval_missing_robot_approach")
+                    elif not approach.get("ok", False):
+                        issues.append("envA_retrieval_robot_approach_failed")
+                    elif float(approach.get("horizontal_distance", float("inf"))) > float(
+                        approach.get("max_horizontal_distance", 1.0)
+                    ):
+                        issues.append("envA_retrieval_robot_approach_too_far")
+                    support_tokens = set(
+                        str(placement.get("support_category") or "")
+                        .lower().replace("__", "_").split("_")
+                    )
+                    if support_tokens & {"floor", "floors"}:
+                        height = placement.get("manipulation_height") or {}
+                        if not height:
+                            issues.append("envA_retrieval_missing_floor_height_gate")
+                        elif not height.get("eligible", False):
+                            issues.append("envA_retrieval_unmanipulable_floor_target")
+                    support = str(placement.get("support_category") or "").lower().replace("_", " ")
+                    if support == "floors":
+                        support = "floor"
+                    if support and support not in instruction_lower:
+                        issues.append("envA_retrieval_instruction_support_mismatch")
+                        break
             if primary.startswith("deliver_"):
                 source_supports = {
                     (obj.get("placement") or {}).get("support_object_id")
                     for obj in added_objects
                 }
-                destinations = [
+                explicit_destinations = [
+                    obj for obj in task.get("plan_objects") or []
+                    if obj.get("semantic_role") == "delivery_destination"
+                ]
+                inferred_destinations = [
                     obj for obj in task.get("plan_objects") or []
                     if obj.get("reference_only") and obj.get("object_id") not in source_supports
                 ]
+                destinations = explicit_destinations or inferred_destinations
                 if not destinations:
                     issues.append("envA_delivery_missing_distinct_destination")
+                elif len(destinations) != 1:
+                    issues.append("envA_delivery_destination_identity_ambiguous")
+                else:
+                    destination = destinations[0]
+                    approach = destination.get("robot_approach") or {}
+                    if approach.get("ok") is not True:
+                        issues.append("envA_delivery_destination_robot_approach_failed")
+                    height = destination.get("manipulation_height") or {}
+                    if height.get("eligible") is not True:
+                        issues.append("envA_delivery_destination_manipulation_height_failed")
+                task_target_ids = [
+                    obj.get("object_id") or obj.get("object_name")
+                    for obj in added_objects
+                    if "task_object" in set(obj.get("semantic_roles") or [])
+                ]
+                try:
+                    validate_env_a_plan_contract(
+                        run,
+                        task_object_id=(task_target_ids[0] if len(task_target_ids) == 1 else None),
+                        destination_object_id=(
+                            destinations[0].get("object_id") if len(destinations) == 1 else None
+                        ),
+                    )
+                except ExpertPlanError:
+                    issues.append("envA_solution_plan_contract_invalid")
+            else:
+                task_target_ids = [
+                    obj.get("object_id") or obj.get("object_name")
+                    for obj in added_objects
+                    if "task_object" in set(obj.get("semantic_roles") or [])
+                ]
+                try:
+                    validate_env_a_plan_contract(
+                        run,
+                        task_object_id=(task_target_ids[0] if len(task_target_ids) == 1 else None),
+                    )
+                except ExpertPlanError:
+                    issues.append("envA_solution_plan_contract_invalid")
+        elif primary.startswith(("open_", "close_", "turn_on_", "turn_off_")):
+            interact_targets = {
+                step.get("target_object")
+                for step in te.get("solution_plan") or []
+                if str(step.get("primitive") or "").upper() == "INTERACT"
+                and step.get("target_object")
+            }
+            target_records = {
+                item.get("object_id"): item
+                for item in task.get("plan_objects") or []
+                if item.get("object_id") in interact_targets
+            }
+            if not interact_targets or set(target_records) != interact_targets:
+                issues.append("envA_native_target_identity_mismatch")
+            for item in target_records.values():
+                approach = item.get("robot_approach") or {}
+                if approach.get("ok") is not True:
+                    issues.append("envA_native_target_robot_approach_failed")
+                    break
+                if float(approach.get("horizontal_distance", float("inf"))) > float(
+                    approach.get("max_horizontal_distance", 1.0)
+                ):
+                    issues.append("envA_native_target_robot_approach_too_far")
+                    break
+                height = item.get("manipulation_height") or {}
+                if height.get("eligible") is not True:
+                    issues.append("envA_native_target_manipulation_height_failed")
+                    break
+            state_key = "open" if primary.startswith(("open_", "close_")) else "toggled_on"
+            desired_final = primary.startswith(("open_", "turn_on_"))
+            state_records = {
+                item.get("object_id"): item
+                for item in te.get("state_changed_objects") or []
+                if "task_initial_state" in set(item.get("semantic_roles") or [])
+            }
+            for target_id in interact_targets:
+                setup = state_records.get(target_id) or {}
+                initial = (setup.get("states") or {}).get(state_key)
+                expected = (setup.get("expected_task_final_states") or {}).get(state_key)
+                if (
+                    setup.get("ok") is not True
+                    or initial is not (not desired_final)
+                    or expected is not desired_final
+                ):
+                    issues.append("envA_native_target_initial_state_invalid")
+                    break
+                preflight = setup.get("official_state_transition_preflight") or []
+                expected_phases = [
+                    ("task_initial", not desired_final),
+                    ("task_final_preflight", desired_final),
+                    ("restore_task_initial", not desired_final),
+                ]
+                if len(preflight) != len(expected_phases) or any(
+                    record.get("phase") != phase
+                    or record.get("requested") is not requested
+                    or record.get("setter_returned") is not True
+                    or record.get("immediate") is not requested
+                    or record.get("settled") is not requested
+                    or record.get("ok") is not True
+                    for record, (phase, requested) in zip(preflight, expected_phases)
+                ):
+                    issues.append("envA_native_target_official_state_preflight_invalid")
+                    break
+            try:
+                validate_env_a_plan_contract(
+                    run,
+                    native_target_id=(next(iter(interact_targets)) if len(interact_targets) == 1 else None),
+                )
+            except ExpertPlanError:
+                issues.append("envA_solution_plan_contract_invalid")
 
     elif env_type == "Env-B":
         state_changed = te.get("state_changed_objects") or []
@@ -176,7 +318,20 @@ def check_run(path: Path, run: dict):
 
 
 def bbox_file_for_run(run_path: Path, vis_root: Path):
-    return next(vis_root.rglob(f"{run_path.stem}_after_bboxes.json"), None)
+    label = infer_label(run_path)
+    if label:
+        parts = run_path.parts
+        label_index = parts.index(label)
+        if label_index + 1 < len(parts):
+            scene = parts[label_index + 1]
+            exact = vis_root / label / scene / f"{run_path.stem}_after_bboxes.json"
+            if exact.is_file():
+                return exact
+
+    # Compatibility for older flat visualization directories is safe only
+    # when the basename is unique. Scene batches intentionally reuse stems.
+    matches = list(vis_root.rglob(f"{run_path.stem}_after_bboxes.json"))
+    return matches[0] if len(matches) == 1 else None
 
 
 def summarize_bboxes(run_path: Path, vis_root: Path | None):
@@ -187,7 +342,8 @@ def summarize_bboxes(run_path: Path, vis_root: Path | None):
         return {"exists": False}
     data = load_json(bbox_path)
     targets = data.get("target_objects") or []
-    visible = data.get("objects") or []
+    visible_names = data.get("all_visible_target_objects")
+    visible = visible_names if visible_names is not None else (data.get("objects") or [])
     missing = data.get("missing_target_objects") or []
     camera_selection = data.get("camera_selection") or {}
     return {

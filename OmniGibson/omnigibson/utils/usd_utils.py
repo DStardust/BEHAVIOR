@@ -612,7 +612,7 @@ class RigidContactAPIImpl:
         # Otherwise, convert to prim paths, filtering out kinematic-only bodies that are not rows
         prim_paths = self._get_prim_paths(objects_links_or_prim_paths)
         row_map = self._PATH_TO_ROW_IDX.get(scene_idx, {})
-        return th.tensor([row_map[path] for path in prim_paths if path in row_map])
+        return th.tensor([row_map[path] for path in prim_paths if path in row_map], dtype=th.long)
 
     def get_contact_col_indices(self, scene_idx, objects_links_or_prim_paths):
         """
@@ -633,7 +633,12 @@ class RigidContactAPIImpl:
 
         # Otherwise, convert to prim paths
         prim_paths = self._get_prim_paths(objects_links_or_prim_paths)
-        return th.tensor([self._PATH_TO_COL_IDX[scene_idx][path] for path in prim_paths])
+        col_map = self._PATH_TO_COL_IDX.get(scene_idx, {})
+        # Collision-disabled bodies (for example some carpet assets) can be in
+        # an object/category ignore set without being represented in the
+        # PhysX contact view. They cannot contribute contacts to this matrix,
+        # so filter them just as get_contact_row_indices does.
+        return th.tensor([col_map[path] for path in prim_paths if path in col_map], dtype=th.long)
 
     def get_contact_pairs(self, scene_idx, query_set, with_set, current_only):
         """
