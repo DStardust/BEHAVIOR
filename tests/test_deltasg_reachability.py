@@ -1900,9 +1900,9 @@ def test_physical_dataset_consumers_preserve_strict_and_hybrid_contracts():
     assert '"vla_eligible_rate"' in manifest
 
 
-def test_single_scene_e2e_runner_uses_qwen_and_backend_specific_80_percent_gate():
+def test_single_scene_e2e_runner_uses_configurable_model_and_backend_specific_80_percent_gate():
     source = (CODE_DIR / "run_enva_single_scene_e2e.sh").read_text(encoding="utf-8")
-    assert 'MODEL="qwen3.8-max"' in source
+    assert 'MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"' in source
     assert '--task-sequence "$TASKS"' in source
     assert 'bash code/run_deltasg_expert_batch.sh' in source
     assert 'backend.get("physical_trajectory_available") is True' in source

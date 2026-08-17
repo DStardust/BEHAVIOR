@@ -16,7 +16,7 @@ from pathlib import Path
 from audit_deltasg_outputs import check_run
 
 
-MODEL = "qwen3.8-max"
+MODEL = os.environ.get("DELTASG_LLM_MODEL", "qwen3.8-max")
 _ACTIVE_PROCESS = None
 
 

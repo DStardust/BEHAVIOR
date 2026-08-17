@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 OUT_ROOT="${1:-code/outputs/enva_retrieval_multiscene_20260708}"
 ROBOT="${ROBOT:-fetch}"
+MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"
 NUM="${NUM:-300}"
 TASK_CATEGORIES="${TASK_CATEGORIES:-retrieval_delivery}"
 SEED_BASE="${SEED_BASE:-79000}"
@@ -47,7 +48,7 @@ run_scene() {
       --num-envs "$count" \
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
-      --llm-model qwen3.8-max \
+      --llm-model "$MODEL" \
       --max-global-cameras "$MAX_GLOBAL_CAMERAS" \
       --max-camera-pose-attempts "$MAX_CAMERA_POSE_ATTEMPTS" \
       --camera-pose-render-steps "$CAMERA_POSE_RENDER_STEPS" \

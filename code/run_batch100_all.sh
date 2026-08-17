@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 OUT_ROOT="${1:-code/outputs/batch100_all_multiscene_20260708}"
 ROBOT="${ROBOT:-Tiago}"
+MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"
 NUM="${NUM:-100}"
 MIN_OK_PER_SCENE="${MIN_OK_PER_SCENE:-1}"
 TASK_OBJECTS="${TASK_OBJECTS:-1}"
@@ -95,7 +96,7 @@ run_gen_scene() {
       --task-objects "$TASK_OBJECTS" --context-objects "$CONTEXT_OBJECTS" \
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
-      --llm-model qwen3.8-max \
+      --llm-model "$MODEL" \
       --max-llm-retries 5 --max-retries 4 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \

@@ -182,9 +182,6 @@ def main():
     args = parser.parse_args()
     if (args.input_json or args.input_root) and not args.output_root:
         parser.error("--output-root is required with --input-json or --input-root")
-    if args.llm_model != "qwen3.8-max":
-        parser.error("DeltaSG expert runs must explicitly use --llm-model qwen3.8-max")
-
     rows = []
     for input_path, output_dir in _entries(args):
         run = json.loads(input_path.read_text(encoding="utf-8"))

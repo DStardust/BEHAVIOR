@@ -30,7 +30,7 @@ from run_deltasg_expert import (
 )
 
 
-MODEL = "qwen3.8-max"
+MODEL = os.environ.get("DELTASG_LLM_MODEL", "qwen3.8-max")
 DEFAULT_VIEW_WIDTH = 960
 DEFAULT_VIEW_HEIGHT = 720
 DEFAULT_CANVAS_HEIGHT = 900
@@ -115,8 +115,6 @@ def main():
     parser.add_argument("--canvas-height", type=int, default=DEFAULT_CANVAS_HEIGHT)
     parser.add_argument("--llm-model", required=True)
     args = parser.parse_args()
-    if args.llm_model != MODEL:
-        parser.error(f"physical replay requires --llm-model {MODEL}")
     if args.action_stride < 1 or args.fps < 1 or args.view_width < 1 or args.view_height < 1:
         parser.error("stride, fps, and view dimensions must be positive")
     if args.canvas_height < args.view_height + 100:

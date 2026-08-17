@@ -28,17 +28,25 @@ env -u ALL_PROXY -u all_proxy \
   python code/run_online_deltasg.py ...
 ```
 
-LLM 是生成和验证流程的一部分。运行前设置 DashScope 密钥，并显式选择模型：
+LLM 是生成和验证流程的一部分。运行前设置 DashScope 密钥：
 
 ```bash
 export DASHSCOPE_API_KEY='<your-key>'
 ```
 
-所有正式命令必须包含：
+默认模型是 `qwen3.8-max`。单次 Python 入口可以显式指定：
 
 ```text
 --llm-model qwen3.8-max
 ```
+
+批处理脚本可通过环境变量统一替换为其他 DashScope 兼容模型：
+
+```bash
+export DELTASG_LLM_MODEL='<model-name>'
+```
+
+较便宜的模型可用于开发和小规模回测，但不同模型的计划合法率可能不同；正式数据集应在 manifest 中保留实际的 `llm_model`，并分模型审计成功率。
 
 仓库不保存 API 密钥。可选的兼容接口地址通过 `LLM_BASE_URL` 设置。
 

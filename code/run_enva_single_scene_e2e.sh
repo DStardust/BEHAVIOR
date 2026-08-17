@@ -4,7 +4,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:?usage: $0 OUTPUT_ROOT [SCENE]}"
 SCENE="${2:-Beechwood_0_int}"
-MODEL="qwen3.8-max"
+MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"
 BACKEND="${EXPERT_BACKEND:-physical_control}"
 if [[ "$BACKEND" != "physical_control" && "$BACKEND" != "oracle_symbolic" ]]; then
   echo "unsupported EXPERT_BACKEND=$BACKEND" >&2

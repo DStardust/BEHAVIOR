@@ -5320,8 +5320,6 @@ def main():
         help="Maximum fine-operation point height above the supporting floor in metres.",
     )
     args = parser.parse_args()
-    if args.llm_model != "qwen3.8-max":
-        parser.error("DeltaSG expert runs must explicitly use --llm-model qwen3.8-max")
     if args.min_manipulation_height < 0 or args.max_manipulation_height <= args.min_manipulation_height:
         parser.error("manipulation height bounds must satisfy 0 <= min < max")
 
