@@ -9,6 +9,7 @@ CODE_DIR = Path(__file__).resolve().parents[1] / "code"
 sys.path.insert(0, str(CODE_DIR))
 
 from audit_deltasg_outputs import check_run
+from deltasg_room_topology import nearby_door_rooms, traversable_room_pairs
 
 
 def _run():
@@ -45,6 +46,55 @@ def _run():
             },
         },
     }
+
+
+def test_room_topology_uses_traversable_boundaries_not_all_room_pairs():
+    room_map = [
+        [1, 1, 0, 2, 2],
+        [1, 1, 0, 2, 2],
+        [0, 0, 0, 0, 0],
+        [3, 3, 0, 0, 0],
+        [3, 3, 0, 0, 0],
+    ]
+    traversable = [
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0],
+        [1, 1, 0, 0, 0],
+    ]
+    pairs = traversable_room_pairs(
+        room_map, traversable, {"room_a": 1, "room_b": 2, "room_c": 3}
+    )
+    assert pairs == {("room_a", "room_b")}
+
+
+def test_incomplete_door_metadata_uses_nearest_official_room_on_other_side():
+    room_map = [
+        [1, 1, 0, 2, 2],
+        [1, 1, 0, 2, 2],
+        [1, 1, 0, 2, 2],
+    ]
+    rooms = nearby_door_rooms(
+        room_map,
+        center_pixel=(1, 2),
+        radius_pixels=2,
+        room_name_to_id={"left_room": 1, "right_room": 2},
+        known_rooms=["left_room"],
+    )
+    assert rooms == ["left_room", "right_room"]
+
+
+def test_audit_rejects_legacy_complete_room_graph():
+    run = _run()
+    nodes = [{"type": "room", "name": f"room_{index}"} for index in range(4)]
+    edges = [
+        {"source": f"room_{left}", "target": f"room_{right}", "mode": "centroid_route_candidate"}
+        for left in range(4)
+        for right in range(left + 1, 4)
+    ]
+    run["before_graph"] = {"nodes": nodes, "navigation": {"room_edges": edges}}
+    assert "before_graph_room_topology_complete_graph" in check_run(Path("sample.json"), run)
 
 
 def test_reachable_task_object_passes_audit():
@@ -153,10 +203,36 @@ def test_serial_native_tasks_choose_target_before_robot_spawn():
     assert "self._prepared_native_target = None" in block
 
 
+def test_env_a_attempt_cleanup_precedes_spawn_and_is_not_repeated_after_spawn():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_a"):
+        source.index("def generate_env_b_fire")
+    ]
+    boundary = source[
+        source.index("def begin_env_a_attempt"):
+        source.index("def _get_active_categories")
+    ]
+    assert "if self._env_a_attempt_prepared:" in generator
+    assert "self._env_a_attempt_prepared = False" in generator
+    assert "self._cleanup_spawned_objects(" in boundary
+    assert "self._env_a_attempt_prepared = True" in boundary
+    native_prepare = source[
+        source.index("def prepare_native_task_robot_spawn"):
+        source.index("def prepare_retrieval_delivery_robot_spawn")
+    ]
+    retrieval_prepare = source[
+        source.index("def prepare_retrieval_delivery_robot_spawn"):
+        source.index("def bind_prepared_native_task_spawn")
+    ]
+    assert "_cleanup_spawned_objects" not in native_prepare
+    assert "_cleanup_spawned_objects" not in retrieval_prepare
+
+
 def test_task_object_ontop_grid_prefers_real_robot_operation_side():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     placement = source[
-        source.index('if semantic_role == "task_object":'):
+        source.index("if manipulated_object:"):
         source.index("# Relation placement is comparatively expensive")
     ]
     relation = source[
@@ -171,7 +247,8 @@ def test_task_object_ontop_grid_prefers_real_robot_operation_side():
 
 def test_placement_loop_has_independent_task_floor_height_guard():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
-    assert '"error": "task_object_floor_height_out_of_range"' in source
+    assert '"error": f"{semantic_role}_floor_height_out_of_range"' in source
+    assert 'manipulated_object = semantic_role in {"task_object", "interaction_tool"}' in source
     assert 'semantic_role == "task_object"' in source
     assert "_validate_floor_manipulation_height" in source
     assert 'target_placement_mode == "floor"' in source
@@ -291,13 +368,13 @@ def test_floor_overlap_gate_includes_the_robot_footprint():
 
 def test_generated_support_floor_candidates_cover_the_reachable_room():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
-    assert "spread_across_room=generated_support_fixture" in source
+    assert "generated_support_fixture\n                            or bool(record.get(\"_prefer_floor_first\"))" in source
     assert "pool = ordered if spread_across_room else ordered[: min(25, len(ordered))]" in source
 
 
 def test_generated_support_records_do_not_mutate_shared_asset_database_records():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
-    assert source.count('copy.deepcopy(self._record_for_category("breakfast_table"))') >= 1
+    assert source.count('copy.deepcopy(self._record_for_category("coffee_table"))') >= 2
     assert 'copy.deepcopy(self._record_for_category("coffee_table"))' in source
     assert "if record.get(\"_generated_support_fixture\")" in source
     assert "self._forget_generated_placement(result)" in source
@@ -643,10 +720,11 @@ def test_physics_rebuild_anchors_only_observed_unstable_native_fixtures():
 def test_retrieval_generation_uses_physical_grasp_height_and_sized_supports():
     engine = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     assert 'self._record_for_category("nightstand")' not in engine
-    assert engine.count('self._record_for_category("breakfast_table")') >= 2
-    assert 'self._record_for_category("coffee_table")' in engine
+    assert engine.count('self._record_for_category("coffee_table")') >= 3
     assert 'self._compact_support_models("coffee_table")' in engine
-    assert '"task_object_physical_grasp_height_out_of_range"' in engine
+    assert 'generated_support_record["_preferred_models"]' in engine
+    assert 'record["_preferred_models"] = [model]' in engine
+    assert 'f"{semantic_role}_physical_grasp_height_out_of_range"' in engine
     assert "DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT" in engine
     assert 'self.config.solvability_profile == "physical_control"' in engine
     assert 'else self.config.min_manipulation_height' in engine
@@ -674,13 +752,67 @@ def test_delivery_uses_generated_destination_only_as_validated_fallback():
     assert "self._support_model_has_floor_pose(" in support
     assert '"no_footprint_clear_delivery_support_pose"' in support
     assert "self._approach_pose_clears_object(" in support
-    assert 'avoid_position=source_pose.get("position")' in support
+    assert "source_approach_xy = source_approach.get(" in support
+    assert "avoid_position=support_avoid_position" in support
     floor_start = source.index("def _build_floor_placement")
     floor = source[floor_start:source.index("\n    def ", floor_start + 10)]
     assert "if avoid_position is not None:" in floor
     assert "min_separation_pixels" in floor
     assert "ranked_pixels[:96]" in floor
     assert "self._hypothetical_support_has_operation_approach(" in floor
+
+
+def test_retrieval_source_support_retries_models_and_rooms_inside_one_task():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    helper = source[
+        source.index("def _spawn_retrieval_source_support"):
+        source.index("def _spawn_delivery_destination_support")
+    ]
+    assert "max_local_attempts=6" in helper
+    assert "self._choose_support_bootstrap_room(" in helper
+    assert "self._support_model_has_floor_pose(" in helper
+    assert 'record["_preferred_models"] = [model]' in helper
+    assert '"source_support_attempts_exhausted"' in helper
+    generation = source[
+        source.index("def generate_env_a"):
+        source.index("def _build_fire_task_instance")
+    ]
+    assert generation.count("self._spawn_retrieval_source_support(") == 2
+
+
+def test_delivery_floor_source_is_limited_to_visible_height_eligible_models():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generation = source[
+        source.index("def generate_env_a"):
+        source.index("def _build_fire_task_instance")
+    ]
+    assert 'primary_task.startswith("deliver_")' in generation
+    assert 'source_record["_prefer_floor_first"] = True' in generation
+    assert "reserving support space for the delivery destination" in generation
+    helper = source[
+        source.index("def _floor_compatible_models"):
+        source.index("def _support_model_has_floor_pose")
+    ]
+    assert "relative_grasp_height = height / 2.0 + 0.005" in helper
+    assert "relative_grasp_height < view_minimum + 0.02" in helper
+    assert "self.config.min_manipulation_height" in helper
+    assert "self.config.max_manipulation_height" in helper
+    assert "self._direct_floor_primary_view_error(relative_grasp_height)" in helper
+    placement = source[
+        source.index("floor_candidates = []"):
+        source.index("placed = False", source.index("floor_candidates = []"))
+    ]
+    assert 'floor_placement["_preferred_floor_candidate"] = True' in placement
+    assert 'or bool(record.get("_prefer_floor_first"))' in placement
+    assert "candidates = preferred_floor + remaining" in placement
+    view_gate = source[
+        source.index("def _direct_floor_primary_view_error"):
+        source.index("def _build_floor_placement")
+    ]
+    assert 'self.config.solvability_profile == "oracle_symbolic"' in view_gate
+    assert "min_height=max(self.config.min_manipulation_height, 0.15)" in view_gate
+    assert "return direct_floor_primary_view_error(relative_height)" in view_gate
+    assert "floor primary view FAILED" in source
 
 
 def test_symbolic_coverage_propagates_generation_solvability_profile():
@@ -704,7 +836,7 @@ def test_generated_support_requires_an_external_operation_approach():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     floor_loop = source[
         source.index('if semantic_role == "task_support":'):
-        source.index('if semantic_role == "task_object" and not reachability["ok"]:')
+        source.index('if manipulated_object and not reachability["ok"]:')
     ]
     assert "target_aabb_xy=target_aabb_xy" in floor_loop
     assert "target_object_id=None" in floor_loop
@@ -763,7 +895,9 @@ def test_exact_native_coverage_uses_target_conditioned_stable_robot_spawn():
     api = (CODE_DIR / "api.py").read_text(encoding="utf-8")
     assert "preferred_target_name=args.target_native_object_id" in runner
     assert "preferred_max_distance=1.0" in api
-    assert "effective_max_distance = preferred_max_distance + target_xy_radius" in api
+    assert "target_lower_xy = target_lower[:2].cpu()" in api
+    assert "nearest_xy = th.minimum(" in api
+    assert "if distance > preferred_max_distance:" in api
     assert "expert_base_clearance_margin: float = 0.20" in engine
     assert 'scene_model == "Benevolence_2_int"' in api
     assert "max(90, warmup_steps * 3)" in api
@@ -866,7 +1000,8 @@ def test_native_task_approach_uses_object_aabb_edge():
     ]
     assert 'bbox = node.get("bbox") or {}' in selector
     assert "target_aabb_xy=target_aabb_xy" in selector
-    assert "max_horizontal_distance=1.35" in selector
+    assert "max_horizontal_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in selector
+    assert '"max_horizontal_distance": DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE' in selector
 
 
 def test_generation_approach_uses_explicit_selected_room():
@@ -925,12 +1060,10 @@ def test_visualizer_normalizes_same_robot_name_for_omnigibson_registry():
 
 def test_post_navigation_oracle_visibility_uses_head_only_recovery():
     source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
-    assert (
-        "if step.primitive in MANIPULATION_PRIMITIVES and visibility_errors "
-        "and target is not None:"
-    ) in source
-    assert '"post_navigation_target_not_visible"' in source
     execute = source[source.index("def execute("):source.index("def main()")]
+    assert 'step.primitive == "NAVIGATE_TO"' in execute
+    assert ") and visibility_errors and target is not None:" in execute
+    assert '"post_navigation_target_not_visible"' in source
     assert '"type": "oracle_head_only_look_at"' in execute
     assert '"base_motion_commanded": False' in execute
     assert 'f"step_{step.step_id:03d}_pre_head_aim"' in execute
@@ -958,7 +1091,8 @@ def test_exact_native_spawn_keeps_farther_same_room_collision_fallbacks():
         source.index("for _ in range(max_attempts * 3):")
     ]
     assert "len(spawn_candidates) >= max_attempts" in spawn
-    assert "if distance > effective_max_distance" in spawn
+    assert "if distance > preferred_max_distance" in spawn
+    assert "nearest_xy = th.minimum(" in spawn
     assert "< 0.25" in spawn
 
 
@@ -995,7 +1129,8 @@ def test_retrieval_bootstraps_support_after_native_surface_failure():
     ]
     assert 'not add_result["ok"]' in generation
     assert 'task_category == "retrieval_delivery"' in generation
-    assert 'self._record_for_category("breakfast_table")' in generation
+    assert 'self._record_for_category("coffee_table")' in generation
+    assert 'self._compact_support_models("coffee_table")' in generation
     assert 'preferred_support_id=generated_support_id' in generation
     assert "ignore_floor_coverings=generated_support_fixture" in source
     assert 'other_tokens & {"carpet", "rug"}' in source
@@ -1151,16 +1286,56 @@ def test_generated_delivery_support_models_are_compact_and_height_eligible():
     ]
     assert 'get_dataset_path("behavior-1k-assets")' in helper
     assert 'json.loads(metadata_path.read_text(encoding="utf-8"))["bbox_size"]' in helper
-    assert "min(width, depth) < 0.30 or max(width, depth) > 0.75" in helper
+    assert "min(width, depth) < min_surface_span or max(width, depth) > 0.75" in helper
     assert "self.config.min_manipulation_height" in helper
     assert "self.config.max_manipulation_height" in helper
     assert "sorted(ranked)[:12]" in helper
+    preflight = source[
+        source.index("def _support_model_has_floor_pose"):
+        source.index("def _forget_generated_placement")
+    ]
+    assert "ranked_pixels.sort(" in preflight
+    assert "reverse=True" in preflight
+    assert "np.linalg.norm(center - avoid_xy) < 1.0" not in preflight
 
     generator = source[
         source.index("def add_task_asset"):
         source.index("def _remove_object_safe_by_name")
     ]
     assert 'preferred_models=record.get("_preferred_models")' in generator
+
+
+def test_generated_retrieval_source_support_reserves_a_book_sized_surface():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    spawn = source[
+        source.index("def _spawn_retrieval_source_support"):
+        source.index("def _spawn_delivery_destination_support")
+    ]
+    assert '"coffee_table", min_surface_span=0.48' in spawn
+    assert 'if model not in compact_models' in spawn
+
+
+def test_task_object_approach_accepts_the_current_validated_operation_pose():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    approach = source[
+        source.index("def _validate_task_object_approach"):
+        source.index("def _floor_height_for_position")
+    ]
+    assert '"reason": "current_stable_operation_pose"' in approach
+    assert "distance <= self.config.max_task_object_approach_distance" in approach
+    assert '"distance_reference": "aabb_edge"' in approach
+
+
+def test_symbolic_native_state_height_override_keeps_physical_diagnostic():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    height = source[
+        source.index("def _native_target_manipulation_height"):
+        source.index("def _native_task_instruction")
+    ]
+    assert 'self.config.solvability_profile == "oracle_symbolic"' in height
+    assert 'result["physical_eligible"] = False' in height
+    assert 'result["physical_reason"] = result.get("reason")' in height
+    assert 'result["eligibility_basis"] = "official_symbolic_state_transition"' in height
 
 
 def test_delivery_destination_requires_primary_camera_operation_visibility():
@@ -1170,6 +1345,14 @@ def test_delivery_destination_requires_primary_camera_operation_visibility():
         source.index("def _delivery_top_surface_feasible")
     ]
     assert "self._primary_camera_operation_visible(node, robot_approach)" in destination
+    assert 'self.config.solvability_profile == "oracle_symbolic"' in destination
+    assert '"oracle_target_conditioned_spawn"' in destination
+    assert 'self.config.solvability_profile == "physical_control"' in destination
+    assert "symbolic visibility deferred" in destination
+    assert "expert must pass head-only pre-operation primary-view validation" in destination
+    assert destination.index('"oracle_target_conditioned_spawn"') < destination.index(
+        "self._primary_camera_operation_visible(node, robot_approach)"
+    )
     helper = source[
         source.index("def _primary_camera_operation_visible"):
         source.index("def _delivery_top_surface_feasible")
@@ -1204,9 +1387,27 @@ def test_delivery_destination_reserves_the_expert_framing_distance():
     assert "eligible_distance_mask = edge_distances <= threshold" in approach
     assert "candidate_pixels = candidate_pixels[eligible_distance_mask]" in approach
     assert approach.index("eligible_distance_mask =") < approach.index(
-        "candidate_xy, occupancy_rejections ="
+        "candidate_xy, occupancy_rejections, navigation_rejections ="
     )
+    assert "nav_reachable_mask=nav_reachable_mask" in approach
     assert "candidate_order" in approach
+
+
+def test_generation_navigation_goal_carve_matches_expert_after_exact_occupancy():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    chooser = source[
+        source.index("def _collision_free_approach_candidate"):
+        source.index("def _validate_task_object_approach")
+    ]
+    occupancy = chooser.index("if not occupied:")
+    route = chooser.index("route_connected = bool(", occupancy)
+    carve = chooser.index("for scale in (0.0, 0.25, 0.5, 0.75, 1.0):", route)
+    accept = chooser.index(
+        "return candidate_xy, occupancy_rejections, navigation_rejections", carve
+    )
+    assert occupancy < route < carve < accept
+    assert "candidate_points[:, :2] - candidate_position[:2]" in chooser
+    assert "navigation_rejections += 1" in chooser[carve:accept]
 
 
 def test_camera_look_at_basis_is_a_proper_rotation_not_a_reflection():
@@ -1281,10 +1482,12 @@ def test_expert_frames_large_manipulation_supports_from_aabb_size():
     ]
     assert "xy_diagonal" in framing
     assert "math.tan(math.radians(25.0))" in framing
-    assert "preferred_distance=_target_framing_distance(obj)" in source
-    assert "th.linalg.norm((upper - lower)[:2])" in source
-    assert "math.radians(15.0)" in source
-    assert "_quat_multiply_xyzw(camera_orientation, local_pitch)" in source
+    assert "preferred_distance=_target_framing_distance(obj, robot=self.robot)" in source
+    assert "minimum = 0.85" in framing
+    assert "and not tiago" in framing
+    capture = source[source.index("def _capture_robot("):source.index("def _capture_globals(")]
+    assert "sensor.set_position_orientation" not in capture
+    assert "sensor.get_obs()" in capture
 
 
 def test_oracle_visibility_recovery_does_not_move_the_base():
@@ -1306,6 +1509,11 @@ def test_expert_observation_pose_rejects_occupied_centres_without_blanket_aabb_c
     ]
     assert "_erode_trav_map" in navigation
     assert "line_of_sight" in navigation
+    assert "candidate_room not in target_rooms" in navigation
+    assert 'startswith(\n        "online_env_"\n    )' in navigation
+    assert 'rejected["target_room"] += 1' in navigation
+    assert "crosses_room_boundary" in navigation
+    assert 'rejected["room_boundary"] += 1' in navigation
     assert "_native_occupant_at_pose" in navigation
     assert 'rejected["native_occupancy"] += 1' in navigation
     assert "obstacle_bounds" not in navigation
@@ -1513,7 +1721,8 @@ def test_retrieval_prefers_vetted_native_support_before_bootstrap():
     assert safe_call < bootstrap_call
     assert "excluded_rooms=self._rejected_rooms" in setup
     assert "generated_support_record = copy.deepcopy(" in setup
-    assert "no native surface; placing breakfast_table in" in setup
+    assert "no native surface; placing compact" in setup
+    assert "coffee_table in {target_room}" in setup
     assert "using vetted native support in" in setup
     assert '"no_reachable_compatible_support_room"' in setup
     assert "preferred_target_room = target_room" in setup
@@ -1667,6 +1876,28 @@ def test_expert_integrity_baseline_is_recorded_after_sensor_initialization_settl
     assert camera_init < final_warmup < baseline < first_step
 
 
+def test_generation_and_expert_fail_closed_on_fallen_or_floating_robot():
+    api = (CODE_DIR / "api.py").read_text(encoding="utf-8")
+    stability = api[
+        api.index("def validate_robot_stability"):
+        api.index("# =========================\n# Step2 utilities")
+    ]
+    assert "tilt <= max_tilt" in stability
+    assert "min_ground_gap <= ground_gap <= max_ground_gap" in stability
+
+    generation = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    assert "robot_stability = validate_robot_stability(self.env)" in generation
+    assert 'validation["robot_stability"] = robot_stability' in generation
+    assert 'validation["ok"] = False' in generation
+
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    assert "saved_robot_stability = _saved_robot_pose_stability(robot_pose)" in expert
+    assert 'else "initial_robot_stability"' in expert
+    assert '"stage": "post_robot_stability"' in expert
+    assert '"stage": "final_robot_stability"' in expert
+    assert '"robot_stability": validate_robot_stability(env)' in expert
+
+
 def test_coverage_reports_strict_and_assisted_physical_acceptance_separately():
     source = (CODE_DIR / "run_enva_expert_coverage.py").read_text(encoding="utf-8")
     assert '"assisted_physical"' in source
@@ -1785,7 +2016,7 @@ def test_physical_place_rebuilds_physics_when_scene_queries_stay_blind():
     assert "forcing physics rebuild and resample" in override
 
 
-def test_symbolic_navigation_reuses_generation_validated_approach():
+def test_symbolic_navigation_revalidates_generated_objects_and_bounds_native_saved_approaches():
     source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
     oracle = source[
         source.index("class DeltaSGOraclePrimitives"):
@@ -1795,10 +2026,101 @@ def test_symbolic_navigation_reuses_generation_validated_approach():
         oracle.index("def _navigate_to_obj("):
         oracle.index("def _navigate_to_pose(")
     ]
+    assert 'not obj.name.startswith("online_env_")' in navigate
     assert 'getattr(self, "_deltasg_saved_robot_approaches", {})' in navigate
-    assert "route = [candidate_pose]" in navigate
+    assert "> DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in navigate
+    assert "candidate_room not in target_rooms" in navigate
     assert "_connected_observation_pose(" in navigate
+    assert "max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in navigate
+    assert "_connected_navigation_waypoints(" in navigate
+    assert 'getattr(self, "_deltasg_navigation_fallback_rank", 0)' in navigate
     assert "controller._deltasg_saved_robot_approaches = saved_robot_approaches" in source
+
+
+def test_symbolic_navigation_visibility_recovery_uses_alternate_valid_stances():
+    source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    execute = source[source.index("def execute("):source.index("def main()")]
+    assert 'and step.primitive == "NAVIGATE_TO"' in execute
+    assert "for fallback_rank in (1, 2):" in execute
+    assert "controller._deltasg_navigation_fallback_rank = fallback_rank" in execute
+    assert 'primitive_map["NAVIGATE_TO"], target, attempts=1' in execute
+    assert 'record["navigation_visibility_recovery"]' in execute
+
+
+def test_generation_robot_head_pose_is_replayed_and_close_walls_block_visibility():
+    generation = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    robot_record = generation[
+        generation.index("def _robot_record("):generation.index("def _camera_records(")
+    ]
+    assert 'pose["camera_joint_positions"] = self._to_list(camera_joint_positions)' in robot_record
+    generation_visibility = generation[
+        generation.index("def _geometric_camera_visibility"):
+        generation.index("def _iter_instance_observations")
+    ]
+    assert "hit_distance > 0.35" not in generation_visibility
+
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    set_pose = expert[expert.index("def _set_robot_pose("):expert.index(
+        "def _saved_robot_pose_stability("
+    )]
+    assert 'pose.get("camera_joint_positions") or []' in set_pose
+    assert "indices=robot.camera_control_idx" in set_pose
+    observation_pose = expert[
+        expert.index("def _connected_observation_pose"):
+        expert.index("def _target_framing_distance")
+    ]
+    assert "hit_distance > 0.35" not in observation_pose
+    assert "robot_path not in hit_path" in observation_pose
+
+
+def test_expert_segmentation_pngs_are_color_previews_with_raw_npy_labels():
+    source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    preview = source[
+        source.index("def _segmentation_preview("):source.index("def _save_camera_sample(")
+    ]
+    assert "dtype=np.uint64" in preview
+    assert "dtype=np.uint8" in preview
+    assert "labels != 0" in preview
+    saver = source[source.index("def _save_camera_sample("):source.index(
+        "def _primary_robot_camera("
+    )]
+    assert "np.save(npy_path, array)" in saver
+    assert 'Image.fromarray(_segmentation_preview(array), mode="RGB")' in saver
+    assert 'mode="I;16"' not in saver
+
+
+def test_oracle_native_support_uses_official_symbolic_place_flow():
+    source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    oracle = source[
+        source.index("class DeltaSGOraclePrimitives"):
+        source.index("class DeltaSGPhysicalPrimitives")
+    ]
+    place = oracle[oracle.index("def _place_with_predicate("):oracle.index(
+        "def _navigate_to_obj("
+    )]
+    # Fix W: native and generated supports share one bounded official placement
+    # path. The nested 40-attempt cuboid-sampler loop plus per-candidate
+    # dump/settle/load is gone; it stalled the persistent scene on
+    # deliver_medicine (~7 min, no result). The official OnTop/Inside setter
+    # stays the only final transition, clamped by wall time and a bounded
+    # retry budget, with the strict 1.15 m AABB-edge gate unchanged.
+    assert "from omnigibson.utils.object_state_utils import m as object_state_macros" in place
+    assert "object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2" in place
+    assert "object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2" in place
+    assert "deadline = time.monotonic() + PLACE_NATIVE_MAX_WALL_SECONDS" in place
+    assert "if time.monotonic() > deadline:" in place
+    assert "for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):" in place
+    assert "changed = bool(state.set_value(obj, True))" in place
+    assert "reached = bool(state.get_value(obj))" in place
+    assert "placed_object_distance = _horizontal_target_aabb_distance(" in place
+    assert "placed_object_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in place
+    assert "yield from self._release()" in place
+    # The regressive nested brute-force and its PhysX-corrupting restore cycle
+    # must not return.
+    assert "for _ in range(40):" not in place
+    assert "self._sample_pose_with_object_and_predicate(" not in place
+    assert "og.sim.load_state(attempt_state, serialized=False)" not in place
+    assert "held_horizontal_radius" not in place
 
 
 def test_sticky_approach_avoids_removed_attached_mesh_conflict():
@@ -1903,7 +2225,7 @@ def test_physical_dataset_consumers_preserve_strict_and_hybrid_contracts():
 def test_single_scene_e2e_runner_uses_configurable_model_and_backend_specific_80_percent_gate():
     source = (CODE_DIR / "run_enva_single_scene_e2e.sh").read_text(encoding="utf-8")
     assert 'MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"' in source
-    assert '--task-sequence "$TASKS"' in source
+    assert '--task-sequence "$task_sequence"' in source
     assert 'bash code/run_deltasg_expert_batch.sh' in source
     assert 'backend.get("physical_trajectory_available") is True' in source
     assert 'backend.get("name") == "oracle_symbolic"' in source
@@ -1916,6 +2238,31 @@ def test_single_scene_e2e_runner_uses_configurable_model_and_backend_specific_80
     assert "and expert_completed == generation_ok" in source
     assert '"required_rate": 0.80' in source
     assert "and end_to_end_rate >= 0.80" in source
+    assert 'generation_process_errors.tsv' in source
+    assert 'remaining_tasks=("${remaining_tasks[@]:${#started_tasks[@]}}")' in source
+    assert 'resume_args=(--resume)' in source
+    assert 'if [[ "${GENERATION_ONLY:-0}" == "1" ]]' in source
+    assert 'audit_enva_generation_coverage.py' in source
+
+
+def test_generation_only_all_scene_runner_uses_structural_coverage_audits():
+    source = (CODE_DIR / "run_enva_generation_all_scenes.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "GENERATION_ONLY=1 EXPERT_BACKEND=oracle_symbolic" in source
+    assert 'run_enva_single_scene_e2e.sh" "$OUT/$scene" "$scene"' in source
+    assert 'generation_audit.json' in source
+    assert 'all_scenes_generation_audit.json' in source
+    assert '"generation_rate": generated / eligible if eligible else 0.0' in source
+    assert 'all(row["passed"] for row in rows)' in source
+
+
+def test_generation_resume_preserves_existing_runs_and_avoids_run_id_overwrite():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    assert "def load_existing_runs(output_dir):" in source
+    assert 'summary["runs"].extend(summary_item(run, path) for run, path in existing)' in source
+    assert 'engine._run_counter = max(engine._run_counter, max(existing_indices) + 1)' in source
+    assert "len(runs) - existing_run_count != args.num_envs" in source
 
 
 def test_serial_native_spawn_failure_uses_the_generation_retry_budget():
@@ -1949,9 +2296,12 @@ def test_persistent_symbolic_expert_reuses_preloaded_same_scene_environments():
     assert "execute_args.preloaded_delta_names = preloaded_names" in worker
     assert "fresh_environment" in worker
     assert "fresh_environment = key != environment_key or env is None" in worker
+    assert "_cleanup_remaining_global_streams()" in worker
     assert "environment_loads += 1" in worker
     assert "persistent=True" in worker
     assert '"environment_loads": environment_loads' in worker
+    assert 'active_sample_path = Path(args.output_root).resolve() / ".active_sample.json"' in worker
+    assert 'result.get("accepted") is False and result.get("rejection") is not None' in worker
     batch = (CODE_DIR / "run_deltasg_expert_batch.sh").read_text(encoding="utf-8")
     symbolic_branch = batch[
         batch.index('if [[ "$BACKEND" == "oracle_symbolic" ]]'):
@@ -1960,11 +2310,55 @@ def test_persistent_symbolic_expert_reuses_preloaded_same_scene_environments():
     assert "python code/run_deltasg_expert_persistent.py" in symbolic_branch
     assert '--input-root "$INPUT_ROOT"' in symbolic_branch
     assert 'DELTASG_CHILD_TIMEOUT=0 code/run_omnigibson_single_gpu.sh' in symbolic_branch
+    assert '"stage": "expert_process_crash"' in symbolic_branch
+    assert 'EXPERT_PROCESS_RETRIES_PER_SAMPLE' in symbolic_branch
+
+
+def test_generation_and_expert_share_the_115cm_operation_distance_contract():
+    generation = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    assert "max_task_object_approach_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in generation
+    assert "preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in generation
+    assert 'if args.solvability_profile == "oracle_symbolic"' not in generation[
+        generation.index("max_task_object_approach_distance="):
+        generation.index("expert_base_clearance_margin=")
+    ]
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    post_visibility = expert[expert.index("post_visibility_step = None"):expert.index(
+        'record["post_visibility_errors"]'
+    )]
+    assert 'step.primitive != "GRASP"' in post_visibility
+
+
+def test_on_top_grid_keeps_robot_side_bias_when_route_preflight_has_no_pose():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    relation = source[
+        source.index("def _apply_relation"):
+        source.index("def _validate_on_top_pose")
+    ]
+    prefer = relation.index('if placement.get("prefer_robot_access"):')
+    fallback = relation.index("access_xy = self._to_list(robot_position[:2])", prefer)
+    preflight = relation.index("self._validate_task_approach_position(", fallback)
+    override = relation.index('if access.get("ok"):', preflight)
+    assert prefer < fallback < preflight < override
+    assert "grid_points.sort(" in relation[override:]
+
+
+def test_symbolic_navigation_does_not_move_the_camera_before_initial_capture():
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    aim = expert[expert.index("def _aim_tiago_head("):expert.index(
+        "def _restore_visible_observation_pose("
+    )]
+    assert "og.sim.render()" not in aim
+    initial_capture = expert[expert.index("if last_post is None:"):expert.index(
+        "else:\n            pre = last_post"
+    )]
+    assert "step.primitive in MANIPULATION_PRIMITIVES" in initial_capture
 
 
 def test_all_scene_symbolic_progress_reports_generation_and_expert_rates_separately():
     progress = (CODE_DIR / "report_enva_symbolic_progress.py").read_text(encoding="utf-8")
     assert "recorded_input == input_path.resolve()" in progress
+    assert "attempted = len(set(re.findall(" in progress
     assert 'backend.get("name") == "oracle_symbolic"' in progress
     assert 'expert_rate={expert_rate:.1f}%' in progress
     assert 'e2e_rate={e2e_rate:.1f}%' in progress

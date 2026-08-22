@@ -331,19 +331,8 @@ def _build_room_navigation(rooms, object_nodes):
                     }
                 )
 
-    for src, dst, distance in _minimum_room_connectors(rooms, room_centers, adjacency):
-        _add_room_edge(adjacency, src, dst, distance, "centroid_route_candidate", None)
-        edges.append(
-            {
-                "source": f"room::{src}",
-                "target": f"room::{dst}",
-                "relation": "room_route_candidate",
-                "mode": "centroid_route_candidate",
-                "distance": distance,
-            }
-        )
-
     navigation = {
+        "topology_source": "door_relations_only",
         "room_centers": room_centers,
         "room_edges": [
             {"source": src, "target": dst, **meta}
@@ -397,53 +386,6 @@ def _add_room_edge(adjacency, src, dst, distance, mode, via_object):
         meta["via_object"] = via_object
     adjacency[src][dst] = meta
     adjacency[dst][src] = meta
-
-
-def _minimum_room_connectors(rooms, room_centers, adjacency):
-    rooms = list(rooms)
-    if len(rooms) < 2:
-        return []
-
-    remaining = set(rooms)
-    components = []
-    while remaining:
-        start = remaining.pop()
-        component = {start}
-        queue = [start]
-        while queue:
-            room = queue.pop()
-            for neighbor in adjacency.get(room, {}):
-                if neighbor in remaining:
-                    remaining.remove(neighbor)
-                    component.add(neighbor)
-                    queue.append(neighbor)
-        components.append(component)
-
-    connectors = []
-    while len(components) > 1:
-        best = None
-        for left_idx, left in enumerate(components):
-            for right_idx, right in enumerate(components[left_idx + 1 :], start=left_idx + 1):
-                for src in left:
-                    for dst in right:
-                        distance = _room_distance(room_centers, src, dst)
-                        if distance is None:
-                            continue
-                        candidate = (distance, left_idx, right_idx, src, dst)
-                        if best is None or candidate < best:
-                            best = candidate
-        if best is None:
-            break
-        distance, left_idx, right_idx, src, dst = best
-        connectors.append((src, dst, distance))
-        merged = components[left_idx] | components[right_idx]
-        components = [
-            component
-            for idx, component in enumerate(components)
-            if idx not in {left_idx, right_idx}
-        ]
-        components.append(merged)
-    return connectors
 
 
 def _all_pairs_room_paths(rooms, adjacency):

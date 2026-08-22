@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -22,6 +23,24 @@ EXPECTED_LABELS = {
     "envC_appliance": {"env_type": "Env-C", "category": "appliance"},
     "envC_all": {"env_type": "Env-C", "category": "mixed"},
 }
+
+SMOKE_ONLY_ON_FIRE_MODE = "omnigibson_on_fire_smoke_only"
+
+
+def smoke_warning_issue(state_changed):
+    fire_records = [obj for obj in state_changed if (obj.get("states") or {}).get("on_fire") is True]
+    if not fire_records:
+        return "missing_on_fire_state"
+    for record in fire_records:
+        effect = record.get("visual_effect") or {}
+        if (
+            record.get("anomaly_phase") != "smoke_warning"
+            or effect.get("mode") != SMOKE_ONLY_ON_FIRE_MODE
+            or effect.get("smoke_visible") is not True
+            or effect.get("flame_visible") is not False
+        ):
+            return "on_fire_not_smoke_only"
+    return None
 
 def load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
@@ -45,6 +64,25 @@ def infer_label(path: Path):
     return None
 
 
+def robot_pose_upright_error(pose, max_tilt=0.15):
+    position = (pose or {}).get("position") or []
+    orientation = (pose or {}).get("orientation_xyzw") or []
+    if len(position) != 3 or len(orientation) != 4:
+        return "missing_or_incomplete_robot_pose"
+    try:
+        values = [float(value) for value in position + orientation]
+    except (TypeError, ValueError):
+        return "invalid_robot_pose"
+    if not all(math.isfinite(value) for value in values):
+        return "nonfinite_robot_pose"
+    qx, qy, qz, qw = values[3:]
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 1e-6:
+        return "invalid_robot_orientation"
+    tilt = math.sqrt((qx / norm) ** 2 + (qy / norm) ** 2)
+    return f"robot_pose_not_upright:{tilt:.6f}>{max_tilt:.6f}" if tilt > max_tilt else None
+
+
 def check_run(path: Path, run: dict):
     issues = []
     te = run.get("task_environment")
@@ -65,6 +103,10 @@ def check_run(path: Path, run: dict):
         issues.append("missing_instruction")
     if not te.get("robot"):
         issues.append("missing_robot")
+    else:
+        pose_error = robot_pose_upright_error((te.get("robot") or {}).get("pose"))
+        if pose_error:
+            issues.append(pose_error)
     if not te.get("camera"):
         issues.append("missing_camera")
     if not te.get("solution_plan"):
@@ -90,6 +132,21 @@ def check_run(path: Path, run: dict):
         issues.append("missing_initial_camera_coverage")
     elif not camera_coverage.get("ok", False):
         issues.append("initial_camera_coverage_failed")
+    robot_stability = validation.get("robot_stability") or {}
+    if robot_stability and robot_stability.get("ok") is not True:
+        issues.append("robot_stability_failed")
+
+    for graph_name in ("before_graph", "after_graph"):
+        graph = run.get(graph_name) or {}
+        rooms = [node for node in graph.get("nodes") or [] if node.get("type") == "room"]
+        room_edges = ((graph.get("navigation") or {}).get("room_edges") or [])
+        complete_edge_count = len(rooms) * (len(rooms) - 1) // 2
+        if (
+            len(rooms) >= 4
+            and len(room_edges) == complete_edge_count
+            and all(edge.get("mode") == "centroid_route_candidate" for edge in room_edges)
+        ):
+            issues.append(f"{graph_name}_room_topology_complete_graph")
 
     if env_type == "Env-A":
         primary = task.get("primary_behavior_task") or ""
@@ -271,8 +328,9 @@ def check_run(path: Path, run: dict):
 
     elif env_type == "Env-B":
         state_changed = te.get("state_changed_objects") or []
-        if not any(((obj.get("states") or {}).get("on_fire")) for obj in state_changed):
-            issues.append("envB_missing_on_fire_state")
+        smoke_issue = smoke_warning_issue(state_changed)
+        if smoke_issue:
+            issues.append(f"envB_{smoke_issue}")
         added = te.get("added_objects") or []
         task_objects = te.get("task_objects") or []
         tool_text = " ".join(
@@ -281,6 +339,20 @@ def check_run(path: Path, run: dict):
         )
         if "fire_extinguisher" not in tool_text:
             issues.append("envB_missing_extinguisher")
+        interaction_tools = [
+            obj for obj in added
+            if "interaction_tool" in set(obj.get("semantic_roles") or [])
+        ]
+        if not interaction_tools:
+            issues.append("envB_missing_interaction_tool")
+        for tool in interaction_tools:
+            placement = tool.get("placement") or {}
+            if (placement.get("robot_approach") or {}).get("ok") is not True:
+                issues.append("envB_interaction_tool_unreachable")
+                break
+            if (placement.get("manipulation_height") or {}).get("eligible") is not True:
+                issues.append("envB_interaction_tool_height_invalid")
+                break
         plan_text = " ".join(step.get("primitive", "") for step in te.get("solution_plan") or [])
         if "INTERACT" not in plan_text:
             issues.append("envB_plan_missing_interact")
@@ -311,8 +383,10 @@ def check_run(path: Path, run: dict):
         state_changed = te.get("state_changed_objects") or []
         primary = task.get("primary_behavior_task") or ""
         is_fire = "fire" in primary or "fire" in (label or "")
-        if is_fire and not any(((obj.get("states") or {}).get("on_fire")) for obj in state_changed):
-            issues.append("envC_missing_fire_state")
+        if is_fire:
+            smoke_issue = smoke_warning_issue(state_changed)
+            if smoke_issue:
+                issues.append(f"envC_{smoke_issue}")
 
     return issues
 
