@@ -61,6 +61,12 @@ NUM_OPTIONS = 4
 # bbox 归一化到 [0, BBOX_NORM_SCALE] (与 translator.BBOX_NORM_SCALE 一致)
 BBOX_NORM_SCALE = 1000
 
+# bbox 扰动平移幅度 (相对宽/高的比例): 在 [MIN, MAX] 内采样。
+# MAX 越小越近误、越难与真值区分; MIN 保证干扰框与真值有可辨差异 (避免与真值几乎重合)。
+# 用于 bbox 题的近误干扰框, 以及 planning 题"同动作、bbox 近误"的混淆干扰项。
+BBOX_PERTURB_MIN_SHIFT = 0.05
+BBOX_PERTURB_MAX_SHIFT = 0.15
+
 # interaction kind → 该物体可行的动作原语集合 (可行性闸门的核心)
 _INTERACTION_PRIMITIVES: dict[str, set[str]] = {
     "manipulable": {PRIMITIVE_PICK, PRIMITIVE_INTERACT, PRIMITIVE_MOVE},
@@ -300,9 +306,10 @@ def _rng(seed: str, salt: str = "") -> "random.Random":
 
 
 def _action_key(a: dict[str, Any]) -> tuple:
-    """动作干扰项去重键。"""
+    """动作干扰项去重键。bbox 也纳入键, 使"同动作、不同 bbox"的混淆项可被区分。"""
+    bbox = tuple(a.get("object_bbox") or [])
     return (a.get("kind"), a.get("primitive"), a.get("target_object"),
-            a.get("tool_object"), a.get("room"))
+            a.get("tool_object"), a.get("room"), bbox)
 
 
 def _option_key(s: dict[str, Any]) -> tuple:
@@ -362,8 +369,13 @@ def _tool_swap_pool(tool: str | None, target: str | None, index: SceneIndex) -> 
 
 
 def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
-                     k: int) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """去重后按"来源类型"轮询取样, 保证干扰项跨维度多样 (时序/原语/目标/房间…)。"""
+                     k: int,
+                     rng: "random.Random") -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """去重后按"来源类型"取样, 保证干扰项跨维度多样 (时序/原语/目标/房间…)。
+
+    类型(桶)顺序与桶内顺序均用 rng 打乱后再轮询, 使干扰项类型的组合跨样本随机
+    (同一样本内仍跨类型多样、且结果由 qra_id 种子确定可复现)。
+    """
     seen: set = set()
     uniq: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for a, src in cands:
@@ -379,8 +391,13 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
     for a, src in uniq:
         buckets.setdefault(src.get("type", "other"), []).append((a, src))
 
+    lists: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+    for _, items in buckets.items():
+        rng.shuffle(items)
+        lists.append(items)
+    rng.shuffle(lists)
+
     picked: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    lists = list(buckets.values())
     i = 0
     while len(picked) < k and any(lists):
         lst = lists[i % len(lists)]
@@ -395,7 +412,7 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
 # ======================================================================
 def _action_distractors(step: dict[str, Any], index: SceneIndex,
                         plan: list[dict[str, Any]], t: int,
-                        qra_id: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+                        qra_id: str, rng: "random.Random") -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """为规划类下一步动作生成干扰项 (动作三元组单点替换)。返回 [(action, source)]。"""
     prim = step.get("primitive") or PRIMITIVE_WAIT
     target = step.get("target_object")
@@ -450,7 +467,7 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
         for oid in _tool_swap_pool(tool, target, index):
             cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
 
-    return _sample_distinct(cands, NUM_OPTIONS - 1)
+    return _sample_distinct(cands, NUM_OPTIONS - 1, rng)
 
 
 # ======================================================================
@@ -532,13 +549,19 @@ def _annotate_action_bbox(action: dict[str, Any], cam: dict[str, Any]) -> None:
 
 
 def _perturb_bbox(bbox: list[int], rng: "random.Random") -> list[int] | None:
-    """对正确 bbox 做确定性扰动 (平移/缩放, 保证在画面内且不等于真值)。"""
+    """对正确 bbox 做确定性近误扰动 (平移幅度在 [MIN, MAX] 内, 保证在画面内且不等于真值)。
+
+    近误扰动 (与真值大面积重叠但仍有可辨差异) 比粗扰动更难区分, 用于 bbox 题的干扰框
+    与 planning 题的 bbox 混淆项。MIN 下限避免生成与真值几乎重合、难以判定的干扰框。
+    """
     x1, y1, x2, y2 = bbox
     w = max(x2 - x1, 1)
     h = max(y2 - y1, 1)
     for _ in range(20):
-        dx = int(w * rng.uniform(-0.4, 0.4))
-        dy = int(h * rng.uniform(-0.4, 0.4))
+        fx = rng.uniform(BBOX_PERTURB_MIN_SHIFT, BBOX_PERTURB_MAX_SHIFT) * rng.choice((-1, 1))
+        fy = rng.uniform(BBOX_PERTURB_MIN_SHIFT, BBOX_PERTURB_MAX_SHIFT) * rng.choice((-1, 1))
+        dx = int(w * fx)
+        dy = int(h * fy)
         nx1 = max(0, min(BBOX_NORM_SCALE - 1, x1 + dx))
         nx2 = max(0, min(BBOX_NORM_SCALE - 1, x2 + dx))
         ny1 = max(0, min(BBOX_NORM_SCALE - 1, y1 + dy))
@@ -599,16 +622,17 @@ def _bbox_options(pair: Any, index: SceneIndex, scene: Any,
 def _planning_options(pair: Any, index: SceneIndex,
                       plan: list[dict[str, Any]], scene: Any = None,
                       llm: Any = None) -> tuple[list[dict[str, Any]], int]:
-    """规划题 → 选择题: 正确项 = 下一步动作, 干扰项 = 单点替换的可行动作。
+    """规划题 → 选择题: 正确项 = 下一步动作, 干扰项 = 单点替换的可行动作 + bbox 混淆。
 
     目标物体在该采样点机器人主视角可见时, 附上其归一化 bbox (object_bbox), 供选项文本
-    内联在物品名后做图像定位消歧 (见 ``_target_nl``)。
+    内联在物品名后做图像定位消歧 (见 ``_target_nl``)。干扰项类型用 qra_id 种子随机化。
     """
     t = pair.simulation_step
     step = plan[t] if 0 <= t < len(plan) else None
     if step is None or pair.A.get("kind") == "done":
         return [], -1
 
+    rng = _rng(pair.qra_id, "distractors")
     cam = _robot_camera_grounding(scene)
 
     correct = {"kind": "action", "primitive": step.get("primitive") or PRIMITIVE_WAIT,
@@ -619,9 +643,23 @@ def _planning_options(pair: Any, index: SceneIndex,
                    "source": {"type": "solution_plan_step", "step_id": step.get("step_id")}}
 
     dist_opts = [{"kind": "action", "structured": a, "source": src}
-                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id)]
+                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id, rng)]
     for d in dist_opts:
         _annotate_action_bbox(d["structured"], cam)
+
+    # bbox 混淆: 若正确目标在主视角可见, 追加"同动作、bbox 近误"的干扰项 (与正确项仅
+    # bbox 数值不同, 是 planning 里最易混淆的一类, 考察细粒度定位)。
+    correct_bbox = correct.get("object_bbox")
+    if isinstance(correct_bbox, (list, tuple)) and len(correct_bbox) == 4:
+        for _ in range(2):
+            nb = _perturb_bbox(list(correct_bbox), rng)
+            if nb is None:
+                continue
+            confused = dict(correct)
+            confused["object_bbox"] = nb
+            dist_opts.append({"kind": "action", "structured": confused,
+                              "source": {"type": "bbox_confusion"}})
+
     return _finalize(pair.qra_id, correct_opt, dist_opts, index,
                      llm=llm, question=getattr(pair, "Q", "") or "")
 
@@ -830,10 +868,12 @@ def _finalize(qra_id: str, correct_opt: dict[str, Any],
         seen.add(k)
         seen_text.add(text)
         uniq.append(d)
+
+    rng = _rng(qra_id, "shuffle")
+    rng.shuffle(uniq)                 # 随机化"哪些干扰项入选" (类型组合跨样本随机)
     uniq = uniq[:NUM_OPTIONS - 1]
 
     opts = [correct_opt] + uniq
-    rng = _rng(qra_id, "shuffle")
     rng.shuffle(opts)
     ans_idx = next(i for i, o in enumerate(opts) if o is correct_opt)
 

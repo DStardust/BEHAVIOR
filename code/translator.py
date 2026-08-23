@@ -672,47 +672,58 @@ def _room_structure_nl(spatial_context: dict[str, Any]) -> str:
     return json.dumps({"rooms": rooms}, ensure_ascii=False)
 
 
-def _plan_done_steps(task_instance: dict[str, Any], t: int) -> list[str]:
-    """把 solution_plan[:t] 渲染成已完成的英文动作短句, 供"already done"列表。
+def _render_step_nl(step: dict[str, Any], task_instance: dict[str, Any],
+                    carried: str | None) -> str:
+    """把单个 solution_plan 步骤渲染成英文动作短句 (供题干"上一步动作"使用)。
 
-    PLACE 步骤的"被放置物"取此前最近一次 PICK 的对象 (carried), 与专家方案语义一致。
+    PLACE 步骤的"被放置物"取传入的 carried (此前最近一次 PICK 的对象)。
+    """
+    prim = step.get("primitive") or ""
+    target = step.get("target_object")
+    cat = _object_category(target, task_instance) or _humanize(target)
+    if prim == PRIMITIVE_MOVE:
+        return f"Move to the {cat}."
+    if prim == PRIMITIVE_PICK:
+        return f"Pick up the {cat}."
+    if prim == PRIMITIVE_PLACE:
+        return f"Place the {carried or 'object'} on the {cat}."
+    if prim == PRIMITIVE_INTERACT:
+        tool = _object_category(step.get("tool_object"), task_instance)
+        return f"Operate the {cat} with the {tool}." if tool else f"Operate the {cat}."
+    if prim == PRIMITIVE_WAIT:
+        return "Wait."
+    return f"{prim} the {cat}."
+
+
+def _previous_action_nl(task_instance: dict[str, Any], t: int) -> str | None:
+    """渲染"上一步动作" (仅 plan[t-1]), 供题干展示; 首步无上一步时返回 None。
+
+    只给最近一步、不再罗列完整历史 (Markov 形式), 避免文本泄露答案。PLACE 的"被放置物"
+    从 plan[:t-1] 中最近一次 PICK 推断, 与专家方案语义一致。
     """
     plan = task_instance.get("solution_plan") or []
-    lines: list[str] = []
+    if t <= 0 or t > len(plan):
+        return None
     carried: str | None = None
-    for s in plan[:t]:
-        prim = s.get("primitive") or ""
-        target = s.get("target_object")
-        cat = _object_category(target, task_instance) or _humanize(target)
-        if prim == PRIMITIVE_MOVE:
-            lines.append(f"Move to the {cat}.")
-        elif prim == PRIMITIVE_PICK:
-            carried = cat
-            lines.append(f"Pick up the {cat}.")
-        elif prim == PRIMITIVE_PLACE:
-            lines.append(f"Place the {carried or 'object'} on the {cat}.")
-        elif prim == PRIMITIVE_INTERACT:
-            tool = _object_category(s.get("tool_object"), task_instance)
-            lines.append(f"Operate the {cat} with the {tool}." if tool else f"Operate the {cat}.")
-        elif prim == PRIMITIVE_WAIT:
-            lines.append("Wait.")
-        else:
-            lines.append(f"{prim} the {cat}.")
-    return lines
+    for s in plan[: t - 1]:
+        if (s.get("primitive") or "") == PRIMITIVE_PICK:
+            carried = _object_category(s.get("target_object"), task_instance) or _humanize(s.get("target_object"))
+    return _render_step_nl(plan[t - 1], task_instance, carried)
 
 
 def _build_english_question(ctx: GenContext, question_type: str) -> str:
     """生成英文题干 (home-care robot 场景), 避免中英混杂。
 
-    规划类: 场景结构 + 任务指令 + 已完成步骤 + "下一步做什么"。
+    规划类: 场景结构 + 任务指令(目标) + 上一步动作 + "下一步做什么"。
+    只给最近一步动作 (Markov 形式), 不罗列完整历史, 避免文本泄露答案。
     感知类: 让机器人指出当前可见物体 (discriminator 侧再改写为判别式选择题)。
     """
     if question_type == QTYPE_PLANNING:
         structure = _room_structure_nl(ctx.spatial_context)
         instruction = (ctx.scene.global_task or "").strip().rstrip(".")
         current_room, _, _ = _resolve_rooms(ctx.task_instance, ctx.scene, ctx.next_step)
-        done = _plan_done_steps(ctx.task_instance, ctx.scene.simulation_step)
-        done_text = " ".join(f"{i + 1}. {d}" for i, d in enumerate(done)) if done else "none."
+        previous = _previous_action_nl(ctx.task_instance, ctx.scene.simulation_step)
+        previous_text = previous.rstrip(".") if previous else "none — the task has just started"
         current_line = f"You are currently in the {_humanize(current_room)}.\n" if current_room else ""
 
         # 全局(监控)摄像头所在房间: 多视角任务 (B/D/E) 才有; 单视角任务为空 → 不输出该行
@@ -731,7 +742,7 @@ def _build_english_question(ctx: GenContext, question_type: str) -> str:
             f"{current_line}"
             f"{cam_line}"
             f"Now, your task is: {instruction}.\n"
-            f"You have already done: {done_text}\n"
+            f"You have just completed: {previous_text}.\n"
             "Now what should you do next?"
         )
     return "Describe the objects present in the current scene and their states."
