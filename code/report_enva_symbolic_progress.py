@@ -51,7 +51,9 @@ def _scene_progress(root, scene):
     attempted = 0
     try:
         log = (scene_root / "generation.log").read_text(encoding="utf-8", errors="replace")
-        attempted = max((int(value) for value in re.findall(r"run (\d+)/23 task=", log)), default=0)
+        attempted = len(set(re.findall(
+            r"\[online-deltasg\] run \d+/\d+ task=([^\s]+)", log,
+        )))
     except OSError:
         pass
 

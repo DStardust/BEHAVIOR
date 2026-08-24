@@ -1,7 +1,8 @@
 """
 Batch visualize online DeltaSG samples with one OmniGibson scene load.
 
-Outputs one before / after RGB pair for every run JSON. No debug markers.
+Outputs the legacy before / after pair plus every recorded global camera and the
+primary robot camera. No debug markers.
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ from omnigibson.objects import DatasetObject
 from omnigibson.utils.constants import PrimType
 
 from api import create_env, get_all_scene_objects, stabilize_robot_spawn
+from deltasg_visual_effects import (
+    SMOKE_FLOW_RENDER_WARMUP_FRAMES,
+    SMOKE_FLOW_WARMUP_STEPS,
+    SMOKE_ONLY_ON_FIRE_MODE,
+    configure_on_fire_smoke_only,
+)
 from visualize_env_a import corner_camera, float_list, official_camera_pose, room_corners, yaw_pitch_quat
 
 
@@ -393,6 +400,113 @@ def capture_obs(viewer, cam_pos, cam_ori, path: Path | str):
     return obs, info
 
 
+def _safe_view_name(value):
+    text = str(value or "camera")
+    return "".join(char if char.isalnum() or char in "-_" else "_" for char in text)
+
+
+def recorded_camera_views(run):
+    """Return the generation-time global views and primary robot view."""
+    cameras = run.get("camera") or (run.get("task_environment", {}) or {}).get("camera") or []
+    globals_ = [camera for camera in cameras if camera.get("camera_type") == "global_camera"]
+    primary_robot = next(
+        (
+            camera
+            for camera in cameras
+            if camera.get("camera_type") == "robot_camera" and camera.get("is_primary") is True
+        ),
+        None,
+    )
+    views = [(f"global_{idx:02d}_{_safe_view_name(camera.get('camera_id'))}", camera) for idx, camera in enumerate(globals_, 1)]
+    if primary_robot is not None:
+        views.append((f"robot_primary_{_safe_view_name(primary_robot.get('camera_id'))}", primary_robot))
+    return views
+
+
+def save_segmentation_visualization(obs, info, modality, path):
+    if not isinstance(obs, dict) or modality not in obs:
+        return None
+    segmentation = to_numpy(obs[modality])
+    if segmentation.ndim == 3 and segmentation.shape[-1] == 1:
+        segmentation = segmentation[..., 0]
+    if segmentation.ndim != 2:
+        return None
+    ids = segmentation.astype(np.uint64, copy=False)
+    color = np.stack(
+        [
+            (ids * 37 + 17) % 251,
+            (ids * 67 + 53) % 251,
+            (ids * 97 + 89) % 251,
+        ],
+        axis=-1,
+    ).astype(np.uint8)
+    color[ids == 0] = 0
+    Image.fromarray(color).save(path)
+    labels = jsonable((info or {}).get(modality) or {})
+    label_path = Path(path).with_suffix(".json")
+    with label_path.open("w", encoding="utf-8") as stream:
+        json.dump(labels, stream, ensure_ascii=False, indent=2)
+    return str(path)
+
+
+def save_recorded_camera_views(run, stem, output_dir, viewer, *, draw_bboxes):
+    sample_dir = output_dir / stem / "recorded_cameras"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    rendered = []
+    for view_name, camera in recorded_camera_views(run):
+        pose = camera.get("pose") or {}
+        position = pose.get("position")
+        orientation = pose.get("orientation_xyzw")
+        if not position or not orientation:
+            print(f"[vis] warning: {view_name} has no recorded pose", flush=True)
+            continue
+        rgb_path = sample_dir / f"{view_name}_after.png"
+        obs, info = capture_obs(viewer, position, orientation, rgb_path)
+        save_bbox_outputs(
+            run,
+            view_name,
+            sample_dir,
+            position,
+            orientation,
+            obs,
+            info,
+            draw_overlay=draw_bboxes,
+        )
+        instance_path = save_segmentation_visualization(
+            obs, info, "seg_instance", sample_dir / f"{view_name}_seg_instance.png"
+        )
+        semantic_path = save_segmentation_visualization(
+            obs, info, "seg_semantic", sample_dir / f"{view_name}_seg_semantic.png"
+        )
+        rgb = np.asarray((obs or {}).get("rgb")) if isinstance(obs, dict) else np.empty(0)
+        rendered.append(
+            {
+                "view_name": view_name,
+                "camera_id": camera.get("camera_id"),
+                "camera_type": camera.get("camera_type"),
+                "room_id": camera.get("room_id"),
+                "recorded_resolution": camera.get("resolution"),
+                "rendered_resolution": (
+                    {"width": int(rgb.shape[1]), "height": int(rgb.shape[0])} if rgb.ndim >= 2 else None
+                ),
+                "rgb": str(rgb_path),
+                "seg_instance": instance_path,
+                "seg_semantic": semantic_path,
+            }
+        )
+    manifest = {
+        "run_id": run.get("run_id"),
+        "num_recorded_global_cameras": sum(
+            camera.get("camera_type") == "global_camera" for _, camera in recorded_camera_views(run)
+        ),
+        "num_rendered_views": len(rendered),
+        "views": rendered,
+    }
+    with (sample_dir / "manifest.json").open("w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, indent=2)
+    return manifest
+
+
 def compute_instance_bboxes(obs, info, target_metadata, min_pixels=8):
     if not isinstance(obs, dict) or "seg_instance" not in obs:
         return []
@@ -635,6 +749,7 @@ def save_additional_bbox_views(run, stem, output_dir, viewer, diagnostics, draw_
 
 def apply_state_changes(env, run):
     te = run.get("task_environment", {}) or {}
+    smoke_effect_count = 0
     for item in te.get("state_changed_objects", []):
         name = item.get("object_id") or item.get("object_name")
         if not name:
@@ -644,11 +759,17 @@ def apply_state_changes(env, run):
             continue
         states = item.get("states") or {}
         if states.get("on_fire"):
-            try:
-                if object_states.OnFire in obj.states:
-                    obj.states[object_states.OnFire].set_value(True)
-            except Exception:
-                pass
+            if object_states.OnFire not in obj.states:
+                raise RuntimeError(f"{name!r} does not expose official OnFire state")
+            if not obj.states[object_states.OnFire].set_value(True):
+                raise RuntimeError(f"failed to restore official OnFire state for {name!r}")
+            visual_effect = item.get("visual_effect") or {}
+            if visual_effect.get("mode") == SMOKE_ONLY_ON_FIRE_MODE:
+                configured = configure_on_fire_smoke_only(obj)
+                if not configured.get("ok"):
+                    raise RuntimeError(f"failed to restore smoke-only effect for {name!r}: {configured}")
+                smoke_effect_count += 1
+    return smoke_effect_count
 
 
 def spawn_added_objects(env, run):
@@ -676,14 +797,20 @@ def spawn_added_objects(env, run):
         )
         if not pos:
             continue
-        obj = DatasetObject(
-            name=name,
-            category=category,
-            model=ao.get("model"),
-            visual_only=True,
-            prim_type=PrimType.RIGID,
-        )
-        env.scene.add_object(obj)
+        obj = env.scene.object_registry("name", name, None)
+        if obj is None:
+            obj = DatasetObject(
+                name=name,
+                category=category,
+                model=ao.get("model"),
+                visual_only=True,
+                prim_type=PrimType.RIGID,
+            )
+            env.scene.add_object(obj)
+        else:
+            # Env-C may intentionally retain an Env-B task object with the same
+            # stable object id. Reuse that live object instead of duplicating it.
+            obj.visible = True
         obj.set_position_orientation(
             position=th.tensor(pos, dtype=th.float32),
             orientation=th.tensor(ori, dtype=th.float32),
@@ -703,6 +830,7 @@ def visualize_one(
     save_bboxes: bool,
     draw_bboxes: bool,
     optimize_camera: bool,
+    render_recorded_cameras: bool,
 ):
     with run_path.open() as f:
         run = json.load(f)
@@ -716,10 +844,25 @@ def visualize_one(
 
     spawn_added_objects(env, run)
     # Spawned fire carriers must exist before their OnFire state is restored.
-    apply_state_changes(env, run)
+    smoke_effect_count = apply_state_changes(env, run)
+    if smoke_effect_count:
+        # Flow density evolves with simulation time, not render-only frames.
+        for _ in range(SMOKE_FLOW_WARMUP_STEPS):
+            og.sim.step()
+        for _ in range(SMOKE_FLOW_RENDER_WARMUP_FRAMES):
+            og.sim.render()
     if optimize_camera and save_bboxes:
         cam_pos, cam_ori, method, camera_diagnostics = optimize_camera_for_visible_target_objects(
             env, viewer, run, initial_camera,
+        )
+
+    if render_recorded_cameras:
+        manifest = save_recorded_camera_views(
+            run, stem, output_dir, viewer, draw_bboxes=draw_bboxes
+        )
+        print(
+            f"[vis] {stem}: rendered {manifest['num_rendered_views']} recorded camera views",
+            flush=True,
         )
 
     print(f"[vis] {stem}: camera({method})", flush=True)
@@ -784,6 +927,11 @@ def main():
         action="store_true",
         help="Use the first official room camera without checking whether target objects are visible.",
     )
+    parser.add_argument(
+        "--single-camera-only",
+        action="store_true",
+        help="Skip the recorded global and primary robot camera views and only render the legacy pair.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -815,7 +963,7 @@ def main():
     if not args.no_bboxes:
         # Bboxes are derived from instance pixels. Native bbox annotators add
         # redundant Replicator graphs and crash consistently in Ihlen_1_int.
-        modalities.append("seg_instance")
+        modalities.extend(["seg_instance", "seg_semantic"])
     if hasattr(viewer, "add_modality"):
         for modality in modalities:
             try:
@@ -834,6 +982,7 @@ def main():
             save_bboxes=not args.no_bboxes,
             draw_bboxes=not args.no_bbox_overlay,
             optimize_camera=not args.no_camera_optimize,
+            render_recorded_cameras=not args.single_camera_only,
         )
 
     # Kit can segfault while tearing down SyntheticData graphs in og.clear().

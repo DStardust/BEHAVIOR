@@ -28,22 +28,71 @@ set +a
 cd "$ROOT"
 generation_status=0
 if [[ "${REPORT_ONLY:-0}" != "1" ]]; then
-code/run_omnigibson_single_gpu.sh \
-  conda run --no-capture-output -n behavior \
-  python code/run_online_deltasg.py \
-    --scene "$SCENE" --robot Tiago --env-type A \
-    --task-sequence "$TASKS" \
-    --task-objects 1 --context-objects 0 \
-    --warmup-steps 20 --settle-steps 5 \
-    --llm-model "$MODEL" --max-llm-retries 4 --max-retries 3 \
-    --placement-timeout 60 --relation-timeout 10 \
-    --max-placement-attempts 6 --max-total-placement-time 180 \
-    --max-global-cameras 3 --max-camera-pose-attempts 6 \
-    --camera-pose-render-steps 4 \
-    --min-manipulation-height 0.10 --max-manipulation-height 1.55 \
-    --solvability-profile "$BACKEND" --checkpoint-interval 1 \
-    --output-dir "$GENERATION" --seed 140814 \
-    >"$OUT/generation.log" 2>&1 || generation_status=$?
+  IFS=',' read -r -a remaining_tasks <<<"$TASKS"
+  generation_restart=0
+  : >"$OUT/generation.log"
+  : >"$OUT/generation_process_errors.tsv"
+  while [[ "${#remaining_tasks[@]}" -gt 0 ]]; do
+    generation_restart=$((generation_restart + 1))
+    if [[ "$generation_restart" -gt "${GENERATION_RESTART_LIMIT:-23}" ]]; then
+      echo "[generation-supervisor] restart limit reached with ${#remaining_tasks[@]} tasks remaining" \
+        | tee -a "$OUT/generation.log"
+      generation_status=2
+      break
+    fi
+    task_sequence="$(IFS=,; echo "${remaining_tasks[*]}")"
+    start_line=$(( $(wc -l <"$OUT/generation.log") + 1 ))
+    resume_args=()
+    [[ -f "$GENERATION/checkpoint.json" ]] && resume_args=(--resume)
+    attempt_status=0
+    code/run_omnigibson_single_gpu.sh \
+      conda run --no-capture-output -n behavior \
+      python code/run_online_deltasg.py \
+        --scene "$SCENE" --robot Tiago --env-type A \
+        --task-sequence "$task_sequence" \
+        --task-objects 1 --context-objects 0 \
+        --warmup-steps 20 --settle-steps 5 \
+        --llm-model "$MODEL" --max-llm-retries 4 --max-retries 3 \
+        --placement-timeout 60 --relation-timeout 10 \
+        --max-placement-attempts 6 --max-total-placement-time 180 \
+        --max-global-cameras 3 --max-camera-pose-attempts 6 \
+        --camera-pose-render-steps 4 \
+        --min-manipulation-height 0.10 --max-manipulation-height 1.55 \
+        --solvability-profile "$BACKEND" --checkpoint-interval 1 \
+        --output-dir "$GENERATION" --seed "$((140814 + generation_restart - 1))" \
+        "${resume_args[@]}" \
+        >>"$OUT/generation.log" 2>&1 || attempt_status=$?
+
+    mapfile -t started_tasks < <(
+      tail -n +"$start_line" "$OUT/generation.log" \
+        | sed -n 's/.*\[online-deltasg\] run [0-9][0-9]*\/[0-9][0-9]* task=\([^ ]*\).*/\1/p'
+    )
+    if [[ "${#started_tasks[@]}" -ge "${#remaining_tasks[@]}" ]]; then
+      generation_status=$attempt_status
+      break
+    fi
+    if [[ "${#started_tasks[@]}" -eq 0 ]]; then
+      printf '%s\t%s\t%s\t%s\n' "$generation_restart" init "$attempt_status" "${#remaining_tasks[@]}" \
+        >>"$OUT/generation_process_errors.tsv"
+      generation_status=$attempt_status
+      continue
+    fi
+    failed_task="${started_tasks[-1]}"
+    printf '%s\t%s\t%s\t%s\n' "$generation_restart" "$failed_task" "$attempt_status" \
+      "$(( ${#remaining_tasks[@]} - ${#started_tasks[@]} ))" \
+      >>"$OUT/generation_process_errors.tsv"
+    echo "[generation-supervisor] process stopped at task=$failed_task; restarting remaining tasks" \
+      | tee -a "$OUT/generation.log"
+    remaining_tasks=("${remaining_tasks[@]:${#started_tasks[@]}}")
+    generation_status=2
+  done
+fi
+
+if [[ "${GENERATION_ONLY:-0}" == "1" ]]; then
+  python code/audit_enva_generation_coverage.py \
+    "$GENERATION" --required-rate "${GENERATION_REQUIRED_RATE:-0.80}" \
+    --output "$OUT/generation_audit.json"
+  exit $?
 fi
 
 expert_status=0
@@ -175,7 +224,7 @@ report = {
     "end_to_end_rate": end_to_end_rate,
     "required_rate": 0.80,
     "passed": (
-        generation_ok > 0
+        (generation_ok / len(tasks)) >= 0.80
         and expert_completed == generation_ok
         and end_to_end_rate >= 0.80
     ),

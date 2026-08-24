@@ -126,13 +126,14 @@ def get_grasp_position_for_open(robot, target_obj, should_open, relevant_joint=N
         raise ValueError("Cannot open/close object without relevant joints.")
 
     # Make sure what we got is an appropriately open/close joint.
-    relevant_joints = relevant_joints[th.randperm(relevant_joints.size(0))]
+    order = th.randperm(len(relevant_joints)).tolist()
+    relevant_joints = [relevant_joints[index] for index in order]
     selected_joint = None
     for joint in relevant_joints:
         current_position = joint.get_state()[0][0]
         joint_range = joint.upper_limit - joint.lower_limit
         openness_fraction = (current_position - joint.lower_limit) / joint_range
-        if (should_open and openness_fraction < m.OPENNESS_FRACTION_TO_OPEN) or (
+        if (should_open and openness_fraction < m.OPENNESS_THRESHOLD_TO_OPEN) or (
             not should_open and openness_fraction > m.OPENNESS_THRESHOLD_TO_CLOSE
         ):
             selected_joint = joint

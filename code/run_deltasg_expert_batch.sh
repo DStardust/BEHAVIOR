@@ -39,21 +39,100 @@ python code/validate_deltasg_expert_plans.py \
 
 if [[ "$BACKEND" == "oracle_symbolic" ]]; then
   persistent_status=0
-  DELTASG_CHILD_TIMEOUT=0 code/run_omnigibson_single_gpu.sh \
-    conda run --no-capture-output -n behavior \
-    python code/run_deltasg_expert_persistent.py \
-      --input-root "$INPUT_ROOT" \
-      --output-root "$OUTPUT_ROOT" \
-      --backend "$BACKEND" \
-      --llm-model "$MODEL" \
-      --labels "$LABELS" \
-      --tasks "$TASKS" \
-      --robot "$REQUESTED_ROBOT" \
-      --limit "$LIMIT" \
-      --max-per-cell "$MAX_PER_CELL" \
-      --min-manipulation-height "$MIN_MANIPULATION_HEIGHT" \
-      --max-manipulation-height "$MAX_MANIPULATION_HEIGHT" \
-      >"$OUTPUT_ROOT/logs/persistent_worker.log" 2>&1 || persistent_status=$?
+  persistent_restart=0
+  init_failures=0
+  : >"$OUTPUT_ROOT/logs/persistent_worker.log"
+  while [[ "$persistent_restart" -lt "${EXPERT_PROCESS_RESTART_LIMIT:-25}" ]]; do
+    persistent_restart=$((persistent_restart + 1))
+    worker_status=0
+    echo "[expert-batch] persistent worker attempt=$persistent_restart" \
+      >>"$OUTPUT_ROOT/logs/persistent_worker.log"
+    DELTASG_CHILD_TIMEOUT=0 code/run_omnigibson_single_gpu.sh \
+      conda run --no-capture-output -n behavior \
+      python code/run_deltasg_expert_persistent.py \
+        --input-root "$INPUT_ROOT" \
+        --output-root "$OUTPUT_ROOT" \
+        --backend "$BACKEND" \
+        --llm-model "$MODEL" \
+        --labels "$LABELS" \
+        --tasks "$TASKS" \
+        --robot "$REQUESTED_ROBOT" \
+        --limit "$LIMIT" \
+        --max-per-cell "$MAX_PER_CELL" \
+        --min-manipulation-height "$MIN_MANIPULATION_HEIGHT" \
+        --max-manipulation-height "$MAX_MANIPULATION_HEIGHT" \
+        >>"$OUTPUT_ROOT/logs/persistent_worker.log" 2>&1 || worker_status=$?
+    if [[ "$worker_status" -eq 0 ]]; then
+      persistent_status=0
+      break
+    fi
+    disposition="$({ python - "$OUTPUT_ROOT" "${EXPERT_PROCESS_RETRIES_PER_SAMPLE:-2}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+retry_limit = int(sys.argv[2])
+active_path = root / ".active_sample.json"
+if not active_path.is_file():
+    print("no_active_sample")
+    raise SystemExit(0)
+active = json.loads(active_path.read_text(encoding="utf-8"))
+input_path = Path(active["input"]).resolve()
+output_dir = Path(active["output"]).resolve()
+run = json.loads(input_path.read_text(encoding="utf-8"))
+task_name = (
+    ((run.get("task_environment") or {}).get("task") or run.get("task") or {}).get(
+        "primary_behavior_task"
+    )
+)
+counts_path = root / "expert_process_crash_counts.json"
+try:
+    counts = json.loads(counts_path.read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    counts = {}
+key = str(input_path)
+counts[key] = int(counts.get(key, 0)) + 1
+counts_path.write_text(json.dumps(counts, indent=2), encoding="utf-8")
+active_path.unlink(missing_ok=True)
+if counts[key] < retry_limit:
+    print("retry_active_sample")
+    raise SystemExit(0)
+result = {
+    "schema_version": "deltasg_expert_result.v1",
+    "accepted": False,
+    "qa_eligible": False,
+    "input": str(input_path),
+    "task_name": task_name,
+    "backend": {
+        "name": active["backend"],
+        "generation_profile_verified": True,
+    },
+    "rejection": {
+        "stage": "expert_process_crash",
+        "attempts": counts[key],
+    },
+}
+output_dir.mkdir(parents=True, exist_ok=True)
+temporary = output_dir / "expert_result.json.tmp"
+temporary.write_text(json.dumps(result, indent=2), encoding="utf-8")
+temporary.replace(output_dir / "expert_result.json")
+print("skip_crashing_sample")
+PY
+    } 2>>"$OUTPUT_ROOT/logs/persistent_worker.log")"
+    echo "[expert-batch] worker exit=$worker_status disposition=$disposition" \
+      >>"$OUTPUT_ROOT/logs/persistent_worker.log"
+    if [[ "$disposition" == "no_active_sample" ]]; then
+      init_failures=$((init_failures + 1))
+      if [[ "$init_failures" -ge "${EXPERT_INIT_RESTART_LIMIT:-3}" ]]; then
+        persistent_status=$worker_status
+        break
+      fi
+    else
+      init_failures=0
+    fi
+    persistent_status=$worker_status
+  done
   audit_status=0
   python code/audit_deltasg_expert.py \
     --root "$OUTPUT_ROOT" \

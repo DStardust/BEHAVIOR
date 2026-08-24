@@ -229,6 +229,121 @@ def test_env_a_attempt_cleanup_precedes_spawn_and_is_not_repeated_after_spawn():
     assert "_cleanup_spawned_objects" not in retrieval_prepare
 
 
+def test_env_b_automatic_room_selection_stays_in_robot_reachable_component():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def _choose_room_with_objects"):
+        source.index("def _choose_different_room")
+    ]
+    assert "reachable_rooms = set(self._robot_reachable_room_pixels())" in block
+    assert "if not reachable_rooms or room in reachable_rooms" in block
+    assert 'and (not reachable_rooms or node["name"] in reachable_rooms)' in block
+
+
+def test_portable_floor_placement_accepts_nonblocking_floor_coverings():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    placement = source[
+        source.index("if is_floor:", source.index("def add_task_asset")):
+        source.index("# Apply relation (OnTop/Inside)", source.index("def add_task_asset"))
+    ]
+    assert "ignore_floor_coverings=generated_support_fixture or manipulated_object" in placement
+
+
+def test_structural_floors_are_not_sampled_as_ontop_supports():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def _choose_support_node"):
+        source.index("def _build_placement_for_support")
+    ]
+    assert 'if support_tokens & {"floor", "floors"}:' in block
+    assert "continue" in block[block.index('if support_tokens & {"floor", "floors"}:'):]
+
+
+def test_env_b_fire_extinguisher_prefers_a_stable_manipulable_support():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    fire = source[
+        source.index("def generate_env_b_fire"):
+        source.index("def generate_env_c_fire_disambiguation")
+    ]
+    assert 'extinguisher_record["_prefer_support_first"] = True' in fire
+    assert 'extinguisher_record["_placement_orientation_xyzw"]' not in fire
+    assert 'extinguisher_record["_prefer_floor_first"]' not in fire
+    placement = source[
+        source.index("def add_task_asset"):
+        source.index("def _build_fire_task_instance")
+    ]
+    assert 'and not record.get("_prefer_support_first")' in placement
+
+
+def test_generation_settling_includes_the_warmup_window():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    assert "def _collect_settling_report(self, object_names, start_positions=None):" in source
+    assert source.count("start_positions=settling_start") >= 5
+    fire = source[
+        source.index("def generate_env_b_fire"):
+        source.index("def generate_env_c_fire_disambiguation")
+    ]
+    assert fire.index("settling_start =") < fire.index("self._step(self.config.warmup_steps)")
+
+
+def test_env_c_fire_returns_final_camera_validated_status():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def generate_env_c_fire_disambiguation"):
+        source.index("def generate_env_c(")
+    ]
+    result = block[block.index('"schema_version": "online_deltasg_env_c_fire_disambiguation.v1"'):]
+    assert '"ok": validation["ok"]' in result
+    assert '"ok": ok,' not in result
+
+
+def test_env_b_and_env_c_fire_have_stable_task_identities():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    fire_task = source[
+        source.index("def _build_fire_task_instance"):
+        source.index("def _choose_room_with_objects")
+    ]
+    assert '"primary_behavior_task": "respond_to_smoke_warning"' in fire_task
+    env_c = source[
+        source.index("def generate_env_c_fire_disambiguation"):
+        source.index("def generate_env_c(")
+    ]
+    assert 'env_b["task_instance"]["primary_behavior_task"] = "select_fire_suppression_tool"' in env_c
+
+
+def test_env_b_fire_returns_final_camera_validated_status():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def generate_env_b_fire"):
+        source.index("def generate_env_c_fire_disambiguation")
+    ]
+    result = block[block.index('"schema_version": "online_deltasg_env_b_fire.v1"'):]
+    assert '"ok": validation["ok"]' in result
+    assert '"ok": ok,' not in result
+
+
+def test_env_c_preserves_native_initial_state_replay_contract():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def generate_env_c_task_disambiguation"):
+        source.index("def _add_env_c_retrieval_candidates")
+    ]
+    assert 'state_changed = copy.deepcopy(te.get("state_changed_objects") or [])' in block
+    assert "state_changed_objects=state_changed" in block
+
+
+def test_reused_env_c_objects_record_the_real_native_identity():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("def add_task_asset"):
+        source.index("if not self._category_has_models", source.index("def add_task_asset"))
+    ]
+    assert 'native_name = getattr(existing, "name", None)' in block
+    assert '"requested_object_name": object_name' in block
+    assert '"object_name": native_name' in block
+    assert '"id": native_name' in block
+
+
 def test_task_object_ontop_grid_prefers_real_robot_operation_side():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     placement = source[
@@ -351,7 +466,8 @@ def test_delivery_prefers_a_validated_native_destination_then_bootstraps_if_need
     fallback_at = block.index("if delivery_destination is None:")
     spawn_in_block_at = block.index("self._spawn_delivery_destination_support(")
     assert choose_at < fallback_at < spawn_in_block_at
-    assert 'validation["settling"] = self._collect_settling_report(created_names)' in block
+    assert 'validation["settling"] = self._collect_settling_report(' in block
+    assert "created_names, start_positions=settling_start" in block
     assert "after_graph = self.snapshot()" in block
 
 
@@ -591,8 +707,7 @@ def test_camera_candidate_budget_covers_room_geometry_before_angle_variants():
     assert first_wall > angle_variants
     runner = (CODE_DIR / "run_enva_expert_coverage.py").read_text(encoding="utf-8")
     assert '"--max-global-cameras", "3", "--max-camera-pose-attempts", "6"' in runner
-    assert 'if not item[2].endswith("_20")' in camera_records
-    assert "-distance" in camera_records
+    assert '0 if "_20_" in item[2] or item[2].endswith("_20") else 1' in camera_records
     assert "camera_candidates = camera_candidates[:2]" not in camera_records
     assert "max_camera_pose_attempts_per_room" in camera_records
 
@@ -1244,6 +1359,27 @@ def test_expert_replays_generated_support_furniture_as_kinematic():
     assert "fixed_base=task_support" in spawn
 
 
+def test_smoke_only_replay_enables_and_advances_official_flow():
+    effects = (CODE_DIR / "deltasg_visual_effects.py").read_text(encoding="utf-8")
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    visualizer = (CODE_DIR / "visualize_deltasg_batch.py").read_text(encoding="utf-8")
+    replay = expert[
+        expert.index("def _apply_saved_initial_states"):
+        expert.index("def _delta_replay_integrity")
+    ]
+    assert "obj.update_visuals()" in effects
+    assert '"official_fire_emitter_not_enabled"' in effects
+    assert 'settings.set_bool("/rtx/flow/compositeEnabled", True)' in effects
+    assert 'smoke.GetAttribute("fade").Set(0.5)' in effects
+    assert 'ray_march.GetAttribute("attenuation").Set(5.0)' in effects
+    assert "SMOKE_FLOW_MAX_EMITTER_RADIUS" in effects
+    assert 'simulate.GetAttribute("densityCellSize").Set(radius * 0.2)' in effects
+    assert "SMOKE_FLOW_WARMUP_STEPS if smoke_effect_count else 5" in replay
+    assert "SMOKE_FLOW_RENDER_WARMUP_FRAMES" in replay
+    assert "for _ in range(SMOKE_FLOW_WARMUP_STEPS):\n            og.sim.step()" in visualizer
+    assert "for _ in range(SMOKE_FLOW_RENDER_WARMUP_FRAMES):\n            og.sim.render()" in visualizer
+
+
 def test_replay_sink_gate_uses_generation_final_geometry_not_unsynced_reset_aabb():
     source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
     gate = source[source.index("def _delta_replay_integrity"):source.index("def _scene_objects")]
@@ -1445,23 +1581,60 @@ def test_on_top_sampler_uses_same_clearance_and_access_aware_order_as_validator(
     assert "grid_points.sort" in relation
 
 
-def test_every_delivery_keeps_all_future_objects_on_fixed_global_views():
+def test_every_task_keeps_all_actionable_objects_on_fixed_global_views():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
-    assert 'if primary_task.startswith("deliver_")' in cameras
-    assert 'len(target_room_set) > 1' not in cameras
-    assert "uncovered = (target_names - set(robot_visible)) | persistent_global_targets" in cameras
-    assert "set(global_visible) >= persistent_global_targets" in cameras
-    assert '"persistent_global_targets": sorted(persistent_global_targets)' in cameras
+    assert "uncovered = set(target_names)" in cameras
+    assert "set(global_visible) >= target_names" in cameras
+    assert '"uncovered_objects": sorted(target_names - set(global_visible))' in cameras
 
 
-def test_delivery_global_camera_keeps_official_positions_and_aims_at_task_objects():
+def test_global_camera_keeps_official_positions_and_aims_at_task_objects():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
-    assert 'if primary_task.startswith("deliver_") and room_targets:' in cameras
-    assert "task_focus = np.mean(focus_points, axis=0)" in cameras
-    assert "self._look_at_quat(position, task_focus)" in cameras
-    assert 'f"{method}_task_aim"' in cameras
+    assert "focus = object_focus(focus_ids)" in cameras
+    assert "self._look_at_quat(position, focus)" in cameras
+    assert 'f"{method}_{selection_mode}_aim"' in cameras
+
+
+def test_env_abc_global_camera_contract_requires_two_to_three_views_and_robot_coverage():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
+    runner = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+
+    assert "min_global_cameras: int = 2" in source
+    assert "camera_cap = min(3, int(self.config.max_global_cameras))" in cameras
+    assert "camera_minimum = max(2, int(self.config.min_global_cameras))" in cameras
+    assert "self.rng.random() < 0.5" in cameras
+    assert '"visible_robot_objects": [robot_name] if sees_robot else []' in cameras
+    assert "robot_visibility_count >= 1" in cameras
+    assert '"redundant_coverage_achieved": redundant_coverage_achieved' in cameras
+    assert "relevant_visibility_by_room" in cameras
+    assert "non_target_rooms" in cameras
+    assert '"--min-global-cameras"' in runner
+    audit = (CODE_DIR / "audit_deltasg_outputs.py").read_text(encoding="utf-8")
+    assert '"global_camera_count": Counter()' in audit
+    assert '"camera_redundancy": Counter()' in audit
+
+
+def test_supplemental_global_cameras_keep_official_orientation_and_do_not_repeat_positions():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
+    assert "pose_key not in unused_positions" in cameras
+    assert "unused_positions.add(pose_key)" in cameras
+    assert 'selection_mode == "supplemental"' in cameras
+    assert "Supplemental cameras retain the official fixed room-facing" in cameras
+    assert "focus_ids = set()" in cameras
+    assert "required_visible = bool(best_camera[5] or best_camera[6])" not in cameras
+
+
+def test_third_camera_prefers_an_unused_non_target_room_after_redundancy():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
+    assert "redundancy_already_achieved = bool(" in cameras
+    assert "redundant_coverage_requested and not redundancy_already_achieved" in cameras
+    assert "unused_non_target_rooms" in cameras
+    assert "unused_non_target_rooms\n                        or non_target_rooms" in cameras
 
 
 def test_expert_robot_teleports_do_not_restart_scene_physics():
@@ -2287,9 +2460,17 @@ def test_persistent_symbolic_expert_reuses_preloaded_same_scene_environments():
     assert "env.scene.reset(hard=True)" in execute
     assert "_spawn_added_objects(env, run)" in execute
     assert "cleanup_persistent_camera_streams(camera_streams)" in execute
+    assert "def _hold_symbolic_grasp_targets(" in expert
+    assert "_hold_symbolic_grasp_targets(env, symbolic_grasp_targets)" in execute
+    assert "link.disable_collisions()" in expert
+    assert "link.enable_collisions()" in execute
+    assert 'step.primitive == "GRASP"' in execute
+    assert "target.enable_gravity()" in execute
 
     worker = (CODE_DIR / "run_deltasg_expert_persistent.py").read_text(encoding="utf-8")
     assert "rows.sort(key=lambda row: (row[0], row[1], str(row[2])))" in worker
+    assert "def _compatible_preload_cohorts(" in worker
+    assert "preload_cohorts = _compatible_preload_cohorts(rows, args.backend)" in worker
     assert "def _preloaded_object_configs(" in worker
     assert 'parked["position"]' in worker
     assert "expert._create_expert_env(" in worker

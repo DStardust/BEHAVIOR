@@ -341,6 +341,7 @@ class OnlineDeltaSGConfig:
     allow_repeat_tasks: bool = False
 
     # ---- Initial multi-camera coverage ----
+    min_global_cameras: int = 2
     max_global_cameras: int = 3
     visibility_min_pixels: int = 8
     max_camera_pose_attempts_per_room: int = 6
@@ -1111,6 +1112,7 @@ class OnlineDeltaSGEngine:
                 except Exception:
                     pass
         # First half: all objects frozen, let scene settle
+        settling_start = {name: self._object_position(name) for name in created_names}
         self._step(max(self.config.warmup_steps // 2, 5))
         # Release objects one at a time with small gaps
         for obj in placed_objs:
@@ -1123,7 +1125,9 @@ class OnlineDeltaSGEngine:
         self._step(3)
         print(f"[placement] warmup done [{_time.time()-t0:.1f}s]. Collecting settling report...", flush=True)
         t0 = _time.time()
-        validation["settling"] = self._collect_settling_report(created_names)
+        validation["settling"] = self._collect_settling_report(
+            created_names, start_positions=settling_start
+        )
         print(f"[placement] settling done [{_time.time()-t0:.1f}s].", flush=True)
 
         # Validation: succeed if at least 1 task_object was placed.
@@ -1238,8 +1242,13 @@ class OnlineDeltaSGEngine:
                         delta["edges"].extend(destination_support["delta_edges"])
                         if not destination_support.get("reused"):
                             created_names.append(destination_support["object_name"])
+                        settling_start = {
+                            name: self._object_position(name) for name in created_names
+                        }
                         self._step(15)
-                        validation["settling"] = self._collect_settling_report(created_names)
+                        validation["settling"] = self._collect_settling_report(
+                            created_names, start_positions=settling_start
+                        )
                         validation["ok"] = bool(
                             validation["ok"]
                             and validation["settling"]["all_within_threshold"]
@@ -1350,6 +1359,12 @@ class OnlineDeltaSGEngine:
             self.env.scene.object_registry("name", fire_target["name"], None)
         )
         extinguisher_record = self._record_for_category("fire_extinguisher")
+        # The dataset models do not share one authored upright axis.  Forcing a
+        # single floor orientation made some models slide or topple during the
+        # warmup.  Prefer a validated scene support so the tool remains stable
+        # and inside the robot's manipulation-height band; floor remains a
+        # normal fallback when no support works.
+        extinguisher_record["_prefer_support_first"] = True
         fire_position = (
             (fire_target.get("final_pose_before_warmup") or {}).get("position")
             or (fire_target.get("pose") or {}).get("position")
@@ -1361,9 +1376,18 @@ class OnlineDeltaSGEngine:
             semantic_role="interaction_tool",
             preferred_position=fire_position,
         )
-        self._step(self.config.warmup_steps)
         settling_names = [extinguisher["object_name"]] if extinguisher.get("ok") and not extinguisher.get("reused") else []
-        settling = self._collect_settling_report(settling_names)
+        settling_start = {name: self._object_position(name) for name in settling_names}
+        self._step(self.config.warmup_steps)
+        settling = self._collect_settling_report(
+            settling_names, start_positions=settling_start
+        )
+        if not settling.get("all_within_threshold"):
+            print(
+                f"[env-b-fire] extinguisher settling rejected: "
+                f"{settling.get('objects', [])}",
+                flush=True,
+            )
         after_graph = self.snapshot()
         ok = bool(
             fire_state.get("ok")
@@ -1428,7 +1452,7 @@ class OnlineDeltaSGEngine:
         return {
             "schema_version": "online_deltasg_env_b_fire.v1",
             "run_id": run_id,
-            "ok": ok,
+            "ok": validation["ok"],
             "task_environment": task_environment,
             "base_scene": task_environment["base_scene"],
             "task": task_environment["task"],
@@ -1477,14 +1501,17 @@ class OnlineDeltaSGEngine:
             target_room=target_room,
             semantic_role="semantic_distractor",
         )
-        self._step(self.config.warmup_steps)
         settling_names = [
             item.get("object_name") for item in (
                 env_b.get("validation", {}).get("solution_tool", {}), bucket, toy
             )
             if item.get("ok") and not item.get("reused") and item.get("object_name")
         ]
-        settling = self._collect_settling_report(settling_names)
+        settling_start = {name: self._object_position(name) for name in settling_names}
+        self._step(self.config.warmup_steps)
+        settling = self._collect_settling_report(
+            settling_names, start_positions=settling_start
+        )
         after_graph = self.snapshot()
         optimal = env_b["task_instance"]["task_objects"][0]["object_id"]
         ok = bool(env_b["ok"] and bucket["ok"] and toy["ok"] and settling.get("all_within_threshold"))
@@ -1494,6 +1521,7 @@ class OnlineDeltaSGEngine:
         env_b["delta_sg"]["edges"].extend(bucket.get("delta_edges", []) + toy.get("delta_edges", []))
         env_b["task_instance"]["task_id"] = f"{run_id}_task"
         env_b["task_instance"]["task_type"] = "Env-C"
+        env_b["task_instance"]["primary_behavior_task"] = "select_fire_suppression_tool"
         env_b["task_instance"]["instruction"] = (
             "Respond to the smoke warning using the most suitable tool before visible flames develop."
         )
@@ -1549,7 +1577,7 @@ class OnlineDeltaSGEngine:
         return {
             "schema_version": "online_deltasg_env_c_fire_disambiguation.v1",
             "run_id": run_id,
-            "ok": ok,
+            "ok": validation["ok"],
             "task_environment": task_environment,
             "base_scene": task_environment["base_scene"],
             "task": task_environment["task"],
@@ -1622,7 +1650,7 @@ class OnlineDeltaSGEngine:
         created_objects = list(validation.get("created_objects") or [])
         candidate = None
         distractor = None
-        state_changed = []
+        state_changed = copy.deepcopy(te.get("state_changed_objects") or [])
 
         if task_category == "retrieval_delivery":
             if not any(item.get("semantic_role") == "task_object" for item in created_objects):
@@ -1655,12 +1683,15 @@ class OnlineDeltaSGEngine:
             self._append_env_c_native_plan_objects(task_instance, [candidate, distractor])
             self._append_env_c_native_delta(delta_sg, target_room, [candidate, distractor])
 
-        self._step(self.config.warmup_steps)
         settling_names = [
             item.get("object_name") for item in created_objects
             if item.get("ok") and not item.get("reused") and item.get("object_name")
         ]
-        settling = self._collect_settling_report(settling_names)
+        settling_start = {name: self._object_position(name) for name in settling_names}
+        self._step(self.config.warmup_steps)
+        settling = self._collect_settling_report(
+            settling_names, start_positions=settling_start
+        )
         after_graph = self.snapshot()
         optimal = self._env_c_optimal_object(task_instance, created_objects)
         rejected = []
@@ -2033,24 +2064,27 @@ class OnlineDeltaSGEngine:
                 pos, ori = self._safe_pose(existing)
                 actual_rooms = self._rooms_for_obj(existing)
                 actual_room = actual_rooms[0] if actual_rooms else target_room
+                native_name = getattr(existing, "name", None)
                 result.update({
                     "ok": True,
+                    "requested_object_name": object_name,
+                    "object_name": native_name,
                     "reused": True,
-                    "reused_object_name": getattr(existing, "name", None),
+                    "reused_object_name": native_name,
                     "model": getattr(existing, "model", None),
                     "relation": {"ok": True, "mode": "reused", "reason": "scene_native"},
                     "placement": {"room_id": actual_room, "mode": "reused", "support_object_id": None},
                     "final_pose_before_warmup": {"position": pos, "orientation_xyzw": ori},
                     "delta_node": {
-                        "id": object_name,
+                        "id": native_name,
                         "type": "reused_object",
                         "category": category,
                         "synset": record["synset"],
                         "room_id": actual_room,
                         "semantic_roles": [semantic_role],
-                        "reused_from": getattr(existing, "name", None),
+                        "reused_from": native_name,
                     },
-                    "delta_edges": [{"source": f"room::{target_room}", "target": object_name, "relation": "contains"}],
+                    "delta_edges": [{"source": f"room::{actual_room}", "target": native_name, "relation": "contains"}],
                 })
                 print(f"[reuse] {category} → existing {getattr(existing, 'name', '?')}", flush=True)
                 return result
@@ -2202,7 +2236,10 @@ class OnlineDeltaSGEngine:
                 # it directly on a free reachable floor pose instead of
                 # attempting an OnTop relation with the structural floor node.
                 candidates.extend(floor_candidates)
-            elif self._category_prefers_floor(category):
+            elif (
+                self._category_prefers_floor(category)
+                and not record.get("_prefer_support_first")
+            ):
                 candidates.extend(floor_candidates)
                 candidates.append(placement)
             elif not primary_is_floor or task_floor_eligible:
@@ -2228,6 +2265,10 @@ class OnlineDeltaSGEngine:
             if manipulated_object:
                 for candidate in candidates:
                     candidate["prefer_robot_access"] = True
+            placement_orientation = record.get("_placement_orientation_xyzw")
+            if placement_orientation is not None:
+                for candidate in candidates:
+                    candidate["pose"]["orientation_xyzw"] = list(placement_orientation)
 
             # Relation placement is comparatively expensive and may move the
             # object to a random point on a support. Rank a wider candidate
@@ -2361,7 +2402,7 @@ class OnlineDeltaSGEngine:
                         exclude_names=None,
                         margin=0.02,
                         target_room=target_room,
-                        ignore_floor_coverings=generated_support_fixture,
+                        ignore_floor_coverings=generated_support_fixture or manipulated_object,
                     )
                     if not overlapping:
                         # Keep still to prevent floor impact
@@ -2737,6 +2778,7 @@ class OnlineDeltaSGEngine:
         return {
             "task_id": f"{run_id}_task",
             "task_type": "Env-B",
+            "primary_behavior_task": "respond_to_smoke_warning",
             "instruction": "Respond to the smoke warning with the extinguisher before visible flames develop.",
             "target_room": target_room,
             "task_objects": [
@@ -2765,15 +2807,22 @@ class OnlineDeltaSGEngine:
         }
 
     def _choose_room_with_objects(self, graph):
+        reachable_rooms = set(self._robot_reachable_room_pixels())
         counts = Counter()
         for node in graph.get("nodes", []):
             if node.get("type") == "object":
                 for room in node.get("rooms", []):
-                    counts[room] += 1
+                    if not reachable_rooms or room in reachable_rooms:
+                        counts[room] += 1
         if counts:
             max_count = max(counts.values())
             return self.rng.choice(sorted(room for room, count in counts.items() if count == max_count))
-        rooms = [node["name"] for node in graph.get("nodes", []) if node.get("type") == "room"]
+        rooms = [
+            node["name"]
+            for node in graph.get("nodes", [])
+            if node.get("type") == "room"
+            and (not reachable_rooms or node["name"] in reachable_rooms)
+        ]
         return self.rng.choice(rooms) if rooms else None
 
     def _choose_different_room(self, graph, room):
@@ -6592,9 +6641,9 @@ class OnlineDeltaSGEngine:
             support_tokens = self._tokens(support_cat)
             if support_tokens & {"carpet", "rug", "mat", "doormat"}:
                 continue
-            # Scene categories are commonly named "floors" (plural). Treat
-            # both spellings as controlled low-priority floor supports.
-            if support_tokens & {"floor", "floors"} and not self._floor_fallback_allowed(record, obj_cat):
+            # Structural floor nodes are not OnTop receptacles. Direct floor
+            # placement has its own grounded pose and collision validation.
+            if support_tokens & {"floor", "floors"}:
                 continue
             if self._has_explicit_support_affinity(obj_cat) and affinity <= 0.15:
                 continue
@@ -7921,8 +7970,10 @@ class OnlineDeltaSGEngine:
         except Exception as exc:
             return {"ok": False, "reason": "support_pose_check_failed", "error": repr(exc)}
 
-    def _collect_settling_report(self, object_names):
-        before = {name: self._object_position(name) for name in object_names}
+    def _collect_settling_report(self, object_names, start_positions=None):
+        before = dict(start_positions) if start_positions is not None else {
+            name: self._object_position(name) for name in object_names
+        }
         self._step(self.config.settle_steps)
 
         # Build lookup for contact checking
@@ -8669,197 +8720,346 @@ class OnlineDeltaSGEngine:
                 camera["visibility"] = robot_visible
 
         room_centers = (graph.get("navigation") or {}).get("room_centers", {})
-        primary_task = str((task_instance or {}).get("primary_behavior_task") or "")
-        # A robot view that covers delivery targets only at reset is not
-        # persistent: after navigating to the source, the destination can
-        # disappear even when both objects are in the same room.
-        persistent_global_targets = (
-            set(target_names)
-            if primary_task.startswith("deliver_")
-            else set()
+        graph_nodes = {
+            node.get("id"): node
+            for node in graph.get("nodes", [])
+            if node.get("type") == "object"
+        }
+        robot = self.env.robots[0] if getattr(self.env, "robots", None) else None
+        robot_name = getattr(robot, "name", None)
+        robot_room = initial_room
+        query_names = set(target_names)
+        if robot_name:
+            query_names.add(robot_name)
+
+        camera_cap = min(3, int(self.config.max_global_cameras))
+        camera_minimum = max(2, int(self.config.min_global_cameras))
+        redundant_coverage_requested = bool(
+            camera_cap >= 3 and self.rng.random() < 0.5
         )
-        uncovered = (target_names - set(robot_visible)) | persistent_global_targets
-        placed_rooms = set()
+        desired_camera_count = 3 if redundant_coverage_requested else 2
+        desired_camera_count = min(camera_cap, desired_camera_count)
+
+        uncovered = set(target_names)
         global_visible = {}
+        target_visibility_counts = Counter()
+        robot_visibility_count = 0
+        global_camera_records = []
+        camera_counts_by_room = Counter()
+        relevant_visibility_by_room = Counter()
+        used_camera_poses = set()
+        failed_target_rooms = set()
+        supplemental_exhausted_rooms = set()
         errors = []
 
-        # When the robot already sees every task object, keep one randomized
-        # official room camera so the instance still has a global viewpoint.
-        pending_rooms = []
-        if not uncovered:
-            available_rooms = sorted(room_centers)
-            if available_rooms:
-                pending_rooms.append(self.rng.choice(available_rooms))
+        def object_focus(object_ids):
+            points = []
+            for object_id in object_ids:
+                if object_id == robot_name and robot is not None:
+                    lower, upper = robot.aabb
+                    points.append(
+                        0.5
+                        * (
+                            np.asarray(
+                                lower.cpu() if hasattr(lower, "cpu") else lower,
+                                dtype=np.float32,
+                            )
+                            + np.asarray(
+                                upper.cpu() if hasattr(upper, "cpu") else upper,
+                                dtype=np.float32,
+                            )
+                        )
+                    )
+                    continue
+                node = graph_nodes.get(object_id) or {}
+                bbox = node.get("bbox") or {}
+                lower = bbox.get("min")
+                upper = bbox.get("max")
+                if lower and upper:
+                    points.append(
+                        0.5
+                        * (
+                            np.asarray(lower[:3], dtype=np.float32)
+                            + np.asarray(upper[:3], dtype=np.float32)
+                        )
+                    )
+                    continue
+                position = (node.get("pose") or {}).get("position")
+                if position:
+                    points.append(np.asarray(position[:3], dtype=np.float32))
+            return np.mean(points, axis=0) if points else None
 
-        while uncovered or pending_rooms:
-            if len(placed_rooms) >= self.config.max_global_cameras:
-                errors.append({
-                    "error": "max_global_cameras_reached",
-                    "limit": self.config.max_global_cameras,
-                    "uncovered_objects": sorted(uncovered),
-                })
+        while (
+            uncovered
+            or (robot_name and robot_visibility_count == 0)
+            or len(global_camera_records) < desired_camera_count
+        ):
+            if len(global_camera_records) >= camera_cap:
+                if uncovered or (robot_name and robot_visibility_count == 0):
+                    errors.append({
+                        "error": "max_global_cameras_reached",
+                        "limit": camera_cap,
+                        "uncovered_objects": sorted(uncovered),
+                        "robot_visible": robot_visibility_count > 0,
+                    })
                 break
-            if pending_rooms:
-                room_id = pending_rooms.pop(0)
-            else:
+
+            selection_mode = "supplemental"
+            focus_ids = set()
+            if uncovered:
+                selection_mode = "target"
                 object_id = sorted(uncovered)[0]
-                target_rooms = targets[object_id].get("room_ids") or [
-                    targets[object_id].get("room_id")
+                candidate_rooms = [
+                    room
+                    for room in (
+                        targets[object_id].get("room_ids")
+                        or [targets[object_id].get("room_id")]
+                    )
+                    if room and (object_id, room) not in failed_target_rooms
                 ]
-                target_rooms = [room for room in target_rooms if room]
-                room_id = next((room for room in target_rooms if room not in placed_rooms), None)
-                if not target_rooms:
-                    errors.append({"error": "target_room_unknown", "object_id": object_id})
-                    break
-                if room_id is None:
+                if not candidate_rooms:
                     errors.append({
                         "error": "target_not_visible_from_room_camera",
                         "object_id": object_id,
-                        "room_ids": target_rooms,
+                        "room_ids": targets[object_id].get("room_ids") or [],
                     })
                     break
-            center = room_centers.get(room_id)
-            if room_id in placed_rooms:
-                continue
-            if not center:
-                errors.append({"error": "room_camera_pose_unavailable", "room_id": room_id})
-                break
-            best_camera = None
-            room_targets = {
-                name for name in uncovered
-                if room_id in (targets[name].get("room_ids") or [targets[name].get("room_id")])
-            }
-            camera_candidates = self._global_camera_candidates(room_id, center)
-            if primary_task.startswith("deliver_") and room_targets:
-                graph_nodes = {
-                    node.get("id"): node
-                    for node in graph.get("nodes", [])
-                    if node.get("type") == "object"
-                }
-                focus_points = []
-                for name in room_targets:
-                    node = graph_nodes.get(name) or {}
-                    bbox = node.get("bbox") or {}
-                    lower = bbox.get("min")
-                    upper = bbox.get("max")
-                    if lower and upper:
-                        focus_points.append(
-                            0.5
-                            * (
-                                np.asarray(lower[:3], dtype=np.float32)
-                                + np.asarray(upper[:3], dtype=np.float32)
-                            )
-                        )
-                    else:
-                        position = (node.get("pose") or {}).get("position")
-                        if position:
-                            focus_points.append(np.asarray(position[:3], dtype=np.float32))
-                if focus_points:
-                    task_focus = np.mean(focus_points, axis=0)
-                    camera_candidates = [
-                        (
-                            position,
-                            self._look_at_quat(position, task_focus),
-                            f"{method}_task_aim",
-                        )
-                        for position, _, method in camera_candidates
-                    ]
-                    print(
-                        f"[camera-coverage] task-aimed delivery candidates "
-                        f"room={room_id} targets={sorted(room_targets)}",
-                        flush=True,
+                candidate_rooms.sort(key=lambda room: (camera_counts_by_room[room], room))
+                room_id = candidate_rooms[0]
+                focus_ids = {
+                    name
+                    for name in uncovered
+                    if room_id in (
+                        targets[name].get("room_ids")
+                        or [targets[name].get("room_id")]
                     )
+                }
+            elif robot_name and robot_visibility_count == 0:
+                selection_mode = "robot"
+                room_id = robot_room
+                focus_ids = {robot_name}
+                if not room_id or room_id not in room_centers:
+                    errors.append({"error": "robot_room_camera_pose_unavailable"})
+                    break
+            else:
+                target_rooms = {
+                    room
+                    for target in targets.values()
+                    for room in (target.get("room_ids") or [target.get("room_id")])
+                    if room
+                }
+                available_rooms = [
+                    room for room in sorted(room_centers)
+                    if room not in supplemental_exhausted_rooms
+                ]
+                if not available_rooms:
+                    break
+                redundancy_already_achieved = bool(
+                    robot_visibility_count >= 2
+                    or any(count >= 2 for count in target_visibility_counts.values())
+                )
+                if redundant_coverage_requested and not redundancy_already_achieved:
+                    preferred_rooms = [
+                        room for room in available_rooms
+                        if room in target_rooms or room == robot_room
+                    ]
+                    room_pool = preferred_rooms or available_rooms
+                    best_relevant_score = max(
+                        relevant_visibility_by_room[room] for room in room_pool
+                    )
+                    room_pool = [
+                        room for room in room_pool
+                        if relevant_visibility_by_room[room] == best_relevant_score
+                    ]
+                else:
+                    non_target_rooms = [
+                        room for room in available_rooms
+                        if room not in target_rooms and room != robot_room
+                    ]
+                    unused_non_target_rooms = [
+                        room for room in non_target_rooms
+                        if camera_counts_by_room[room] == 0
+                    ]
+                    unused_rooms = [
+                        room for room in available_rooms
+                        if camera_counts_by_room[room] == 0
+                    ]
+                    room_pool = (
+                        unused_non_target_rooms
+                        or non_target_rooms
+                        or unused_rooms
+                        or available_rooms
+                    )
+                min_room_count = min(camera_counts_by_room[room] for room in room_pool)
+                room_id = self.rng.choice([
+                    room for room in room_pool
+                    if camera_counts_by_room[room] == min_room_count
+                ])
+                # Supplemental cameras retain the official fixed room-facing
+                # orientation. They need not contain a task object or robot.
+                focus_ids = set()
+
+            center = room_centers.get(room_id)
+            if not center:
+                if selection_mode == "target":
+                    failed_target_rooms.add((object_id, room_id))
+                elif selection_mode == "supplemental":
+                    supplemental_exhausted_rooms.add(room_id)
+                else:
+                    errors.append({"error": "room_camera_pose_unavailable", "room_id": room_id})
+                    break
+                continue
+
+            camera_candidates = self._global_camera_candidates(room_id, center)
+            focus = object_focus(focus_ids)
+            if focus is not None:
+                camera_candidates = [
+                    (
+                        position,
+                        self._look_at_quat(position, focus),
+                        f"{method}_{selection_mode}_aim",
+                    )
+                    for position, _, method in camera_candidates
+                ]
             full_height_fixture = any(
-                self._tokens(targets[name].get("category")) & {"door", "doors", "window", "windows"}
-                for name in room_targets
+                self._tokens(targets[name].get("category"))
+                & {"door", "doors", "window", "windows"}
+                for name in focus_ids
+                if name in targets
             )
             if full_height_fixture:
-                graph_nodes = {
-                    node.get("id"): node for node in graph.get("nodes", [])
-                    if node.get("type") == "object"
-                }
-                focus_points = [
-                    (graph_nodes.get(name, {}).get("pose") or {}).get("position")
-                    for name in room_targets
-                ]
-                focus_points = [point for point in focus_points if point]
-                focus_xy = np.mean(
-                    [np.asarray(point[:2], dtype=np.float32) for point in focus_points], axis=0,
-                ) if focus_points else None
-
-                def full_height_rank(item):
-                    if not item[2].endswith("_20"):
-                        return (1, 0.0, item[2])
-                    distance = (
-                        float(np.linalg.norm(np.asarray(item[0][:2]) - focus_xy))
-                        if focus_xy is not None else 0.0
-                    )
-                    return (0, -distance, item[2])
-
                 camera_candidates.sort(
-                    key=full_height_rank
+                    key=lambda item: (
+                        0 if "_20_" in item[2] or item[2].endswith("_20") else 1,
+                        item[2],
+                    )
                 )
-            if not uncovered:
-                camera_candidates = camera_candidates[:1]
-            else:
-                camera_candidates = camera_candidates[
-                    : self.config.max_camera_pose_attempts_per_room
-                ]
-            for cam_pos, orientation, method in camera_candidates:
-                print(
-                    f"[camera-coverage] testing room={room_id} pose={method}",
-                    flush=True,
+            unused_candidates = []
+            unused_positions = set()
+            for position, orientation, method in camera_candidates:
+                pose_key = tuple(np.round(np.asarray(position), 3))
+                if pose_key not in used_camera_poses and pose_key not in unused_positions:
+                    unused_candidates.append((position, orientation, method, pose_key))
+                    unused_positions.add(pose_key)
+            unused_candidates = unused_candidates[
+                : self.config.max_camera_pose_attempts_per_room
+            ]
+            best_camera = None
+            for cam_pos, orientation, method, pose_key in unused_candidates:
+                visibility = self._global_camera_visibility(
+                    cam_pos, orientation, query_names
                 )
-                visibility = self._global_camera_visibility(cam_pos, orientation, target_names)
-                print(
-                    f"[camera-coverage] tested room={room_id} pose={method} "
-                    f"visible={sorted(visibility)}",
-                    flush=True,
-                )
+                visible_names = set(visibility)
+                target_visibility = {
+                    name: detail
+                    for name, detail in visibility.items()
+                    if name in target_names
+                }
+                sees_robot = bool(robot_name and robot_name in visible_names)
                 score = (
-                    len(set(visibility) & uncovered),
+                    len(visible_names & uncovered),
+                    int(sees_robot and robot_visibility_count == 0),
+                    sum(target_visibility_counts[name] > 0 for name in target_visibility)
+                    + int(sees_robot and robot_visibility_count > 0),
+                    len(target_visibility) + int(sees_robot),
                     sum(item.get("pixel_count", 0) for item in visibility.values()),
                 )
+                print(
+                    f"[camera-coverage] tested room={room_id} pose={method} "
+                    f"targets={sorted(target_visibility)} robot={sees_robot}",
+                    flush=True,
+                )
                 if best_camera is None or score > best_camera[0]:
-                    best_camera = (score, cam_pos, orientation, method, visibility)
-                if room_targets and room_targets <= set(visibility):
+                    best_camera = (
+                        score, cam_pos, orientation, method, pose_key,
+                        target_visibility, sees_robot,
+                    )
+
+            required_visible = True
+            if best_camera is None:
+                required_visible = False
+            elif selection_mode == "target":
+                required_visible = bool(set(best_camera[5]) & uncovered)
+            elif selection_mode == "robot":
+                required_visible = best_camera[6]
+            if not required_visible:
+                if selection_mode == "target":
+                    failed_target_rooms.add((object_id, room_id))
+                elif selection_mode == "supplemental":
+                    supplemental_exhausted_rooms.add(room_id)
+                else:
+                    errors.append({
+                        "error": "robot_not_visible_from_initial_room_camera",
+                        "room_id": room_id,
+                    })
                     break
-            _, cam_pos, orientation, camera_method, visibility = best_camera
-            camera_id = f"global_{room_id}"
-            cameras.append(
-                {
-                    "camera_id": camera_id,
-                    "camera_type": "global_camera",
-                    "room_id": room_id,
-                    "pose": {
-                        "position": [float(value) for value in cam_pos],
-                        "orientation_xyzw": [float(value) for value in orientation],
-                    },
-                    "modalities": ["rgb", "seg_instance"],
-                    "resolution": {"height": 720, "width": 1280},
-                    "status": "visibility_validated",
-                    "placement_method": camera_method,
-                    "visible_task_objects": sorted(visibility),
-                    "visibility": visibility,
-                }
+                continue
+
+            (
+                _, cam_pos, orientation, camera_method, pose_key,
+                target_visibility, sees_robot,
+            ) = best_camera
+            camera_index = len(global_camera_records) + 1
+            camera_id = f"global_{room_id}_{camera_index}"
+            camera_record = {
+                "camera_id": camera_id,
+                "camera_type": "global_camera",
+                "room_id": room_id,
+                "pose": {
+                    "position": [float(value) for value in cam_pos],
+                    "orientation_xyzw": [float(value) for value in orientation],
+                },
+                "modalities": ["rgb", "seg_instance"],
+                "resolution": {"height": 720, "width": 1280},
+                "status": "visibility_validated",
+                "placement_method": camera_method,
+                "visible_task_objects": sorted(target_visibility),
+                "visible_robot_objects": [robot_name] if sees_robot else [],
+                "visibility": target_visibility,
+            }
+            cameras.append(camera_record)
+            global_camera_records.append(camera_record)
+            used_camera_poses.add(pose_key)
+            camera_counts_by_room[room_id] += 1
+            relevant_visibility_by_room[room_id] += (
+                len(target_visibility) + int(sees_robot)
             )
-            placed_rooms.add(room_id)
-            global_visible.update(visibility)
-            uncovered -= set(visibility)
+            global_visible.update(target_visibility)
+            for name in target_visibility:
+                target_visibility_counts[name] += 1
+            if sees_robot:
+                robot_visibility_count += 1
+            uncovered -= set(target_visibility)
 
         visible = set(robot_visible) | set(global_visible)
+        redundant_coverage_achieved = bool(
+            robot_visibility_count >= 2
+            or any(count >= 2 for count in target_visibility_counts.values())
+        )
         coverage = {
-            "ok": bool(target_names) and not errors and visible >= target_names
-            and set(global_visible) >= persistent_global_targets,
-            "policy": "robot_first_iterative_room_camera_v2_persistent_delivery",
-            "max_global_cameras": self.config.max_global_cameras,
+            "ok": bool(target_names)
+            and not errors
+            and set(global_visible) >= target_names
+            and bool(robot_name)
+            and robot_visibility_count >= 1
+            and len(global_camera_records) >= camera_minimum,
+            "policy": "global_multiview_robot_and_target_v4",
+            "min_global_cameras": camera_minimum,
+            "max_global_cameras": camera_cap,
+            "desired_global_cameras": desired_camera_count,
+            "num_global_cameras": len(global_camera_records),
             "target_objects": sorted(target_names),
+            "robot_object": robot_name,
             "robot_visible_objects": sorted(robot_visible),
             "global_visible_objects": sorted(global_visible),
-            "persistent_global_targets": sorted(persistent_global_targets),
+            "global_robot_visible": robot_visibility_count > 0,
+            "global_robot_visibility_count": robot_visibility_count,
+            "target_global_visibility_counts": dict(sorted(target_visibility_counts.items())),
+            "redundant_coverage_requested": redundant_coverage_requested,
+            "redundant_coverage_achieved": redundant_coverage_achieved,
             "visible_objects": sorted(visible),
-            "uncovered_objects": sorted(target_names - visible),
-            "global_camera_rooms": sorted(placed_rooms),
+            "uncovered_objects": sorted(target_names - set(global_visible)),
+            "global_camera_rooms": [camera["room_id"] for camera in global_camera_records],
             "errors": errors,
         }
         if not target_names:
@@ -9130,6 +9330,15 @@ class OnlineDeltaSGEngine:
         visibility = {}
         for name in sorted(target_names):
             obj = self.env.scene.object_registry("name", name, None)
+            if obj is None:
+                obj = next(
+                    (
+                        robot
+                        for robot in getattr(self.env, "robots", [])
+                        if getattr(robot, "name", None) == name
+                    ),
+                    None,
+                )
             if obj is None:
                 continue
             lower, upper = obj.aabb

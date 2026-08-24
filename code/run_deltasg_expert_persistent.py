@@ -87,13 +87,16 @@ def _reusable_result(result_path, input_path, backend):
     except (OSError, ValueError, TypeError):
         return False
     profile = result.get("backend") or {}
-    return (
-        result.get("accepted") is True
-        and result.get("qa_eligible") is True
-        and recorded_input == input_path.resolve()
+    identity_matches = (
+        recorded_input == input_path.resolve()
         and profile.get("name") == backend
         and profile.get("generation_profile_verified") is True
     )
+    if not identity_matches:
+        return False
+    if result.get("accepted") is True:
+        return result.get("qa_eligible") is True
+    return result.get("accepted") is False and result.get("rejection") is not None
 
 
 def _sample_identity(run, backend):
@@ -134,6 +137,33 @@ def _preloaded_object_configs(group_rows, backend):
         parked["position"] = [float(index % 16) * 2.0, float(index // 16) * 2.0, -50.0]
         result.append(parked)
     return result
+
+
+def _compatible_preload_cohorts(rows, backend):
+    """Partition same-scene rows when a reused run ID names different assets."""
+    cohorts = {}
+    cohort_by_input = {}
+    for row in rows:
+        scene, robot, input_path, _, run = row
+        identities = {
+            config["name"]: (config.get("category"), config.get("model"))
+            for config in expert._physical_added_object_configs(run, backend=backend)
+        }
+        scene_cohorts = cohorts.setdefault((scene, robot), [])
+        cohort_index = next(
+            (
+                index
+                for index, existing in enumerate(scene_cohorts)
+                if all(name not in existing or existing[name] == identity for name, identity in identities.items())
+            ),
+            None,
+        )
+        if cohort_index is None:
+            cohort_index = len(scene_cohorts)
+            scene_cohorts.append({})
+        scene_cohorts[cohort_index].update(identities)
+        cohort_by_input[input_path] = cohort_index
+    return cohort_by_input
 
 
 def _write_result(path, result):
@@ -182,12 +212,14 @@ def main():
     args = parser.parse_args()
     if (args.input_json or args.input_root) and not args.output_root:
         parser.error("--output-root is required with --input-json or --input-root")
+    active_sample_path = Path(args.output_root).resolve() / ".active_sample.json"
     rows = []
     for input_path, output_dir in _entries(args):
         run = json.loads(input_path.read_text(encoding="utf-8"))
         scene, robot = _sample_identity(run, args.backend)
         rows.append((scene, robot, input_path, output_dir, run))
     rows.sort(key=lambda row: (row[0], row[1], str(row[2])))
+    preload_cohorts = _compatible_preload_cohorts(rows, args.backend)
 
     env = None
     environment_key = None
@@ -196,7 +228,15 @@ def main():
     started = time.monotonic()
     for sample_index, (scene, robot, input_path, output_dir, run) in enumerate(rows, 1):
         sample_started = time.monotonic()
-        key = (scene, robot)
+        key = (scene, robot, preload_cohorts[input_path])
+        _write_result(
+            active_sample_path,
+            {
+                "input": str(input_path),
+                "output": str(output_dir),
+                "backend": args.backend,
+            },
+        )
         try:
             fresh_environment = key != environment_key or env is None
             if fresh_environment:
@@ -207,7 +247,11 @@ def main():
                     f"[expert-persistent] loading environment scene={scene} robot={robot}",
                     flush=True,
                 )
-                group_rows = [row for row in rows if (row[0], row[1]) == key]
+                group_rows = [
+                    row
+                    for row in rows
+                    if (row[0], row[1], preload_cohorts[row[2]]) == key
+                ]
                 preloaded_configs = _preloaded_object_configs(group_rows, args.backend)
                 env = expert._create_expert_env(
                     scene,
@@ -254,6 +298,7 @@ def main():
             "sample_elapsed_seconds": elapsed,
         }
         _write_result(output_dir / "expert_result.json", result)
+        active_sample_path.unlink(missing_ok=True)
         if result.get("accepted") is True:
             accepted += 1
         print(
@@ -270,6 +315,7 @@ def main():
         "elapsed_seconds": time.monotonic() - started,
     }
     print(json.dumps(summary, ensure_ascii=False), flush=True)
+    active_sample_path.unlink(missing_ok=True)
     sys.stdout.flush()
     sys.stderr.flush()
     # Individual expert rejections are valid completed outcomes. Coverage and

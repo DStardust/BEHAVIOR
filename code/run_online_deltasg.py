@@ -149,6 +149,34 @@ def load_existing_fingerprints(output_dir):
     return fingerprints
 
 
+def load_existing_runs(output_dir):
+    """Load accepted runs retained by an interrupted checkpointed process."""
+    runs = []
+    for path in sorted(Path(output_dir).glob("online_env*.json")):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if run.get("ok"):
+            runs.append((run, path))
+    return runs
+
+
+def summary_item(run, path):
+    validation = run.get("validation", {})
+    created = validation.get("created_objects")
+    failed = validation.get("failed_objects")
+    return {
+        "run_id": run["run_id"],
+        "ok": run["ok"],
+        "task": run["task_instance"]["instruction"],
+        "target_room": run["task_instance"]["target_room"],
+        "created": len(created) if isinstance(created, list) else None,
+        "failed": len(failed) if isinstance(failed, list) else None,
+        "path": str(path),
+    }
+
+
 def interaction_target(run):
     """Return the single fixture manipulated by a formal Env-A plan."""
     targets = {
@@ -163,11 +191,13 @@ def scene_integrity(before_graph, after_graph, max_displacement=0.05):
     """Reject a sample when a source-scene object is missing or displaced."""
     before = {
         node.get("id"): node for node in (before_graph or {}).get("nodes", [])
-        if node.get("type") == "object" and not str(node.get("id", "")).startswith("online_env_")
+        if node.get("type") == "object"
+        and node.get("category") != "agent"
+        and not str(node.get("id", "")).startswith("online_env_")
     }
     after = {
         node.get("id"): node for node in (after_graph or {}).get("nodes", [])
-        if node.get("type") == "object"
+        if node.get("type") == "object" and node.get("category") != "agent"
     }
     missing = []
     moved = []
@@ -356,6 +386,12 @@ def main():
     parser.add_argument("--settle-threshold", type=float, default=0.25)
     parser.add_argument("--min-manipulation-height", type=float, default=0.10)
     parser.add_argument("--max-manipulation-height", type=float, default=1.55)
+    parser.add_argument(
+        "--min-global-cameras",
+        type=int,
+        default=2,
+        help="Minimum official global cameras saved for every Env-A/B/C sample.",
+    )
     parser.add_argument(
         "--max-global-cameras",
         type=int,
@@ -576,15 +612,12 @@ def main():
             fast_env_a_cleanup=args.unsafe_fast_env_a_cleanup,
             cache_base_graph=not args.no_cache_base_graph,
             allow_repeat_tasks=args.allow_repeat_tasks,
+            min_global_cameras=args.min_global_cameras,
             max_global_cameras=args.max_global_cameras,
             max_camera_pose_attempts_per_room=args.max_camera_pose_attempts,
             camera_pose_render_steps=args.camera_pose_render_steps,
             solvability_profile=args.solvability_profile,
-            max_task_object_approach_distance=(
-                2.5
-                if args.solvability_profile == "oracle_symbolic"
-                else DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
-            ),
+            max_task_object_approach_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
             expert_base_clearance_margin=(
                 0.0 if args.solvability_profile == "oracle_symbolic" else 0.20
             ),
@@ -619,6 +652,7 @@ def main():
             "runs": [],
         }
         runs = []
+        existing_run_count = 0
         skip_tasks = set()
         fingerprints = load_existing_fingerprints(args.output_dir)
         print(f"[quality] loaded {len(fingerprints)} existing sample fingerprints", flush=True)
@@ -626,6 +660,22 @@ def main():
         if args.resume:
             loaded_skip_tasks = engine.load_checkpoint(args.output_dir)
             skip_tasks = set() if args.allow_repeat_tasks else loaded_skip_tasks
+            existing = load_existing_runs(args.output_dir)
+            runs.extend(run for run, _ in existing)
+            summary["runs"].extend(summary_item(run, path) for run, path in existing)
+            existing_run_count = len(existing)
+            summary["num_envs"] = existing_run_count + args.num_envs
+            existing_indices = [
+                int(path.stem.rsplit("_", 1)[-1])
+                for _, path in existing
+                if path.stem.rsplit("_", 1)[-1].isdigit()
+            ]
+            if existing_indices:
+                engine._run_counter = max(engine._run_counter, max(existing_indices) + 1)
+            print(
+                f"[checkpoint] retained {existing_run_count} accepted runs in resumed outputs",
+                flush=True,
+            )
 
         for idx in range(args.num_envs):
             current_task = task_sequence[idx] if task_sequence else args.task
@@ -667,7 +717,18 @@ def main():
                 # no_officially_transitionable_native_target.
                 spawn_failed = False
                 if task_sequence and current_task:
+                    # Sample transaction boundary: remove prior generated objects
+                    # before selecting a target or stabilizing Tiago. The generator
+                    # consumes this prepared state and never resets the robot after
+                    # its spawn has been validated.
+                    engine.begin_env_a_attempt()
                     preferred_target = engine.prepare_native_task_robot_spawn(current_task)
+                    if not preferred_target:
+                        # retrieval/delivery have no official native appliance;
+                        # recover a vetted source support surface so the robot
+                        # spawns within the 1.35 m bind gate instead of an
+                        # unconditional pose far from every surface.
+                        preferred_target = engine.prepare_retrieval_delivery_robot_spawn(current_task)
                     if preferred_target:
                         print(
                             f"[robot-spawn] preparing task={current_task} "
@@ -685,7 +746,7 @@ def main():
                                 # generation warmup exposed.
                                 warmup_steps=max(args.warmup_steps, 10),
                                 preferred_target_name=preferred_target,
-                                preferred_max_distance=1.35,
+                                preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
                                 settle_scene=False,
                             )
                         except RobotSpawnError as exc:
@@ -700,6 +761,38 @@ def main():
                             print(
                                 f"[robot-spawn] target-conditioned spawn could not bind "
                                 f"task={current_task} attempt={attempt + 1}",
+                                flush=True,
+                            )
+                            engine.reject_native_target(
+                                preferred_target, "robot_spawn_binding"
+                            )
+                            spawn_failed = True
+                        if not spawn_failed:
+                            engine.invalidate_robot_reachability()
+                    else:
+                        # No official native target in the scene: either the task
+                        # is non-native (retrieval/delivery) or it is a native
+                        # appliance task whose target is *generated*
+                        # (appliance-poor scene). Neither path re-uprights the
+                        # robot after a prior task, so a tilt introduced by an
+                        # object-placement collision in one task cascades into a
+                        # robot-stability rejection in every later task (observed
+                        # tilt up to 0.67 across the serial 23-task run). A fresh
+                        # unconditional spawn each attempt breaks that cascade
+                        # without disturbing any target: the robot is re-sampled,
+                        # upright, and warmup-validated on the current scene.
+                        try:
+                            stabilize_robot_spawn(
+                                env,
+                                seed=(args.seed or 0) + idx + 1 + attempt,
+                                warmup_steps=max(args.warmup_steps, 10),
+                                settle_scene=False,
+                            )
+                        except RobotSpawnError as exc:
+                            print(
+                                f"[robot-spawn] unconditional re-stabilize exhausted "
+                                f"task={current_task} attempt={attempt + 1} "
+                                f"reason={getattr(exc, 'reason', repr(exc))}",
                                 flush=True,
                             )
                             spawn_failed = True
@@ -887,18 +980,7 @@ def main():
             else:
                 print(f"[online-deltasg] run {idx + 1} excluded from dataset (ok=False)", flush=True)
 
-            validation = run.get("validation", {})
-            created = validation.get("created_objects")
-            failed = validation.get("failed_objects")
-            item = {
-                "run_id": run["run_id"],
-                "ok": run["ok"],
-                "task": run["task_instance"]["instruction"],
-                "target_room": run["task_instance"]["target_room"],
-                "created": len(created) if isinstance(created, list) else None,
-                "failed": len(failed) if isinstance(failed, list) else None,
-                "path": str(run_path),
-            }
+            item = summary_item(run, run_path)
 
             # Save checkpoint at interval
             if args.checkpoint_interval > 0 and (idx + 1) % args.checkpoint_interval == 0:
@@ -919,7 +1001,7 @@ def main():
         # A requested sample slot is successful only if it produced an
         # accepted dataset entry. Outer coverage runners use this status to
         # start a fresh OG process instead of reusing contaminated physics.
-        if len(runs) != args.num_envs:
+        if len(runs) - existing_run_count != args.num_envs:
             summary["ok"] = False
             summary["num_generated"] = len(runs)
 

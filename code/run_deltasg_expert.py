@@ -14,6 +14,7 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -53,7 +54,13 @@ from omnigibson.sensors import VisionSensor
 from omnigibson.utils.constants import PrimType
 from omnigibson.utils import transform_utils as T
 
-from api import create_env, get_all_scene_objects
+from api import create_env, get_all_scene_objects, validate_robot_stability
+from deltasg_visual_effects import (
+    SMOKE_FLOW_RENDER_WARMUP_FRAMES,
+    SMOKE_FLOW_WARMUP_STEPS,
+    SMOKE_ONLY_ON_FIRE_MODE,
+    configure_on_fire_smoke_only,
+)
 from deltasg_expert import (
     DEFAULT_MAX_MANIPULATION_HEIGHT,
     DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
@@ -66,6 +73,8 @@ from deltasg_expert import (
     PLACE_ACCESS_HOVER_CLEARANCE,
     PLACE_ACCESS_MAX_CANDIDATES,
     PLACE_ACCESS_REACH_MARGIN,
+    PLACE_NATIVE_MAX_ATTEMPTS,
+    PLACE_NATIVE_MAX_WALL_SECONDS,
     PLACE_SAMPLING_SURFACE_RAY_OFFSET_FRACTION,
     PLACE_SAMPLING_SURFACE_XY_MARGIN,
     PLACE_SAMPLING_SURFACE_Z_EPSILON,
@@ -355,6 +364,9 @@ def _connected_observation_pose(
     # robot-facing side while retaining the requested manipulation stand-off.
     candidate_scores = th.abs(distances - preferred_pixels) + preferred_pixels * (1.0 - alignment)
     target_rooms = set(getattr(obj, "in_rooms", None) or [])
+    enforce_target_room_visibility = str(getattr(obj, "name", "")).startswith(
+        "online_env_"
+    )
     candidate_xy = None
     target_lower, target_upper = obj.aabb
     target_lower = np.asarray(target_lower.cpu(), dtype=float)
@@ -363,6 +375,7 @@ def _connected_observation_pose(
     target_top_center = target_center.copy()
     target_top_center[2] = target_upper[2]
     target_path = str(getattr(obj, "prim_path", ""))
+    robot_path = str(getattr(robot, "prim_path", ""))
     relative_camera = (
         _camera_relative_to_robot(robot)
         if str(getattr(obj, "name", "")).startswith("online_env_")
@@ -374,6 +387,8 @@ def _connected_observation_pose(
     framing_fallbacks = []
     valid_candidates_seen = 0
     rejected = {
+        "target_room": 0,
+        "room_boundary": 0,
         "native_occupancy": 0,
         "line_of_sight": 0,
         "projection": 0,
@@ -414,6 +429,21 @@ def _connected_observation_pose(
     # points across a wall, behind a support, or in another occluded room.
     for candidate_index in th.argsort(candidate_scores).cpu().tolist():
         xy = trav_map.map_to_world(pixels[candidate_index])
+        candidate_room = env.scene.seg_map.get_room_instance_by_point(xy[:2])
+        if enforce_target_room_visibility and target_rooms and candidate_room not in target_rooms:
+            rejected["target_room"] += 1
+            continue
+        if enforce_target_room_visibility and target_rooms:
+            crosses_room_boundary = any(
+                env.scene.seg_map.get_room_instance_by_point(
+                    (1.0 - alpha) * xy[:2] + alpha * target_position[:2]
+                )
+                not in target_rooms
+                for alpha in np.linspace(0.05, 0.95, 19)
+            )
+            if crosses_room_boundary:
+                rejected["room_boundary"] += 1
+                continue
         nearest_target_xy = np.minimum(
             np.maximum(np.asarray(xy[:2].cpu(), dtype=float), target_lower[:2]),
             target_upper[:2],
@@ -447,7 +477,7 @@ def _connected_observation_pose(
             blocked = bool(
                 ray.get("hit")
                 and target_path not in hit_path
-                and hit_distance > 0.35
+                and (not robot_path or robot_path not in hit_path)
                 and hit_distance < distance - 0.03
             )
             if not blocked:
@@ -539,18 +569,28 @@ def _connected_observation_pose(
     return th.tensor([candidate_xy[0], candidate_xy[1], candidate_yaw], dtype=th.float32)
 
 
-def _target_framing_distance(obj, minimum=1.25):
+def _target_framing_distance(obj, robot=None, minimum=1.25):
     """Choose a stand-off that can frame large manipulation supports."""
     try:
         lower, upper = obj.aabb
         size = upper - lower
         xy_diagonal = float(th.linalg.norm(size[:2]))
-        if obj.name.startswith("online_env_"):
+        tiago = str(getattr(robot, "model", "")).casefold() == "tiago"
+        if obj.name.startswith("online_env_") and tiago:
+            # Tiago can aim its head, so portable targets should stay near the
+            # centre of its manipulation envelope instead of the far boundary.
+            minimum = 0.85
+        elif obj.name.startswith("online_env_"):
             minimum = max(minimum, 1.75)
         # Fetch's fixed primary-camera stream cannot be re-aimed after its
         # instance annotator is attached in Isaac Sim 5.1. Stand farther from
         # small ground-level targets so they remain inside the default view.
-        if obj.name.startswith("online_env_") and float(upper[2]) < 0.5 and float(size[2]) < 0.4:
+        if (
+            obj.name.startswith("online_env_")
+            and not tiago
+            and float(upper[2]) < 0.5
+            and float(size[2]) < 0.4
+        ):
             minimum = max(minimum, 2.25)
     except Exception:
         return minimum
@@ -901,6 +941,42 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         if False:
             yield None
 
+    def _open_or_close(self, obj, should_open):
+        """Symbolic open/close with a deterministic OPEN and CLOSE.
+
+        Mirrors OmniGibson's SymbolicSemanticActionPrimitives._open_or_close,
+        except both directions drive the joint to the hard end (``fully=True``).
+        The default ``set_value(...)`` samples a random position in the 5%
+        band next to the target end; for horizontal-hinge doors (e.g. fridge
+        dszchb, axis=X) a sample near the OPEN side drifts back closed while a
+        sample near the CLOSED side drifts back open within ~20 sim steps, so
+        the post-settle assertion would spuriously fail. Driving to the hard
+        closed end (0) or hard open end (upper limit) is stable in both
+        directions. This matches the generator's own deterministic transitions.
+        """
+        if self._get_obj_in_hand():
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "Cannot open or close an object while holding an object",
+                {"object in hand": self._get_obj_in_hand().name},
+            )
+        if object_states.Open not in obj.states:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                "The target object is not openable.",
+                {"target object": obj.name},
+            )
+        if should_open == obj.states[object_states.Open].get_value():
+            return
+        obj.states[object_states.Open].set_value(should_open, fully=True)
+        yield from self._settle_robot()
+        if obj.states[object_states.Open].get_value() != should_open:
+            raise ActionPrimitiveError(
+                ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                "The object did not open or close as expected. Maybe try again",
+                {"target object": obj.name, "is it currently open": obj.states[object_states.Open].get_value()},
+            )
+
     def _place_with_predicate(self, obj, predicate, near_poses=None, near_poses_threshold=None):
         """Apply the official symbolic relation before clearing inventory."""
         held = self._get_obj_in_hand()
@@ -916,11 +992,19 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 f"Held object does not expose {predicate.__name__}",
                 {"held object": held.name, "target object": obj.name},
             )
-        # The upstream OnTop setter nests 10 high-level attempts around 10
-        # low-level physics samples. On an infeasible support that can spend
-        # several minutes retrying the same relation and destabilize PhysX.
-        # Keep the official setter and predicate verification, but bound the
-        # oracle validation path; generation has already vetted the support.
+        # Unified wall-bounded official placement. Both native and generated
+        # supports use OmniGibson's official OnTop/Inside setter, which runs its
+        # own kinematic sample + settle + state verification. The previous
+        # native-support branch instead looped 40x around the cuboid sampler
+        # and, on every in-envelope candidate, dumped/settled/reloaded the scene
+        # while the held object was in half-grasped inventory state; that
+        # emitted repeated `Illegal BroadPhaseUpdateData` and stalled the
+        # persistent scene on deliver_medicine (~7 minutes, no result). The
+        # setter's high/low-level sampling attempts are clamped here so a single
+        # set_value call cannot spend minutes, and a wall-clock deadline plus a
+        # bounded retry count make a failed support reject this sample instead
+        # of hanging the process. The official predicate and the strict 1.15 m
+        # AABB-edge distance gate remain the only acceptance for the final state.
         from omnigibson.utils.object_state_utils import m as object_state_macros
 
         old_high = object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS
@@ -928,11 +1012,16 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         changed = False
         reached = False
         placed_object_distance = math.inf
+        deadline = time.monotonic() + PLACE_NATIVE_MAX_WALL_SECONDS
+        attempts_tried = 0
         try:
             with object_state_macros.unlocked():
                 object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2
                 object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2
-            for _ in range(4):
+            for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):
+                if time.monotonic() > deadline:
+                    break
+                attempts_tried += 1
                 self._set_inventory_collisions(True)
                 self._set_inventory_gravity(True)
                 changed = bool(state.set_value(obj, True))
@@ -958,7 +1047,7 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         ):
             raise ActionPrimitiveError(
                 ActionPrimitiveError.Reason.EXECUTION_ERROR,
-                "Official symbolic relation setter did not reach the requested state",
+                "Official symbolic relation setter did not reach the requested state inside the operation envelope",
                 {
                     "held object": held.name,
                     "target object": obj.name,
@@ -966,6 +1055,8 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                     "state_set_succeeded": changed,
                     "state_reached": reached,
                     "placed_object_horizontal_distance": placed_object_distance,
+                    "attempts_tried": attempts_tried,
+                    "wall_deadline_seconds": PLACE_NATIVE_MAX_WALL_SECONDS,
                     "max_placed_object_horizontal_distance": (
                         DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
                     ),
@@ -981,7 +1072,12 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         if obj.name.startswith("online_env_") and self._get_obj_in_hand() is not obj:
             position, orientation = obj.get_position_orientation()
             restore_target_pose = (position.clone(), orientation.clone())
-        saved_xy = getattr(self, "_deltasg_saved_robot_approaches", {}).get(obj.name)
+        saved_xy = None
+        if (
+            not obj.name.startswith("online_env_")
+            and int(getattr(self, "_deltasg_navigation_fallback_rank", 0)) == 0
+        ):
+            saved_xy = getattr(self, "_deltasg_saved_robot_approaches", {}).get(obj.name)
         if saved_xy is not None:
             lower, upper = obj.aabb
             saved_xy_array = np.asarray(saved_xy, dtype=float)
@@ -989,27 +1085,37 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 np.maximum(saved_xy_array, np.asarray(lower[:2].cpu(), dtype=float)),
                 np.asarray(upper[:2].cpu(), dtype=float),
             )
+            candidate_room = self.env.scene.seg_map.get_room_instance_by_point(saved_xy_array)
+            target_rooms = set(getattr(obj, "in_rooms", None) or [])
             if (
                 float(np.linalg.norm(saved_xy_array - nearest_xy))
                 > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                or (target_rooms and candidate_room not in target_rooms)
             ):
                 saved_xy = None
         if saved_xy is not None:
             target_position, _ = obj.get_position_orientation()
-            yaw = math.atan2(
-                float(target_position[1]) - float(saved_xy[1]),
-                float(target_position[0]) - float(saved_xy[0]),
-            )
             candidate_pose = th.tensor(
-                [float(saved_xy[0]), float(saved_xy[1]), yaw], dtype=th.float32
+                [
+                    float(saved_xy[0]),
+                    float(saved_xy[1]),
+                    math.atan2(
+                        float(target_position[1]) - float(saved_xy[1]),
+                        float(target_position[0]) - float(saved_xy[0]),
+                    ),
+                ],
+                dtype=th.float32,
             )
             route = [candidate_pose]
         else:
+            # Generated task objects must be revalidated against the live map
+            # and official post-navigation segmentation on every replay.
             candidate_pose = _connected_observation_pose(
                 self.env,
                 self.robot,
                 obj,
-                preferred_distance=_target_framing_distance(obj),
+                preferred_distance=_target_framing_distance(obj, robot=self.robot),
+                fallback_rank=int(getattr(self, "_deltasg_navigation_fallback_rank", 0)),
                 max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
             )
             route = _connected_navigation_waypoints(
@@ -2909,6 +3015,17 @@ def _semantic_from_instance(obs, info, instance_categories):
     return semantic, labels
 
 
+def _segmentation_preview(array):
+    """Colorize integer labels without changing the raw training mask."""
+    labels = np.asarray(array, dtype=np.uint64)
+    preview = np.zeros((*labels.shape, 3), dtype=np.uint8)
+    non_background = labels != 0
+    preview[..., 0] = np.where(non_background, 64 + (labels * 37) % 192, 0)
+    preview[..., 1] = np.where(non_background, 64 + (labels * 67) % 192, 0)
+    preview[..., 2] = np.where(non_background, 64 + (labels * 97) % 192, 0)
+    return preview
+
+
 def _save_camera_sample(obs, info, directory, target_ids, min_pixels, instance_categories):
     directory.mkdir(parents=True, exist_ok=True)
     paths = {}
@@ -2934,7 +3051,7 @@ def _save_camera_sample(obs, info, directory, target_ids, min_pixels, instance_c
         paths[modality] = str(npy_path)
         if array.ndim == 2 and array.size and np.issubdtype(array.dtype, np.integer):
             png_path = directory / f"{modality}.png"
-            Image.fromarray(array.astype(np.uint16), mode="I;16").save(png_path)
+            Image.fromarray(_segmentation_preview(array), mode="RGB").save(png_path)
             paths[f"{modality}_preview"] = str(png_path)
     return {
         "paths": paths,
@@ -2964,47 +3081,11 @@ def _primary_robot_camera(robot):
     return selected
 
 
-def _restore_primary_camera_pose(sensor):
-    # SIGSEGV hardening (Ihlen_1 8cf022fc134d / Merom_0 8c1fd6ae00c0, 5 native
-    # crashes in omni.syntheticdata _post_process_graph_tick): tick the render
-    # graph once in the CURRENT camera state before the prim transform so the
-    # post-process graph drains pending work before it is invalidated.
-    og.sim.render()
-    local_pose = getattr(sensor, "_deltasg_primary_local_pose", None)
-    if local_pose is not None:
-        sensor.set_position_orientation(
-            position=local_pose[0], orientation=local_pose[1], frame="parent"
-        )
-
-
-def _quat_multiply_xyzw(left, right):
-    lx, ly, lz, lw = (float(value) for value in left)
-    rx, ry, rz, rw = (float(value) for value in right)
-    return np.asarray(
-        [
-            lw * rx + lx * rw + ly * rz - lz * ry,
-            lw * ry - lx * rz + ly * rw + lz * rx,
-            lw * rz + lx * ry - ly * rx + lz * rw,
-            lw * rw - lx * rx - ly * ry - lz * rz,
-        ],
-        dtype=np.float32,
-    )
-
-
 def _capture_robot(
     robot, sensor, directory, target_ids, min_pixels, instance_categories, focus_object=None
 ):
-    _restore_primary_camera_pose(sensor)
-    if focus_object is not None:
-        camera_position, camera_orientation = sensor.get_position_orientation()
-        lower, upper = focus_object.aabb
-        if float(th.linalg.norm((upper - lower)[:2])) >= 1.0:
-            pitch = math.radians(15.0)
-            local_pitch = [math.sin(pitch / 2.0), 0.0, 0.0, math.cos(pitch / 2.0)]
-            sensor.set_position_orientation(
-                position=camera_position,
-                orientation=_quat_multiply_xyzw(camera_orientation, local_pitch),
-            )
+    # Keep the primary sensor rigidly attached to Tiago. Target framing is done
+    # exclusively through the robot's official pan/tilt joints.
     camera_obs, camera_info = sensor.get_obs()
     result = _save_camera_sample(
         camera_obs, camera_info, directory, target_ids, min_pixels, instance_categories
@@ -3156,6 +3237,7 @@ def _capture_event_unprotected(
             "orientation_xyzw": _jsonable(robot_orientation),
             "camera_joint_positions": _jsonable(camera_joint_positions),
         },
+        "robot_stability": validate_robot_stability(env),
     }
 
 
@@ -3291,6 +3373,36 @@ def _set_robot_pose(robot, pose, env=None, diag_env=None):
         )
         if max_native_move < 0.005:
             break
+    camera_joint_positions = pose.get("camera_joint_positions") or []
+    if len(camera_joint_positions) == len(robot.camera_control_idx):
+        robot.set_joint_positions(
+            th.tensor(camera_joint_positions, dtype=th.float32),
+            indices=robot.camera_control_idx,
+            drive=False,
+        )
+
+
+def _saved_robot_pose_stability(pose, max_tilt=0.15):
+    position = pose.get("position") or []
+    orientation = pose.get("orientation_xyzw") or []
+    if len(position) != 3 or len(orientation) != 4:
+        return {"ok": False, "reason": "saved_robot_pose_incomplete"}
+    values = [float(value) for value in position + orientation]
+    if not all(math.isfinite(value) for value in values):
+        return {"ok": False, "reason": "saved_robot_pose_nonfinite"}
+    qx, qy, qz, qw = values[3:]
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 1e-6:
+        return {"ok": False, "reason": "saved_robot_orientation_invalid"}
+    tilt = math.sqrt((qx / norm) ** 2 + (qy / norm) ** 2)
+    return {
+        "ok": tilt <= max_tilt,
+        "reason": None if tilt <= max_tilt else "saved_robot_pose_not_upright",
+        "tilt": tilt,
+        "max_tilt": max_tilt,
+        "position": values[:3],
+        "orientation_xyzw": values[3:],
+    }
 
 
 def _warm_natives_to_rest(env):
@@ -3642,6 +3754,24 @@ def _spawn_added_objects(env, run):
     return spawned
 
 
+def _hold_symbolic_grasp_targets(env, grasp_target_ids):
+    """Keep generated portable targets at their validated pose until GRASP."""
+    objects = _scene_objects(env)
+    held = []
+    for object_id in grasp_target_ids:
+        obj = objects.get(object_id)
+        if obj is None:
+            continue
+        obj.disable_gravity()
+        for link in obj.links.values():
+            link.disable_collisions()
+        obj.keep_still()
+        held.append(object_id)
+    if held:
+        print(f"[expert] holding symbolic grasp targets={sorted(held)}", flush=True)
+    return held
+
+
 def _apply_saved_initial_states(env, run):
     """Replay task setup states before executing the saved expert plan."""
     state_types = {
@@ -3651,6 +3781,7 @@ def _apply_saved_initial_states(env, run):
     }
     objects = _scene_objects(env)
     applied = []
+    smoke_effect_count = 0
     te = run.get("task_environment") or {}
     for record in te.get("state_changed_objects") or []:
         object_id = _name(record)
@@ -3664,14 +3795,41 @@ def _apply_saved_initial_states(env, run):
             if state_cls not in obj.states:
                 raise RuntimeError(f"{object_id!r} does not expose state {state_key!r}")
             current = bool(obj.states[state_cls].get_value())
-            if current != bool(desired) and not bool(obj.states[state_cls].set_value(bool(desired))):
-                raise RuntimeError(
-                    f"failed to replay state {state_key}={bool(desired)} for {object_id!r}"
-                )
+            if current != bool(desired):
+                # #25: mirror the generator's deterministic transitions (fully=True
+                # in BOTH directions) so the replayed initial state for
+                # open_fridge / close_cabinet / close_fridge stays put instead of
+                # drifting across the 5% threshold on the same random-sampling bug
+                # that made an Open door read the wrong value after settle.
+                if state_cls is object_states.Open:
+                    applied_ok = bool(obj.states[state_cls].set_value(bool(desired), fully=True))
+                else:
+                    applied_ok = bool(obj.states[state_cls].set_value(bool(desired)))
+                if not applied_ok:
+                    raise RuntimeError(
+                        f"failed to replay state {state_key}={bool(desired)} for {object_id!r}"
+                    )
             applied.append({"object_id": object_id, "state": state_key, "value": bool(desired)})
+        visual_effect = record.get("visual_effect") or {}
+        if visual_effect.get("mode") == SMOKE_ONLY_ON_FIRE_MODE:
+            configured = configure_on_fire_smoke_only(obj)
+            if not configured.get("ok"):
+                raise RuntimeError(
+                    f"failed to replay smoke-only OnFire effect for {object_id!r}: {configured}"
+                )
+            smoke_effect_count += 1
     if applied:
-        for _ in range(5):
+        settle_steps = SMOKE_FLOW_WARMUP_STEPS if smoke_effect_count else 5
+        for _ in range(settle_steps):
             og.sim.step()
+        if smoke_effect_count:
+            for _ in range(SMOKE_FLOW_RENDER_WARMUP_FRAMES):
+                og.sim.render()
+            print(
+                f"[expert] warmed official smoke-only Flow effects="
+                f"{smoke_effect_count} steps={settle_steps} "
+                f"render_frames={SMOKE_FLOW_RENDER_WARMUP_FRAMES}"
+            )
     return applied
 
 
@@ -4405,12 +4563,9 @@ def _aim_tiago_head(robot, obj):
             indices=robot.camera_control_idx,
             drive=False,
         )
-        # SIGSEGV hardening (Ihlen_1 8cf022fc134d / Merom_0 8c1fd6ae00c0): the
-        # head joints carry the robot-primary camera prim, so this set changes its
-        # transform. Drain the syntheticdata post-process graph with a few
-        # render-only ticks before the next real render burst.
-        for _ in range(3):
-            og.sim.render()
+        # The next official capture performs the render. Rendering here after
+        # changing the camera-bearing head joints can crash SyntheticData while
+        # it rebuilds the post-process graph.
         return {
             "aimed": True,
             "requested_pan_tilt": list(requested),
@@ -4557,12 +4712,19 @@ def _check_postcondition(primitive, target, carried, controller):
         value = primitive == "TOGGLE_ON"
         actual = bool(target.states[object_states.ToggledOn].get_value()) if object_states.ToggledOn in target.states else None
         return actual == value, {"state": "ToggledOn", "expected": value, "actual": actual}
+    if primitive == "EXTINGUISH":
+        actual = (
+            bool(target.states[object_states.OnFire].get_value())
+            if object_states.OnFire in target.states
+            else None
+        )
+        return actual is False, {"state": "OnFire", "expected": False, "actual": actual}
     return True, {}
 
 
 def execute(run, input_path, output_dir, args, env=None, persistent=False):
     plan = compile_expert_plan(run)
-    if plan.task_family not in {"retrieval_delivery", "open_close", "appliance"}:
+    if plan.task_family not in {"retrieval_delivery", "open_close", "appliance", "fire"}:
         raise ExpertPlanError(f"expert v1 does not execute task family {plan.task_family!r}")
     te = run.get("task_environment") or {}
     generation_profile = (te.get("generation") or {}).get("solvability_profile")
@@ -4572,6 +4734,9 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             f"expert backend {args.backend!r}"
         )
     generation_profile_verified = generation_profile == args.backend
+    symbolic_grasp_targets = {
+        step.target_object for step in plan.steps if step.primitive == "GRASP"
+    }
     scene = (te.get("base_scene") or {}).get("scene_model")
     if not scene:
         raise ExpertPlanError("base scene model is missing")
@@ -4590,6 +4755,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         flush=True,
     )
     robot_pose = te.get("robot", {}).get("pose") or run.get("robot", {}).get("pose") or {}
+    saved_robot_stability = _saved_robot_pose_stability(robot_pose)
+    if not saved_robot_stability["ok"]:
+        raise ExpertPlanError(
+            f"saved robot pose is not a stable upright pose: {saved_robot_stability}"
+        )
     # Preload generated delta objects during initial environment construction
     # for both backends so kinematic task supports are anchored before the
     # physics/contact views initialize (dynamic spawning fell through floors).
@@ -4616,6 +4786,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             print("[expert-persistent] delta objects loaded", flush=True)
         else:
             configure_preloaded_delta_objects(env, run, preloaded_names)
+    if args.backend == "oracle_symbolic":
+        _hold_symbolic_grasp_targets(env, symbolic_grasp_targets)
     _sink_diag_trace(env, "post_load")
     if args.backend == "oracle_symbolic":
         _set_robot_pose(env.robots[0], robot_pose, env=env, diag_env=env)
@@ -4638,16 +4810,29 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     )
     initial_states = _apply_saved_initial_states(env, run)
     print("[expert] delta objects replayed", flush=True)
-    accepted = replay_integrity["ok"]
-    rejection = None
+    initial_robot_stability = validate_robot_stability(env)
+    accepted = replay_integrity["ok"] and initial_robot_stability["ok"]
+    rejection = (
+        None
+        if accepted
+        else {
+            "stage": (
+                "delta_replay_integrity"
+                if not replay_integrity["ok"]
+                else "initial_robot_stability"
+            ),
+            "detail": (
+                replay_integrity if not replay_integrity["ok"] else initial_robot_stability
+            ),
+        }
+    )
     camera_streams = None
     if not accepted:
         # Reject before initializing segmentation streams; otherwise each bad
         # sample wastes a render setup and produces misleading images.
-        rejection = {"stage": "delta_replay_integrity", "detail": replay_integrity}
         print(
-            "[expert] delta replay integrity failed; skipping camera init and plan: "
-            f"{json.dumps(replay_integrity['objects'], ensure_ascii=False)}",
+            "[expert] initial replay or robot stability failed; skipping camera init and plan: "
+            f"{json.dumps(rejection, ensure_ascii=False)}",
             flush=True,
         )
     else:
@@ -4693,10 +4878,22 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     reference_scene_bboxes = _capture_reference_scene_bboxes(
         env, support_surface_ids=support_surface_ids
     )
+    intentionally_moved_delta_ids = {
+        object_id
+        for step in plan.steps
+        for object_id in (step.carried_object,)
+        if object_id
+    }
+    intentionally_moved_delta_ids.update(
+        step.target_object
+        for step in plan.steps
+        if step.primitive == "GRASP" and step.target_object
+    )
     stationary_delta_ids = {
         _name(record)
         for record in ((run.get("task_environment") or {}).get("added_objects") or [])
         if "task_object" not in set(record.get("semantic_roles") or [])
+        and _name(record) not in intentionally_moved_delta_ids
     }
     stationary_delta_baseline = {
         object_id: _integrity_pose_record(objects[object_id])
@@ -4734,7 +4931,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         # Replicator to render the same state twice; repeated back-to-back
         # segmentation renders are unstable in Isaac Sim 5.1.
         if last_post is None:
-            if target is not None:
+            # Before NAVIGATE_TO the target may intentionally be visible only
+            # from a global camera. Aim the robot head only for a fine operation;
+            # navigation itself moves and faces the robot before its post frame.
+            if target is not None and step.primitive in MANIPULATION_PRIMITIVES:
                 _aim_tiago_head(env.robots[0], target)
             pre = _capture_event(
                 env, run, output_dir, f"step_{step.step_id:03d}_pre", target_ids,
@@ -4788,7 +4988,9 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 physical_controller_key = controller_key
         recovery = None
         recovery_action_rows = []
-        if step.primitive in MANIPULATION_PRIMITIVES and visibility_errors and target is not None:
+        if (
+            step.primitive in MANIPULATION_PRIMITIVES or step.primitive == "NAVIGATE_TO"
+        ) and visibility_errors and target is not None:
             recovery_trigger = (
                 "post_navigation_target_not_visible"
                 if step_index > 0 and plan.steps[step_index - 1].primitive == "NAVIGATE_TO"
@@ -4871,6 +5073,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             "manipulation_height": height_gate,
             "recovery": recovery,
             "actions_executed": len(recovery_action_rows),
+            "robot_stability": pre.get("robot_stability"),
         }
         manipulation_approach = None
         if step.primitive in MANIPULATION_PRIMITIVES and target is not None:
@@ -4882,6 +5085,15 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 "eligible": approach_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
             }
             record["manipulation_approach"] = manipulation_approach
+        if not (pre.get("robot_stability") or {}).get("ok", False):
+            accepted = False
+            rejection = {
+                "step_id": step.step_id,
+                "stage": "robot_stability",
+                "detail": pre.get("robot_stability"),
+            }
+            records.append(record)
+            break
         if height_gate is not None and not height_gate["eligible"]:
             accepted = False
             rejection = {
@@ -4958,7 +5170,39 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         "Assisted state transition did not reach the requested state",
                         interaction,
                     )
+            elif step.primitive == "EXTINGUISH":
+                state = target.states.get(object_states.OnFire) if target is not None else None
+                if state is None:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "Target has no OnFire state",
+                        {"target object": getattr(target, "name", None)},
+                    )
+                changed = bool(state.set_value(False))
+                actual_value = bool(state.get_value())
+                interaction = {
+                    "step_id": step.step_id,
+                    "primitive": step.primitive,
+                    "target_object": target.name,
+                    "requested_value": False,
+                    "actual_value": actual_value,
+                    "state_set_succeeded": changed,
+                    "mode": "omnigibson_official_on_fire_transition",
+                }
+                record["assisted_interaction"] = interaction
+                assisted_interactions.append(interaction)
+                if not changed or actual_value:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                        "Official OnFire transition did not extinguish the target",
+                        interaction,
+                    )
             else:
+                if args.backend == "oracle_symbolic" and step.primitive == "GRASP":
+                    for link in target.links.values():
+                        link.enable_collisions()
+                    target.enable_gravity()
+                    target.keep_still()
                 for action in controller.apply_ref(primitive_map[step.primitive], target, attempts=args.primitive_attempts):
                     _step_control_without_observation(env, action)
                     action_rows.append(_to_numpy(action))
@@ -5046,7 +5290,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             record["post_observation"] = post["event_id"]
             record["post_head_aim"] = post_head_aim
             post_visibility_step = None
-            if step.primitive in MANIPULATION_PRIMITIVES:
+            # A successfully grasped object is now in inventory. Per the
+            # dataset visibility contract, inventory objects are not required
+            # to remain framed in the post-grasp camera observation.
+            if step.primitive in MANIPULATION_PRIMITIVES and step.primitive != "GRASP":
                 post_visibility_step = step
             elif step.primitive == "NAVIGATE_TO" and step_index + 1 < len(plan.steps):
                 next_step = plan.steps[step_index + 1]
@@ -5066,7 +5313,61 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 if post_visibility_step is not None
                 else []
             )
+            navigation_visibility_recovery = []
+            if (
+                args.backend == "oracle_symbolic"
+                and step.primitive == "NAVIGATE_TO"
+                and target is not None
+                and post_visibility_errors
+            ):
+                for fallback_rank in (1, 2):
+                    controller._deltasg_navigation_fallback_rank = fallback_rank
+                    try:
+                        for _ in controller.apply_ref(
+                            primitive_map["NAVIGATE_TO"], target, attempts=1
+                        ):
+                            pass
+                        head_aim = _aim_tiago_head(env.robots[0], target)
+                        recovered_post = _capture_event(
+                            env,
+                            run,
+                            output_dir,
+                            f"step_{step.step_id:03d}_post_nav_retry_{fallback_rank}",
+                            target_ids,
+                            args.min_bbox_pixels,
+                            step.target_object,
+                            camera_streams,
+                        )
+                        events.append(recovered_post)
+                        retry_errors = validate_visibility_snapshot(
+                            post_visibility_step,
+                            recovered_post["robot_visible"],
+                            recovered_post["global_visible"],
+                            recovered_post["robot_primary"]["bboxes"],
+                            args.min_bbox_pixels,
+                        )
+                        navigation_visibility_recovery.append(
+                            {
+                                "fallback_rank": fallback_rank,
+                                "head_aim": head_aim,
+                                "observation": recovered_post["event_id"],
+                                "errors": retry_errors,
+                            }
+                        )
+                        post = recovered_post
+                        last_post = recovered_post
+                        post_visibility_errors = retry_errors
+                        if not retry_errors:
+                            break
+                    except Exception as exc:
+                        navigation_visibility_recovery.append(
+                            {"fallback_rank": fallback_rank, "error": repr(exc)}
+                        )
+                controller._deltasg_navigation_fallback_rank = 0
+            record["navigation_visibility_recovery"] = navigation_visibility_recovery
+            record["post_observation"] = post["event_id"]
             record["post_visibility_errors"] = post_visibility_errors
+            record["post_robot_stability"] = post.get("robot_stability")
             _nav_diag_checkpoint(env, env.robots[0], f"step{step.step_id}_post_capture:{step.primitive}")
             # Capturing the official RGB / segmentation observation advances
             # simulation. A symbolic relation can be true immediately after
@@ -5131,7 +5432,14 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 env, baseline, stationary_delta_baseline, args.max_native_displacement
             )
             record["scene_integrity"] = step_integrity
-            if post_visibility_errors:
+            if not (post.get("robot_stability") or {}).get("ok", False):
+                accepted = False
+                rejection = {
+                    "step_id": step.step_id,
+                    "stage": "post_robot_stability",
+                    "detail": post.get("robot_stability"),
+                }
+            elif post_visibility_errors:
                 accepted = False
                 rejection = {
                     "step_id": step.step_id,
@@ -5182,6 +5490,13 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     integrity = _combined_scene_integrity(
         env, baseline, stationary_delta_baseline, args.max_native_displacement
     )
+    final_robot_stability = validate_robot_stability(env)
+    if not final_robot_stability["ok"]:
+        accepted = False
+        rejection = rejection or {
+            "stage": "final_robot_stability",
+            "detail": final_robot_stability,
+        }
     if not integrity["ok"]:
         accepted = False
         rejection = rejection or {"stage": "scene_integrity", "detail": integrity}
@@ -5274,6 +5589,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         "steps": records,
         "observation_events": events,
         "scene_integrity": integrity,
+        "robot_stability": {
+            "saved": saved_robot_stability,
+            "initial": initial_robot_stability,
+            "final": final_robot_stability,
+        },
         "physical_diagnostics": {
             "skipped_singular_collision_meshes": skipped_collision_meshes,
             "approach_candidates": approach_diagnostics,

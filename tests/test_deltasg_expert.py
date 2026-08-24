@@ -25,6 +25,7 @@ from deltasg_expert import (  # noqa: E402
     PLACE_SUPPORT_REFERENCE_XY_RADIUS,
     SUPPORTED_APPLIANCE_TASKS,
     SUPPORTED_ENV_A_TASKS,
+    SUPPORTED_FIRE_TASKS,
     SUPPORTED_OPEN_CLOSE_TASKS,
     SUPPORTED_RETRIEVAL_DELIVERY_TASKS,
     compile_expert_plan,
@@ -96,6 +97,34 @@ def test_repairs_retrieval_interact_to_grasp():
     assert compiled.steps[0].target_object == "book_0"
     assert compiled.steps[-1].inventory_after == ("book_0",)
     assert "repaired ambiguous INTERACT to GRASP" in compiled.warnings[0]
+
+
+@pytest.mark.parametrize("task_name", sorted(SUPPORTED_FIRE_TASKS))
+def test_fire_tasks_compile_to_official_extinguish_state_transition(task_name):
+    run = sample(
+        task_name,
+        [
+            {"primitive": "MOVE", "target_object": "extinguisher_0"},
+            {"primitive": "PICK", "target_object": "extinguisher_0"},
+            {"primitive": "MOVE", "target_object": "carpet_0"},
+            {
+                "primitive": "INTERACT",
+                "target_object": "carpet_0",
+                "nl": "Suppress the smoking ignition source",
+            },
+        ],
+        [
+            {"object_id": "extinguisher_0", "category": "fire_extinguisher"},
+            {"object_id": "carpet_0", "category": "carpet", "reference_only": True},
+        ],
+    )
+    compiled = compile_expert_plan(run)
+    assert compiled.task_family == "fire"
+    assert compiled.steps[-1].primitive == "EXTINGUISH"
+    assert compiled.steps[-1].target_object == "carpet_0"
+    assert compiled.steps[-1].expected == {
+        "state": "OnFire", "object": "carpet_0", "value": False,
+    }
 
 
 def test_compiles_delivery_inventory_and_inside_relation():
@@ -790,6 +819,17 @@ def test_symbolic_inventory_follows_navigation_without_claiming_physical_grasp()
     assert "controller._sync_inventory_to_eef()" not in execute
 
 
+def test_scene_integrity_does_not_treat_inventory_motion_as_fixture_drift():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    execute = source[source.index("def execute("):source.index("def main()")]
+
+    assert "intentionally_moved_delta_ids" in execute
+    assert 'if step.primitive == "GRASP" and step.target_object' in execute
+    assert "and _name(record) not in intentionally_moved_delta_ids" in execute
+
+
 def test_symbolic_navigation_and_placement_stay_in_manipulation_range():
     source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
         encoding="utf-8"
@@ -808,7 +848,8 @@ def test_symbolic_navigation_and_placement_stay_in_manipulation_range():
         source.index("class DeltaSGPhysicalPrimitives")
     ]
     assert "saved_xy = None" in oracle
-    assert "for _ in range(4):" in oracle
+    assert "for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):" in oracle
+    assert "time.monotonic() > deadline" in oracle
     assert "placed_object_distance = _horizontal_target_aabb_distance(" in oracle
     assert "placed_object_distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in oracle
 

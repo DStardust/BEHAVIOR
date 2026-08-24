@@ -20,6 +20,7 @@ SUPPORTED_EXPERT_PRIMITIVES = {
     "CLOSE",
     "TOGGLE_ON",
     "TOGGLE_OFF",
+    "EXTINGUISH",
     "WAIT",
 }
 MANIPULATION_PRIMITIVES = {
@@ -154,6 +155,19 @@ PLACE_RELEASE_CONTACT_CLEARANCE = 0.005
 PLACE_SUPPORT_REFERENCE_SURFACE_TOLERANCE = 0.015
 PLACE_SUPPORT_REFERENCE_XY_RADIUS = 0.15
 PLACE_SUPPORT_REFERENCE_TOP_EPSILON = 0.005
+# Fix W (2026-08-18): the native-support placement path nested an outer
+# 40-attempt loop around the official cuboid sampler and, on every in-envelope
+# candidate, dumped/settled/reloaded the physics scene while the held object
+# was in half-grasped inventory state. deliver_medicine (bottle ->
+# breakfast_table_skczfi_2) burned ~7 minutes in that loop emitting repeated
+# `Illegal BroadPhaseUpdateData` and produced no expert_result.json. Unify
+# native and generated supports on the bounded official OnTop/Inside setter:
+# a wall-clock deadline plus a small retry count bound every sample, so a
+# failed support rejects one sample instead of stalling the persistent scene.
+# These are ceilings, not success criteria: the 1.15 m AABB-edge distance gate
+# and the official predicate stay unchanged and never relax.
+PLACE_NATIVE_MAX_ATTEMPTS = 6
+PLACE_NATIVE_MAX_WALL_SECONDS = 45.0
 SUPPORTED_RETRIEVAL_DELIVERY_TASKS = frozenset({
     "retrieve_medicine", "retrieve_key", "retrieve_phone", "retrieve_book",
     "retrieve_drink", "retrieve_food", "deliver_medicine", "deliver_food",
@@ -166,6 +180,10 @@ SUPPORTED_OPEN_CLOSE_TASKS = frozenset({
 SUPPORTED_APPLIANCE_TASKS = frozenset({
     "turn_on_light", "turn_off_light", "turn_on_tv", "turn_off_tv",
     "turn_on_stove", "turn_off_stove",
+})
+SUPPORTED_FIRE_TASKS = frozenset({
+    "respond_to_smoke_warning",
+    "select_fire_suppression_tool",
 })
 SUPPORTED_ENV_A_TASKS = (
     SUPPORTED_RETRIEVAL_DELIVERY_TASKS
@@ -319,7 +337,7 @@ def infer_task_family(task_name: str) -> str:
         return "open_close"
     if task_name.startswith(("turn_on_", "turn_off_")):
         return "appliance"
-    if "fire" in task_name:
+    if task_name in SUPPORTED_FIRE_TASKS or "fire" in task_name:
         return "fire"
     return "other"
 
@@ -337,6 +355,10 @@ def _task_target(objects: dict[str, dict[str, Any]]) -> str | None:
 
 def _interaction_primitive(task_name: str, nl: str) -> str | None:
     text = f"{task_name} {nl}".lower().replace("-", "_")
+    if task_name in SUPPORTED_FIRE_TASKS or any(
+        token in text for token in ("extinguish", "suppress", "smoke warning")
+    ):
+        return "EXTINGUISH"
     if task_name.startswith("open_") or " open " in f" {text} ":
         return "OPEN"
     if task_name.startswith("close_") or " close " in f" {text} ":
@@ -376,6 +398,8 @@ def _expected(primitive: str, target: str | None, carried: str | None) -> dict[s
         return {"state": "ToggledOn", "object": target, "value": True}
     if primitive == "TOGGLE_OFF":
         return {"state": "ToggledOn", "object": target, "value": False}
+    if primitive == "EXTINGUISH":
+        return {"state": "OnFire", "object": target, "value": False}
     return {}
 
 

@@ -12,6 +12,35 @@ AUDIT = ROOT / "code" / "audit_deltasg_coverage.py"
 sys.path.insert(0, str(ROOT / "code"))
 
 from audit_deltasg_coverage import eligible_native_task_pairs
+from audit_enva_generation_coverage import audit_generation
+
+
+def test_generation_audit_only_excludes_evidenced_missing_native_categories(tmp_path):
+    generation = tmp_path / "Scene_int" / "generation"
+    generation.mkdir(parents=True)
+    artifact = {
+        "ok": True,
+        "task_environment": {
+            "base_scene": {"scene_model": "Scene_int"},
+            "task": {"primary_behavior_task": "retrieve_drink"},
+        },
+        "before_graph": {
+            "nodes": [
+                {"id": "door_0", "type": "object", "category": "door"},
+                {"id": "oven_0", "type": "object", "category": "oven"},
+            ]
+        },
+    }
+    (generation / "online_env_a_0000.json").write_text(json.dumps(artifact))
+
+    report = audit_generation(generation, 0.80)
+    rows = {row["task"]: row for row in report["tasks"]}
+    assert rows["retrieve_drink"]["status"] == "generated"
+    assert rows["open_door"]["status"] == "unresolved"
+    assert rows["open_door"]["matching_native_object_ids"] == ["door_0"]
+    assert rows["turn_on_stove"]["status"] == "unresolved"
+    assert rows["turn_on_tv"]["status"] == "structurally_ineligible"
+    assert rows["deliver_food"]["status"] == "unresolved"
 
 
 def sample(scene):

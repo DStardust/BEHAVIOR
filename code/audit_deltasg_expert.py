@@ -10,7 +10,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageStat
 
-from audit_deltasg_outputs import check_run, infer_label, iter_run_files, load_json
+from audit_deltasg_outputs import (
+    check_run,
+    infer_label,
+    iter_run_files,
+    load_json,
+    robot_pose_upright_error,
+)
 from deltasg_expert import summarize_expert_results
 
 
@@ -239,7 +245,9 @@ def main():
         native_targets = {
             step.get("target_object")
             for step in plan_steps
-            if step.get("primitive") in {"OPEN", "CLOSE", "TOGGLE_ON", "TOGGLE_OFF"}
+            if step.get("primitive") in {
+                "OPEN", "CLOSE", "TOGGLE_ON", "TOGGLE_OFF", "EXTINGUISH",
+            }
         }
         if native_targets:
             replayed_targets = {
@@ -250,6 +258,16 @@ def main():
                 errors.append("native task initial state was not replayed")
         if len(result_steps) != len(plan_steps):
             errors.append(f"step count {len(result_steps)} != compiled {len(plan_steps)}")
+        for event in item.get("observation_events") or []:
+            pose_error = robot_pose_upright_error(event.get("robot_pose"))
+            if pose_error:
+                errors.append(f"event {event.get('event_id')} {pose_error}")
+        result_robot_stability = item.get("robot_stability") or {}
+        if result_robot_stability and not all(
+            (result_robot_stability.get(stage) or {}).get("ok") is True
+            for stage in ("saved", "initial", "final")
+        ):
+            errors.append("accepted result has failed robot stability gate")
         for step in result_steps:
             if step.get("visibility_errors"):
                 errors.append(f"step {((step.get('step') or {}).get('step_id'))} visibility failed")

@@ -181,9 +181,15 @@ def test_generation_runner_supports_an_ordered_single_process_task_sequence():
     assert "current_task = task_sequence[idx] if task_sequence else args.task" in source
     assert "task=current_task" in source
     assert "engine.prepare_native_task_robot_spawn(current_task)" in source
+    assert "engine.begin_env_a_attempt()" in source
+    assert source.index("engine.begin_env_a_attempt()") < source.index(
+        "engine.prepare_native_task_robot_spawn(current_task)"
+    )
     assert "preferred_target_name=preferred_target" in source
     assert "settle_scene=False" in source
     assert "engine.bind_prepared_native_task_spawn(current_task)" in source
+    assert 'engine.reject_native_target(' in source
+    assert 'preferred_target, "robot_spawn_binding"' in source
 
 
 def test_target_conditioned_spawn_candidates_cover_an_operation_ring():
@@ -192,7 +198,8 @@ def test_target_conditioned_spawn_candidates_cover_an_operation_ring():
         source.index("if preferred_target_name:"):
         source.index("for _ in range(max_attempts * 3):")
     ]
-    assert "distance > effective_max_distance" in block
+    assert "distance > preferred_max_distance" in block
+    assert "nearest_xy = th.minimum(" in block
     assert "< 0.25" in block
     assert "len(spawn_candidates) >= max_attempts" in block
 
@@ -230,7 +237,7 @@ def test_zero_generated_samples_fail_the_process_contract():
         source.index("# A requested sample slot is successful"):
         source.index("# Final checkpoint save")
     ]
-    assert "len(runs) != args.num_envs" in finalization
+    assert "len(runs) - existing_run_count != args.num_envs" in finalization
     assert 'summary["ok"] = False' in finalization
     assert 'summary["num_generated"] = len(runs)' in finalization
 

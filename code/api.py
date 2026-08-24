@@ -29,6 +29,20 @@ class RobotSpawnError(RuntimeError):
         super().__init__(self.reason)
 
 
+# deltasg serial-accumulation fix (Benevolence_1, 2026-08-20): the 23-task
+# generation loop never resets the scene between tasks, so unanchored native
+# furniture knocked by a prior task (expert navigation, a rejected spawn, an
+# OnTop placement) stays displaced and every later task re-measures the spawn
+# baseline against an already-drifted pose. Cache the pristine post-settle
+# pose on the FIRST stabilize_robot_spawn call (the scene is freshly loaded),
+# and re-teleport drifted natives back to it on every later call so each task
+# starts from the official scene. Per-process: run_online_deltasg.py runs one
+# process per scene, so module-level state is correctly scoped.
+_OFFICIAL_NATIVE_BASELINE = None
+_OFFICIAL_NATIVE_JOINT_BASELINE = None
+_RESTORE_NATIVE_MIN_DRIFT = 0.02
+
+
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
     return path
@@ -41,6 +55,66 @@ def write_json(path: str, data):
 
 def safe_name(s: str) -> str:
     return str(s).replace(":", "_").replace("/", "_").replace(" ", "_")
+
+
+def validate_robot_stability(env, max_tilt=0.15, min_ground_gap=-0.05, max_ground_gap=0.15):
+    """Validate that the active robot is upright and supported by its current floor."""
+    robots = list(getattr(env, "robots", None) or [])
+    if not robots:
+        return {"ok": True, "applicable": False, "reason": "no_robot"}
+    robot = robots[0]
+    try:
+        position, orientation = robot.get_position_orientation()
+        aabb_min, _ = robot.aabb
+        position = [float(value) for value in position]
+        orientation = [float(value) for value in orientation]
+        aabb_min_z = float(aabb_min[2])
+        floor_heights = [float(value) for value in env.scene.trav_map.floor_heights]
+    except Exception as exc:
+        return {
+            "ok": False,
+            "applicable": True,
+            "reason": "robot_stability_geometry_unavailable",
+            "error": repr(exc),
+        }
+    if len(position) != 3 or len(orientation) != 4 or not all(
+        math.isfinite(value) for value in position + orientation + [aabb_min_z]
+    ):
+        return {
+            "ok": False,
+            "applicable": True,
+            "reason": "robot_pose_nonfinite",
+            "position": position,
+            "orientation_xyzw": orientation,
+        }
+    qx, qy, _, _ = orientation
+    tilt = math.sqrt(qx * qx + qy * qy)
+    if floor_heights:
+        below = [height for height in floor_heights if height <= aabb_min_z + 0.10]
+        floor_height = (
+            max(below)
+            if below
+            else min(floor_heights, key=lambda height: abs(height - aabb_min_z))
+        )
+    else:
+        floor_height = 0.0
+    ground_gap = aabb_min_z - floor_height
+    upright = tilt <= max_tilt
+    grounded = min_ground_gap <= ground_gap <= max_ground_gap
+    return {
+        "ok": upright and grounded,
+        "applicable": True,
+        "reason": None if upright and grounded else "robot_not_upright_or_grounded",
+        "position": position,
+        "orientation_xyzw": orientation,
+        "tilt": tilt,
+        "max_tilt": max_tilt,
+        "aabb_min_z": aabb_min_z,
+        "floor_height": floor_height,
+        "ground_gap": ground_gap,
+        "min_ground_gap": min_ground_gap,
+        "max_ground_gap": max_ground_gap,
+    }
 
 
 # =========================
@@ -355,10 +429,42 @@ def stabilize_robot_spawn(
     # Measure the upright robot root-to-ground offset before any scene settling.
     # A traversability map supplies XY topology and a nominal floor height, but
     # its Z value is not a physical support guarantee across all scene assets.
+    # deltasg #37 follow-up (Benevolence_1 serial cascade, 2026-08-19): this
+    # offset is read from the robot's INHERITED pose. After several failed
+    # deliver/retrieve spawns the robot's arms droop under gravity, so the live
+    # AABB min sinks below the wheel contact and root_to_aabb_bottom inflates
+    # (measured 0.000 -> 0.067 -> 0.325 over one 23-task run). That inflated
+    # offset is then added to every candidate's ground Z, so the robot spawns
+    # ~8 cm high and EVERY target-conditioned (kind=0) candidate trips the
+    # 0.05 m displacement gate on its settle drop (rejected pose displacement=
+    # 0.081). Reset to the canonical joint pose first so the offset reflects
+    # true wheel-contact geometry, not accumulated arm droop.
     try:
+        if not og.sim.is_playing():
+            og.sim.play()
+        robot.reset()
+        # reset() re-applies the INHERITED base pose (position + full
+        # orientation) after restoring the arm/torso joints, so it does NOT
+        # un-tilt the robot. A tilt left by a prior task keeps the AABB min
+        # below true wheel contact, and root_to_aabb_bottom reads artifically
+        # high even after reset() (diag measured 0.067 -> 0.594 across the
+        # serial run, all native tasks pinned at 0.067). Stand the robot
+        # upright (zero roll/pitch, keep yaw) before measuring so the offset
+        # reflects true upright wheel-contact geometry, not inherited tilt.
+        robot_position, robot_orientation = robot.get_position_orientation()
+        qx, qy, qz, qw = (float(v) for v in robot_orientation)
+        orig_roll = math.degrees(math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy)))
+        orig_pitch = math.degrees(math.asin(max(-1.0, min(1.0, 2.0 * (qw * qy - qz * qx)))))
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        half = yaw * 0.5
+        robot.set_position_orientation(
+            position=robot_position,
+            orientation=[0.0, 0.0, math.sin(half), math.cos(half)],
+        )
         robot_root_position, _ = robot.get_position_orientation()
         robot_aabb_min, _ = robot.aabb
         robot_ground_offset = float(robot_root_position[2] - robot_aabb_min[2])
+        _tilt_pre_deg = (orig_roll, orig_pitch)
     except Exception as exc:
         raise RobotSpawnError(
             "robot_ground_geometry_unavailable", {"error": repr(exc)}
@@ -369,7 +475,8 @@ def stabilize_robot_spawn(
             {"root_to_aabb_bottom": robot_ground_offset},
         )
     print(
-        f"[robot-spawn] measured root_to_aabb_bottom={robot_ground_offset:.3f}",
+        f"[robot-spawn] measured root_to_aabb_bottom={robot_ground_offset:.3f} "
+        f"pre_tilt_deg=(roll={_tilt_pre_deg[0]:.2f}, pitch={_tilt_pre_deg[1]:.2f})",
         flush=True,
     )
 
@@ -449,17 +556,25 @@ def stabilize_robot_spawn(
                 import torch as th
 
                 target_position, _ = target.get_position_orientation()
-                target_xy_radius = 0.0
+                target_lower_xy = None
+                target_upper_xy = None
                 target_aabb = get_state_by_class_name(target, "AABB")
                 if target_aabb is not None:
                     try:
                         target_lower, target_upper = target_aabb.get_value()
-                        target_xy_radius = float(
-                            th.linalg.norm((target_upper[:2] - target_lower[:2]) * 0.5)
-                        )
+                        target_lower_xy = target_lower[:2].cpu()
+                        target_upper_xy = target_upper[:2].cpu()
                     except Exception:
-                        target_xy_radius = 0.0
-                effective_max_distance = preferred_max_distance + target_xy_radius
+                        target_lower_xy = None
+                        target_upper_xy = None
+                if target_lower_xy is None or target_upper_xy is None:
+                    try:
+                        target_lower, target_upper = target.aabb
+                        target_lower_xy = target_lower[:2].cpu()
+                        target_upper_xy = target_upper[:2].cpu()
+                    except Exception:
+                        target_lower_xy = None
+                        target_upper_xy = None
                 target_rooms = set(getattr(target, "in_rooms", None) or [])
                 trav_map = env.scene.trav_map
                 floor = min(
@@ -478,10 +593,19 @@ def stabilize_robot_spawn(
                     for index in th.argsort(distances).cpu().tolist():
                         xy = trav_map.map_to_world(pixels[index])
                         room = env.scene.seg_map.get_room_instance_by_point(xy[:2])
-                        distance = float(th.linalg.norm(target_position[:2].cpu() - xy[:2].cpu()))
+                        candidate_xy = xy[:2].cpu()
+                        if target_lower_xy is not None and target_upper_xy is not None:
+                            nearest_xy = th.minimum(
+                                th.maximum(candidate_xy, target_lower_xy), target_upper_xy
+                            )
+                            distance = float(th.linalg.norm(candidate_xy - nearest_xy))
+                        else:
+                            distance = float(
+                                th.linalg.norm(target_position[:2].cpu() - candidate_xy)
+                            )
                         if target_rooms and room not in target_rooms:
                             continue
-                        if distance > effective_max_distance:
+                        if distance > preferred_max_distance:
                             continue
                         position = th.tensor(
                             [float(xy[0]), float(xy[1]), float(trav_map.floor_heights[floor])],
@@ -575,6 +699,50 @@ def stabilize_robot_spawn(
                             return overlaps
         return overlaps
 
+    global _OFFICIAL_NATIVE_BASELINE, _OFFICIAL_NATIVE_JOINT_BASELINE
+    if _OFFICIAL_NATIVE_BASELINE is not None:
+        # Not the first call: re-teleport any native object that has drifted
+        # from its official post-settle pose back before re-measuring, so the
+        # baseline reflects the official scene instead of a prior task's
+        # accumulated displacement (serial-accumulation fix).
+        for name, (official_pos, official_ori, official_center) in _OFFICIAL_NATIVE_BASELINE.items():
+            obj = scene_objects.get(name)
+            if obj is None:
+                continue
+            try:
+                center = geometry_center(obj)
+                if center is None or official_center is None:
+                    continue
+                drifted = float(((center - official_center) ** 2).sum() ** 0.5)
+                if drifted <= _RESTORE_NATIVE_MIN_DRIFT:
+                    continue
+                obj.set_position_orientation(
+                    position=official_pos,
+                    orientation=official_ori,
+                )
+                joint_state = (
+                    _OFFICIAL_NATIVE_JOINT_BASELINE.get(name)
+                    if _OFFICIAL_NATIVE_JOINT_BASELINE
+                    else None
+                )
+                if joint_state is not None:
+                    try:
+                        obj.set_joint_positions(joint_state[0])
+                        obj.set_joint_velocities(joint_state[1])
+                    except Exception:
+                        pass
+                try:
+                    obj.keep_still()
+                except Exception:
+                    pass
+                print(
+                    f"[furniture-official-restore] {name} drifted={drifted:.3f}m "
+                    f"> {_RESTORE_NATIVE_MIN_DRIFT:.2f}m, restored to official pose",
+                    flush=True,
+                )
+            except Exception:
+                continue
+
     native_baseline = {}
     for name, obj in scene_objects.items():
         if obj is robot or name.startswith("online_env_"):
@@ -588,6 +756,9 @@ def stabilize_robot_spawn(
             )
         except Exception:
             continue
+    if _OFFICIAL_NATIVE_BASELINE is None:
+        # First (pristine) call: this measurement IS the official baseline.
+        _OFFICIAL_NATIVE_BASELINE = native_baseline
     # deltasg #20 (Benevolence_0 door_ohagsq_0, 2026-08-12): spawn-restore
     # diagnostics showed was_restored=True with pre-warmup deviation stuck at
     # 0.061-0.185 m on every attempt. set_position_orientation only restores
@@ -609,6 +780,10 @@ def stabilize_robot_spawn(
             )
         except Exception:
             continue
+    if _OFFICIAL_NATIVE_JOINT_BASELINE is None:
+        # First (pristine) call: cache the official joint state so the
+        # above restore can also return articulated hinge angles to official.
+        _OFFICIAL_NATIVE_JOINT_BASELINE = native_joint_baseline
     # enva_gen10_pbfix3_20260810_234131: a random spawn landed in a small
     # traversability pocket whose only reachable room was dining_room_0; one
     # failed placement then excluded that room and every later sample
@@ -661,12 +836,64 @@ def stabilize_robot_spawn(
                 room = None
             return 0 if room else 1
 
+        # deltasg #37 (Benevolence_1 spawn starvation): get_random_point samples
+        # the OFFICIAL traversable map WITHOUT object-AABB inflation, so
+        # furniture-dense scenes (sofa/bookcase/cabinet ON map-free cells) burn
+        # the whole 16-candidate budget on link-collision rejects before the
+        # physics warmup. Precompute the furniture link AABBs once and rank
+        # candidates by how many solid links their footprint overlaps, so
+        # genuinely-clear candidates float to the front of the truncation
+        # window. SOFT rank only (no candidate is rejected here) — the
+        # link-collision filter still does the final physics validation, so a
+        # passing scene's candidate order is unchanged (its clear candidates
+        # already score 0 and the remaining keys still apply).
+        robot_xy_radius = 0.30
+        furniture_link_aabbs = []
+        for _object_name, _obj in scene_objects.items():
+            if _obj is robot or _object_name.startswith("online_env_"):
+                continue
+            _category = str(getattr(_obj, "category", "") or "").lower()
+            if _category in {
+                "floor", "floors", "carpet", "rug",
+                "wall", "walls", "ceiling", "ceilings",
+            }:
+                continue
+            for _link in (getattr(_obj, "links", None) or {}).values():
+                try:
+                    _lower, _upper = _link.aabb
+                    _lower = np.asarray(_lower.cpu(), dtype=float)
+                    _upper = np.asarray(_upper.cpu(), dtype=float)
+                    furniture_link_aabbs.append((
+                        _lower[:2] - robot_xy_radius,
+                        _upper[:2] + robot_xy_radius,
+                    ))
+                except Exception:
+                    continue
+
+        def furniture_clearance_rank(candidate):
+            xy = candidate[0][:2].detach().cpu().numpy().astype(float)
+            overlaps = 0
+            for _lo, _hi in furniture_link_aabbs:
+                if np.all(xy >= _lo) and np.all(xy <= _hi):
+                    overlaps += 1
+                    if overlaps >= 2:
+                        break
+            return overlaps
+
         spawn_candidates.sort(
             key=lambda candidate: (
                 candidate[2],
+                furniture_clearance_rank(candidate),
                 semantic_room_rank(candidate),
                 largest_component_rank(candidate),
             )
+        )
+        furniture_clear = sum(
+            1 for candidate in spawn_candidates if furniture_clearance_rank(candidate) == 0
+        )
+        print(
+            f"[robot-spawn] furniture-clear candidates={furniture_clear}/{len(spawn_candidates)}",
+            flush=True,
         )
         semantic = sum(
             1 for candidate in spawn_candidates if semantic_room_rank(candidate) == 0

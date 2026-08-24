@@ -132,6 +132,19 @@ def check_run(path: Path, run: dict):
         issues.append("missing_initial_camera_coverage")
     elif not camera_coverage.get("ok", False):
         issues.append("initial_camera_coverage_failed")
+    else:
+        global_cameras = [
+            camera for camera in (te.get("camera") or [])
+            if camera.get("camera_type") == "global_camera"
+        ]
+        if not 2 <= len(global_cameras) <= 3:
+            issues.append(f"invalid_global_camera_count:{len(global_cameras)}")
+        target_objects = set(camera_coverage.get("target_objects") or [])
+        global_targets = set(camera_coverage.get("global_visible_objects") or [])
+        if target_objects - global_targets:
+            issues.append("global_cameras_missing_task_targets")
+        if camera_coverage.get("global_robot_visible") is not True:
+            issues.append("global_cameras_missing_robot")
     robot_stability = validation.get("robot_stability") or {}
     if robot_stability and robot_stability.get("ok") is not True:
         issues.append("robot_stability_failed")
@@ -451,6 +464,8 @@ def main():
         "env_type": Counter(), "primary_task": Counter(), "target_room": Counter(),
         "source_room": Counter(), "target_category": Counter(), "target_model": Counter(),
         "target_object_id": Counter(), "support_category": Counter(), "position_bin_25cm": Counter(),
+        "global_camera_count": Counter(), "camera_redundancy": Counter(),
+        "global_camera_room": Counter(),
     }
     examples = []
 
@@ -495,6 +510,22 @@ def main():
             diversity_totals["support_category"][str(category)] += 1
         for position_bin in diversity.get("position_bins_25cm") or []:
             diversity_totals["position_bin_25cm"][str(position_bin)] += 1
+        camera_coverage = (te.get("validation") or {}).get("camera_coverage") or {}
+        if camera_coverage:
+            diversity_totals["global_camera_count"][str(
+                camera_coverage.get("num_global_cameras", 0)
+            )] += 1
+            requested = bool(camera_coverage.get("redundant_coverage_requested"))
+            achieved = bool(camera_coverage.get("redundant_coverage_achieved"))
+            redundancy_key = (
+                "requested_achieved" if requested and achieved
+                else "requested_not_achieved" if requested
+                else "not_requested_achieved" if achieved
+                else "not_requested"
+            )
+            diversity_totals["camera_redundancy"][redundancy_key] += 1
+            for room in camera_coverage.get("global_camera_rooms") or []:
+                diversity_totals["global_camera_room"][str(room)] += 1
         if bbox:
             if bbox["exists"]:
                 bbox_totals["bbox_files"] += 1
