@@ -24,13 +24,16 @@ translator.py — 层级4 数据管线层: 采样点 → QRA 结构化输出 (EM
     指令遵循类  (C 单视角 / D 协同 / E 多源消歧)   → 问"完成指令的下一步", 答动作
     主动响应类  (A 单视角 / B 协同)                → 问"处理异常的下一步", 答动作
 
-每条样本结构为 ``{ Q, A, Reasoning, context, spatial_context, images }``:
+内部数据模型 ``QRAPair`` 含 ``{ Q, A, Reasoning, context, spatial_context, images, options, ... }``:
 - ``Q``         题干 (自然语言)
-- ``A``         答案 (动作 / 可见物体)
+- ``A``         答案 (动作 / 可见物体 / bbox, 结构化)
 - ``Reasoning`` 推理链 (当前**未接入 LLM**, 预留空列表, 见 ``build_reasoning``)
 - ``context``   先前主干(规划)问题的 (Q,A) 上下文 (仅规划类非空; 非任务求解类为空)
 - ``spatial_context`` 空间上下文: 房间拓扑 (见 ``build_room_topology``, 对同一任务实例所有采样点相同)
 - ``images``    该问所需视角图片 (相对输出子文件夹的路径, 由 ``export_task_dataset`` 填充)
+
+最终导出到 ``qra.json`` 时经 ``QRAPair.to_simple_dict`` 精简, 仅保留自然语言
+题干/选项/答案、图片路径与必要标识字段 (qra_id / task_type / question_type / category)。
 
 输出写入 ``generate_dataset/<task_id>/`` 子文件夹 (``qra.json`` + 图片副本), 与输入数据
 (``task_instance/`` 下的 JSON 与 ``frames/``) 分离。
@@ -90,10 +93,11 @@ SAMPLING_INITIAL = "initial"   # 初始采样 (before simulation)
 SAMPLING_DURING = "during"     # 步骤间采样 (during simulation)
 SAMPLING_AFTER = "after"       # 终止采样 (after simulation)
 
-# 问题类型 (目前区分 感知 / 规划 / bbox grounding; 总结类依赖 deltaSG, 暂不生成)
+# 问题类型 (目前区分 感知 / 规划 / bbox grounding / 预测; 总结类依赖 deltaSG, 暂不生成)
 QTYPE_PERCEPTION = "perception"  # 感知类: 问"场景中有什么 / 发生了什么"
 QTYPE_PLANNING = "planning"      # 规划类: 问"下一步该做什么"
 QTYPE_BBOX = "bbox"              # 感知类(bbox grounding): 问机器人主视角中目标物品的 bounding box
+QTYPE_PREDICTION = "prediction"  # 预测类: 给上一步动作+目标, 推断下一步并预测执行后的场景状态 (ΔSG 效应)
 
 # 动作原语 (intro.md L400, 符号层, 与 solution_plan 一致)
 PRIMITIVE_MOVE = "MOVE"
@@ -182,6 +186,25 @@ class QRAPair:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def to_simple_dict(self) -> dict[str, Any]:
+        """导出精简格式: 仅保留自然语言问题/选项/答案 + 图片 + 必要标识字段。
+
+        相比 ``to_dict`` 去掉了结构化答案 A、推理链 Reasoning、上下文 context、
+        空间拓扑 spatial_context 与采样细节 (sampling_strategy/simulation_step/event_id),
+        选项也压平为纯文本数组 (正确项由 answer_index 指向)。
+        """
+        return {
+            "qra_id": self.qra_id,
+            "task_type": self.task_type,          # 任务类型 A~G
+            "question_type": self.question_type,  # 问题类型 planning/perception/bbox
+            "category": (self.A or {}).get("category") or "",  # 物品类别 (如 "bottle of water")
+            "question": self.Q,
+            "options": [opt.get("text", "") for opt in self.options],
+            "answer": self.A_nl,
+            "answer_index": self.answer_index,
+            "images": self.images,
+        }
 
 
 # ======================================================================
@@ -711,14 +734,28 @@ def _previous_action_nl(task_instance: dict[str, Any], t: int) -> str | None:
     return _render_step_nl(plan[t - 1], task_instance, carried)
 
 
+def _carried_object_id(task_instance: dict[str, Any], t: int) -> str | None:
+    """返回 ``plan[:t]`` 中最近一次 PICK 的 target_object (object_id, 非类别); 无则 None。
+
+    供预测题求 PLACE 的"被放置物": PLACE 步骤本身不含被放置物, 需回看此前最近一次 PICK
+    (与 ``_previous_action_nl`` 的 carried 推断同源, 但返回 object_id 而非人类可读类别)。
+    """
+    plan = task_instance.get("solution_plan") or []
+    for s in reversed(plan[:t]):
+        if (s.get("primitive") or "") == PRIMITIVE_PICK:
+            return s.get("target_object")
+    return None
+
+
 def _build_english_question(ctx: GenContext, question_type: str) -> str:
     """生成英文题干 (home-care robot 场景), 避免中英混杂。
 
     规划类: 场景结构 + 任务指令(目标) + 上一步动作 + "下一步做什么"。
+    预测类: 与规划类同结构, 但末句改为"执行下一步后场景会如何" (不给当前一步动作)。
     只给最近一步动作 (Markov 形式), 不罗列完整历史, 避免文本泄露答案。
     感知类: 让机器人指出当前可见物体 (discriminator 侧再改写为判别式选择题)。
     """
-    if question_type == QTYPE_PLANNING:
+    if question_type in (QTYPE_PLANNING, QTYPE_PREDICTION):
         structure = _room_structure_nl(ctx.spatial_context)
         instruction = (ctx.scene.global_task or "").strip().rstrip(".")
         current_room, _, _ = _resolve_rooms(ctx.task_instance, ctx.scene, ctx.next_step)
@@ -736,6 +773,11 @@ def _build_english_question(ctx: GenContext, question_type: str) -> str:
             rooms_str = ", ".join(f"the {r}" for r in cam_rooms[:-1]) + f", and the {cam_rooms[-1]}"
             cam_line = f"There are surveillance cameras in {rooms_str}.\n"
 
+        tail = (
+            "Now what should you do next?"
+            if question_type == QTYPE_PLANNING
+            else "After your next action, which of the following will describe the scene?"
+        )
         return (
             "You are a home-care robot.\n"
             f"You are in a room with structure {structure}.\n"
@@ -743,7 +785,7 @@ def _build_english_question(ctx: GenContext, question_type: str) -> str:
             f"{cam_line}"
             f"Now, your task is: {instruction}.\n"
             f"You have just completed: {previous_text}.\n"
-            "Now what should you do next?"
+            f"{tail}"
         )
     return "Describe the objects present in the current scene and their states."
 
@@ -780,13 +822,84 @@ def _gen_perception(ctx: GenContext) -> list[QRAPair]:
     return [_primary_pair(ctx, QTYPE_PERCEPTION)]
 
 
+def _predict_effect(next_step: dict[str, Any], task_instance: dict[str, Any],
+                    t: int) -> dict[str, Any] | None:
+    """由下一步动作预测其执行后的结果状态 (ΔSG 效应, 纯符号规则)。
+
+    仅覆盖 PICK / PLACE (参考 translator_deltasg.py ``_step_delta`` 的符号规则):
+      - PICK  → 目标物体被机器人持有 (held)
+      - PLACE → 被放置物(此前最近一次 PICK 的对象)放到支撑面上 (on support)
+
+    注意: 预测只落在符号状态层 (held / on support), 不预测 bbox —— 机器人下一步的精确
+    位姿与视角不确定, 视觉 bounding box 会随之大幅变化, 要求模型预测一个不确定视觉场景中
+    的 bbox 不合理。故 effect 一律不带 bbox 锚点。不可预测时返回 None。
+    """
+    prim = next_step.get("primitive")
+    target = next_step.get("target_object")
+    if prim == PRIMITIVE_PICK:
+        return {
+            "object_id": target,
+            "relation": "held",
+            "support_id": None,
+            "category": _object_category(target, task_instance) or _humanize(target),
+            "support_category": None,
+        }
+    if prim == PRIMITIVE_PLACE:
+        moved = _carried_object_id(task_instance, t)
+        if not moved:
+            return None
+        return {
+            "object_id": moved,
+            "relation": "on",
+            "support_id": target,
+            "category": _object_category(moved, task_instance) or _humanize(moved),
+            "support_category": _object_category(target, task_instance) or _humanize(target),
+        }
+    return None
+
+
+def _gen_prediction(ctx: GenContext) -> list[QRAPair]:
+    """预测类"主干"问题: 给上一步动作+目标, 让模型推断下一步并预测执行后的场景状态。
+
+    仅覆盖 PICK / PLACE (MOVE/INTERACT/WAIT 暂不生成, 见计划); 预测落在符号状态层
+    (held / on support), 不预测 bbox。非任务求解类问题: 不携带主干问题上下文 (context 为空),
+    也不喂入 backbone (避免与本步 planning 互相泄露动作)。
+    """
+    if ctx.strategy != SAMPLING_DURING:
+        return []
+    next_step = ctx.next_step
+    if not next_step or next_step.get("primitive") not in {PRIMITIVE_PICK, PRIMITIVE_PLACE}:
+        return []
+    t = ctx.scene.simulation_step
+    effect = _predict_effect(next_step, ctx.task_instance, t)
+    if effect is None:
+        return []
+    answer = {
+        "kind": "prediction",
+        "action": next_step.get("primitive"),
+        "target_object": next_step.get("target_object"),
+        "step_id": next_step.get("step_id"),
+        "category": effect.get("category"),
+        "effect": effect,
+    }
+    question = _build_english_question(ctx, QTYPE_PREDICTION)
+    return [
+        _make_pair(
+            ctx, QTYPE_PREDICTION, QTYPE_PREDICTION, question, answer,
+            build_reasoning(ctx.task_type, QTYPE_PREDICTION, ctx.scene, next_step, ctx.llm),
+            context=[],
+        )
+    ]
+
+
 # 问题类型生成器注册表: 采样点内按此顺序"尝试"生成每一类问题。
-# 规划类须在首位 (作为"主干"), 感知 / bbox 等非任务求解类紧随其后。
+# 规划类须在首位 (作为"主干"), 感知 / bbox / 预测 等非任务求解类紧随其后。
 # (新增问题类型 = 在此追加一个生成器函数, 无需改动主流程)
 QUESTION_GENERATORS: list[Callable[[GenContext], list[QRAPair]]] = [
     _gen_planning,
     _gen_perception,
     _gen_bbox,
+    _gen_prediction,
 ]
 
 
@@ -1239,17 +1352,17 @@ def _copy_view_images(event_id: str, view_name: str, rel_dir: str,
 
 def export_task_dataset(pairs: list[QRAPair],
                         output_root: str = DEFAULT_OUTPUT_ROOT,
-                        frames_root: str | None = None,
-                        meta: dict[str, Any] | None = None) -> str | None:
+                        frames_root: str | None = None) -> str | None:
     """把一个任务实例的所有 QRA 对 + 所需视角图片写出到 ``output_root/<task_id>/``。
 
     输入数据 (task_instance.json / expert_result.json / frames) 保持不变; 输出数据集中到
     generate_dataset 下的一个子文件夹, 实现输入输出分离::
 
         <task_id>/
-        ├── qra.json                            # 全部采样点问题 (含相对图片路径)
+        ├── qra.json                            # 精简后的全部采样点问题 (见 QRAPair.to_simple_dict)
         └── images/<event_id>/<view>/<file>     # 所需视角图片副本
 
+    每条样本仅保留自然语言题干/选项/答案、图片路径与必要标识字段 (qra_id + 类别)。
     返回子文件夹绝对路径; 无样本时返回 None。
     """
     if not pairs:
@@ -1278,13 +1391,9 @@ def export_task_dataset(pairs: list[QRAPair],
 
     doc: dict[str, Any] = {
         "task_instance_id": task_id,
-        "task_type": task_type,
         "num_samples": len(pairs),
-        "samples": [p.to_dict() for p in pairs],
+        "samples": [p.to_simple_dict() for p in pairs],
     }
-    if meta:
-        for k, v in meta.items():
-            doc.setdefault(k, v)
 
     out_path = os.path.join(subfolder, "qra.json")
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -1318,11 +1427,7 @@ def generate_task_dataset_files(task_instance_path: str,
     attach_mcq(pairs, task_instance, scenes_by_event, client)
 
     pairs = translate_pairs_to_nl(pairs, client)
-    meta = {
-        "run_id": expert_result.get("run_id") or task_instance.get("run_id") or "",
-        "instruction": (task_instance.get("task") or {}).get("instruction") or "",
-    }
-    return export_task_dataset(pairs, output_root, frames_root, meta)
+    return export_task_dataset(pairs, output_root, frames_root)
 
 
 def generate_datasets(task_instance_paths: list[str],

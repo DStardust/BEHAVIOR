@@ -54,6 +54,7 @@ PRIMITIVE_WAIT = "WAIT"
 QTYPE_PLANNING = "planning"
 QTYPE_PERCEPTION = "perception"
 QTYPE_BBOX = "bbox"
+QTYPE_PREDICTION = "prediction"
 
 # 选择题选项数: 1 正确 + (NUM_OPTIONS-1) 干扰
 NUM_OPTIONS = 4
@@ -321,6 +322,8 @@ def _option_key(s: dict[str, Any]) -> tuple:
         return (kind, s.get("object_id"))
     if kind == "bbox":
         return (kind, tuple(s.get("bbox_xyxy") or []))
+    if kind == "state":
+        return (kind, s.get("object_id"), s.get("relation"), s.get("support_id"))
     return (kind,)
 
 
@@ -370,16 +373,23 @@ def _tool_swap_pool(tool: str | None, target: str | None, index: SceneIndex) -> 
 
 def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
                      k: int,
-                     rng: "random.Random") -> list[tuple[dict[str, Any], dict[str, Any]]]:
+                     rng: "random.Random",
+                     key_fn: Any = None,
+                     bucket_fn: Any = None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """去重后按"来源类型"取样, 保证干扰项跨维度多样 (时序/原语/目标/房间…)。
 
     类型(桶)顺序与桶内顺序均用 rng 打乱后再轮询, 使干扰项类型的组合跨样本随机
     (同一样本内仍跨类型多样、且结果由 qra_id 种子确定可复现)。
+    ``key_fn`` / ``bucket_fn`` 可覆盖默认的去重键 (动作键) 与多样性桶 (source.type),
+    供其它结构化选项 (如状态命题, 桶改用 source.subtype) 复用同一取样逻辑。
     """
+    key_fn = key_fn or (lambda a, src: _action_key(a))
+    bucket_fn = bucket_fn or (lambda a, src: src.get("type", "other"))
+
     seen: set = set()
     uniq: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for a, src in cands:
-        key = _action_key(a)
+        key = key_fn(a, src)
         if key in seen:
             continue
         seen.add(key)
@@ -389,7 +399,7 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
 
     buckets: "OrderedDict[str, list]" = OrderedDict()
     for a, src in uniq:
-        buckets.setdefault(src.get("type", "other"), []).append((a, src))
+        buckets.setdefault(bucket_fn(a, src), []).append((a, src))
 
     lists: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
     for _, items in buckets.items():
@@ -665,6 +675,76 @@ def _planning_options(pair: Any, index: SceneIndex,
 
 
 # ======================================================================
+# 预测类选项组装 (正确项 + 干扰项)
+# ======================================================================
+def _prediction_options(pair: Any, index: SceneIndex,
+                        plan: list[dict[str, Any]], llm: Any = None) -> tuple[list[dict[str, Any]], int]:
+    """预测题 → 选择题: 正确项 = 执行下一步动作后的结果状态命题; 干扰项 = 状态混淆。
+
+    状态命题 (state proposition) 不含动作动词, 迫使模型先推断动作、再判断后果 (否则预测题
+    会退化成 planning)。正确项来自 translator 预计算的 effect (符号状态, 不带 bbox); 干扰项
+    source.type 均为 "state_confusion", 靠 subtype 区分动作层错误 (support / object) 与
+    效应层错误 (possession / relation), 便于 post-hoc 拆分两类错误指标。
+    """
+    a = pair.A or {}
+    if a.get("kind") != "prediction":
+        return [], -1
+    effect = a.get("effect") or {}
+    moved = effect.get("object_id")
+    relation = effect.get("relation")
+    if not moved or relation not in ("held", "on"):
+        return [], -1
+    support = effect.get("support_id")
+    rng = _rng(pair.qra_id, "prediction")
+
+    def _state(object_id: str | None, relation: str, support_id: str | None = None) -> dict[str, Any]:
+        return {
+            "kind": "state",
+            "object_id": object_id,
+            "category": _cat(index, object_id) or None,
+            "relation": relation,
+            "support_id": support_id,
+            "support_category": _cat(index, support_id) if support_id else None,
+        }
+
+    t = pair.simulation_step
+    step_id = (plan[t] or {}).get("step_id") if 0 <= t < len(plan) else None
+    correct_state = _state(moved, relation, support)
+    correct_opt = {"kind": "state", "structured": correct_state,
+                   "source": {"type": "solution_plan_step", "step_id": step_id}}
+
+    # 干扰项候选 (structured, source), 全部来自真实场景素材 (支撑面 / 可抓物体 / bbox)。
+    # 后续用 _sample_distinct 按 subtype 分桶轮询取样, 保证干扰项跨维度多样。
+    cands: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if relation == "on":
+        # 支撑面错误 (动作层): 被放置物放到错的支撑面
+        for oid in _support_swap_pool(support, index):
+            cands.append((_state(moved, "on", oid), {"type": "state_confusion", "subtype": "support"}))
+        # 物体错误 (动作层): 错的物体放到正确支撑面
+        for oid in _target_swap_pool(PRIMITIVE_PICK, moved, index):
+            cands.append((_state(oid, "on", support), {"type": "state_confusion", "subtype": "object"}))
+        # 归属错误 (效应层): 物体仍被机器人持有
+        cands.append((_state(moved, "held"), {"type": "state_confusion", "subtype": "possession"}))
+    else:  # held (PICK)
+        # 归属错误 (效应层): 物体仍在原地 (未被持有)
+        cands.append((_state(moved, "unchanged"), {"type": "state_confusion", "subtype": "possession"}))
+        # 关系错误 (效应层): 物体落在真实支撑面上而非被持有 (动作对、后果错)
+        for oid in index.support_surfaces:
+            cands.append((_state(moved, "on", oid), {"type": "state_confusion", "subtype": "relation"}))
+        # 物体错误 (动作层): 别的物体被持有
+        for oid in _target_swap_pool(PRIMITIVE_PICK, moved, index):
+            cands.append((_state(oid, "held"), {"type": "state_confusion", "subtype": "object"}))
+
+    picked = _sample_distinct(cands, NUM_OPTIONS - 1, rng,
+                              key_fn=lambda a, src: _option_key(a),
+                              bucket_fn=lambda a, src: src.get("subtype", "other"))
+    dist_opts = [{"kind": "state", "structured": a, "source": src} for a, src in picked]
+
+    return _finalize(pair.qra_id, correct_opt, dist_opts, index,
+                     llm=llm, question=getattr(pair, "Q", "") or "")
+
+
+# ======================================================================
 # 选项渲染 (结构化 → 自然语言)
 # ======================================================================
 def _target_nl(a: dict[str, Any], index: SceneIndex) -> str:
@@ -715,6 +795,23 @@ def _bbox_nl(s: dict[str, Any]) -> str:
     return f"[{b[0]}, {b[1]}, {b[2]}, {b[3]}]" if b and len(b) == 4 else "?"
 
 
+def _state_nl(s: dict[str, Any], index: SceneIndex) -> str:
+    """状态命题 → 自然语言 (英文, 规则兜底, 未来时)。
+
+    不含动作动词 (只有结果状态), 是预测题"先推断动作、再判断后果"的关键约束。
+    """
+    obj = _humanize(s.get("category")) if s.get("category") else _cat(index, s.get("object_id"))
+    relation = s.get("relation")
+    if relation == "held":
+        return f"The {obj} will be held by the robot."
+    if relation == "unchanged":
+        return f"The {obj} will remain where it is."
+    # "on"
+    support = (_humanize(s.get("support_category")) if s.get("support_category")
+               else _cat(index, s.get("support_id")))
+    return f"The {obj} will be on the {support}"
+
+
 def _render_option(structured: dict[str, Any], index: SceneIndex) -> str:
     """按结构化选项的 kind 渲染成自然语言选项文本 (规则兜底)。"""
     kind = structured.get("kind")
@@ -724,6 +821,8 @@ def _render_option(structured: dict[str, Any], index: SceneIndex) -> str:
         return _object_nl(structured, index)
     if kind == "bbox":
         return _bbox_nl(structured)
+    if kind == "state":
+        return _state_nl(structured, index)
     return str(structured)
 
 
@@ -734,8 +833,8 @@ def _render_option(structured: dict[str, Any], index: SceneIndex) -> str:
 # 否则退回规则渲染。这样既能满足"LLM 根据整合信息转自然语言"的要求, 又守住内容不编造。
 _OPTION_NL_SYSTEM = """\
 You are a phrasing assistant for embodied-AI multiple-choice questions. Given the structured \
-information of each option (action / object / bounding box), rewrite it as a concise, natural, \
-accurate English option phrase or short sentence.
+information of each option (action / object / bounding box / state), rewrite it as a concise, \
+natural, accurate English option phrase or short sentence.
 
 Hard constraints (follow all of them):
 1. Entity names (object categories, room names) must be preserved verbatim: do not translate, \
@@ -746,9 +845,13 @@ do not add or omit information.
 INTERACT = "Operate / Use the <tool> to operate the <target>", WAIT = "Wait". \
 Important: MOVE means navigating to the target's location — always write "Move to the <target>"; \
 never write "Move the <target>", which would wrongly mean carrying it.
-4. For bbox options, output the coordinates verbatim as [x1, y1, x2, y2]; do not alter any number.
-5. One sentence per option, consistent style and similar length; do not hint which option is correct.
-6. Output only JSON in the form: {"texts": ["option 1", "option 2", ...]}, with the same length \
+4. State proposition semantics (future tense, no action verb): relation "held" = \
+"The <object> will be held by the robot"; "on" = "The <object> will be on the <support>"; \
+"unchanged" = "The <object> will remain where it is". Keep the future-tense state wording, \
+never rewrite it into an action instruction.
+5. For bbox options, output the coordinates verbatim as [x1, y1, x2, y2]; do not alter any number.
+6. One sentence per option, consistent style and similar length; do not hint which option is correct.
+7. Output only JSON in the form: {"texts": ["option 1", "option 2", ...]}, with the same length \
 and order as the input options."""
 
 
@@ -781,6 +884,15 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
         }
     if kind == "bbox":
         return {"type": "bbox", "bbox": list(structured.get("bbox_xyxy") or [])}
+    if kind == "state":
+        relation = structured.get("relation")
+        obj = structured.get("category") or _cat(index, structured.get("object_id"))
+        payload: dict[str, Any] = {"type": "state", "object": obj, "relation": relation}
+        if relation == "on":
+            support = structured.get("support_category") or _cat(index, structured.get("support_id"))
+            if support:
+                payload["support"] = support
+        return payload
     return {"type": "other", "raw": str(structured)}
 
 
@@ -903,6 +1015,8 @@ def _generate_pair_options(pair: Any, index: SceneIndex,
         return _perception_options(pair, index, llm)
     if qt == QTYPE_BBOX:
         return _bbox_options(pair, index, scene, llm)
+    if qt == QTYPE_PREDICTION:
+        return _prediction_options(pair, index, plan, llm)
     return [], -1
 
 
