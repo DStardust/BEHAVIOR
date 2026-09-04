@@ -73,6 +73,18 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
+from extract_feature import (
+    STRUCTURAL_CATEGORIES,
+    build_room_topology,
+    derive_anomaly,
+    disambiguation_candidates,
+    global_camera_rooms,
+    humanize,
+    object_category,
+    resolve_rooms,
+)
+
+
 try:
     import numpy as np
 except ImportError:  # 仅分割 npy 读取需要; 缺失时回退到预计算 bbox
@@ -141,6 +153,7 @@ class StaticScene:
     robot_pose: dict[str, Any] = field(default_factory=dict)
     robot_visible: list[str] = field(default_factory=list)
     global_visible: list[str] = field(default_factory=list)
+    is_retry: bool = False             # nav_retry 事件 (step_NNN_post_nav_retry_M), 不重复生成主干规划/预测
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StaticScene":
@@ -159,6 +172,7 @@ class StaticScene:
             robot_pose=data.get("robot_pose", {}),
             robot_visible=list(data.get("robot_visible", [])),
             global_visible=list(data.get("global_visible", [])),
+            is_retry=bool(data.get("is_retry", False)),
         )
 
 
@@ -203,6 +217,7 @@ class QRAPair:
             "options": [opt.get("text", "") for opt in self.options],
             "answer": self.A_nl,
             "answer_index": self.answer_index,
+            "reasoning": "\n".join(self.Reasoning) if self.Reasoning else "",
             "images": self.images,
         }
 
@@ -370,20 +385,6 @@ def _visible_objects(scene: StaticScene) -> list[str]:
     return sorted(objects)
 
 
-def _object_category(object_id: str | None, task_instance: dict[str, Any] | None) -> str:
-    """从任务实例反查物品的人类可读类别 (object_id → category, 下划线转空格)。
-
-    用于 LLM 翻译时不暴露物品 ID, 而以类别名 (如 "bottle of water") 指代物品。
-    """
-    if not object_id or not task_instance:
-        return ""
-    for key in ("plan_objects", "task_objects", "added_objects"):
-        for obj in task_instance.get(key) or []:
-            if isinstance(obj, dict) and obj.get("object_id") == object_id:
-                return str(obj.get("category") or "").replace("_", " ").strip()
-    return ""
-
-
 def _target_bbox(scene: StaticScene, object_id: str | None) -> list[int] | None:
     """取目标物体在机器人主视角的 bbox (xyxy 像素坐标); 不可见时返回 None。
 
@@ -399,61 +400,19 @@ def _target_bbox(scene: StaticScene, object_id: str | None) -> list[int] | None:
     return None
 
 
-def _humanize(name: str | None) -> str:
-    """把 id 风格名 (下划线分隔) 转为人类可读 (空格分隔), 如 television_room_0 → television room 0。"""
-    return (name or "").replace("_", " ").strip()
-
-
-def _global_camera_rooms(task_instance: dict[str, Any] | None) -> list[str]:
-    """返回安装了全局(监控)摄像头的房间名列表 (去重、保持原始顺序, 已 humanize)。
-
-    仅统计 camera_type == "global_camera" 且带 room_id 的摄像头; 机器人自带相机所在房间
-    = 机器人当前房间 (由 ``_resolve_rooms`` 给出), 不在此列。
-    """
-    rooms: list[str] = []
-    seen: set[str] = set()
-    for cam in (task_instance or {}).get("camera") or []:
-        if cam.get("camera_type") != "global_camera":
-            continue
-        room = _humanize(cam.get("room_id"))
-        if room and room not in seen:
-            seen.add(room)
-            rooms.append(room)
-    return rooms
-
-
-def _resolve_rooms(task_instance: dict[str, Any] | None, scene: StaticScene,
-                   next_step: dict[str, Any] | None) -> tuple[str, str, bool]:
-    """求 (当前房间, 目标房间, 是否跨房间)。
-
-    当前房间 = 上一步的 target_room (首步用 robot_initial_room);
-    目标房间 = 本步的 target_room。二者都已知且不同 → 跨房间。
-    """
-    if not next_step:
-        return "", "", False
-    target_room = next_step.get("target_room") or ""
-    plan = (task_instance or {}).get("solution_plan") or []
-    t = scene.simulation_step
-    if t <= 0:
-        current_room = (task_instance or {}).get("robot_initial_room") or ""
-    else:
-        prev = plan[t - 1] if 0 <= t - 1 < len(plan) else {}
-        current_room = (prev or {}).get("target_room") or ""
-    cross_room = bool(target_room and current_room and target_room != current_room)
-    return current_room, target_room, cross_room
-
-
 def build_answer(question_type: str, scene: StaticScene,
                  next_step: dict[str, Any] | None,
-                 task_instance: dict[str, Any] | None = None) -> dict[str, Any]:
+                 task_instance: dict[str, Any] | None = None,
+                 task_type: str | None = None) -> dict[str, Any]:
     """组装答案 A。
 
     - 感知类 → 场景中可见物体列表
+    - 消歧类 (E) → optimal_object + 候选/干扰项 + 下一步动作
     - 响应类 → 下一步动作 (无下一步则任务完成); 附 target 的类别与主视角 bbox,
-      供 LLM 翻译用 bounding box 定位物品 (不暴露物品 ID)
+      供 LLM 翻译用 bounding box 定位物品 (不暴露物品 ID)。主动响应 (A/B) 额外附异常上下文。
 
     [MLLM] 感知类答案目前只列物体 id; 日后可接入 MLLM 从 rgb/seg 图生成物体状态的
-    自然语言描述 (如"瓶子放在下层橱柜上")。异常检测类 (G) 的异常标注待 Env-B 数据就绪。
+    自然语言描述 (如"瓶子放在下层橱柜上")。异常检测类 (G) 的异常标注见 ``_gen_anomaly``。
     """
     if question_type == QTYPE_PERCEPTION:
         return {
@@ -461,30 +420,65 @@ def build_answer(question_type: str, scene: StaticScene,
             "objects": _visible_objects(scene),
         }
 
+    # 多源信息消歧 (E): 正确对象 + 候选/干扰项 (含 reason) + 下一步动作
+    if task_type == TASK_DISAMBIGUATION:
+        sr = (task_instance or {}).get("semantic_reasoning") or {}
+        gt = sr.get("ground_truth") or {}
+        optimal = gt.get("optimal_object")
+        rejected = [
+            {"object_id": rc.get("object_id"),
+             "category": object_category(rc.get("object_id"), task_instance),
+             "reason": rc.get("reason")}
+            for rc in gt.get("rejected_candidates") or []
+            if isinstance(rc, dict) and rc.get("object_id")
+        ]
+        if optimal:
+            # 消歧主干(规划)题应跟随 solution_plan 每一步的实际操作对象:
+            # ``optimal_object`` 是"该选哪个工具"的消歧答案 (如灭火器), 仅当该步 target
+            # 恰好就是工具时两者重合; 后续步骤 (导航到着火点 / 用工具灭火) 的 target 会
+            # 推进到着火物体 (如 picture), 故此处 target 取 next_step.target_object 优先。
+            target = (next_step or {}).get("target_object") or optimal
+            return {
+                "kind": "disambiguation",
+                "optimal_object": optimal,
+                "target_object": target,
+                "category": object_category(target, task_instance),
+                "action": (next_step or {}).get("primitive", PRIMITIVE_WAIT),
+                "tool_object": (next_step or {}).get("tool_object"),
+                "bbox": _target_bbox(scene, target),
+                "rejected_candidates": rejected,
+            }
+
     if next_step is None:
         return {"kind": "done", "message": "任务已完成"}
 
     target = next_step.get("target_object")
-    _, target_room, cross_room = _resolve_rooms(task_instance, scene, next_step)
-    return {
+    _, target_room, cross_room = resolve_rooms(task_instance, scene, next_step)
+    answer = {
         "kind": "response",
         "action": next_step.get("primitive", PRIMITIVE_WAIT),
         "target_object": target,
         "tool_object": next_step.get("tool_object"),
         "nl": next_step.get("nl", ""),
-        "category": _object_category(target, task_instance),
+        "category": object_category(target, task_instance),
         "bbox": _target_bbox(scene, target),
-        "room": _humanize(target_room),
+        "room": humanize(target_room),
         "cross_room": cross_room,
     }
+    # 主动响应 (A/B): 附异常上下文 (异常由模型从视觉中自行发现, 题干不点名)
+    if task_type in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
+        anomaly = (task_instance or {}).get("anomaly")
+        if anomaly:
+            answer["anomaly_object"] = anomaly.get("object_id")
+            answer["anomaly_state"] = anomaly.get("state") or {}
+            answer["anomaly_phase"] = anomaly.get("phase")
+    return answer
 
 
 # bbox 过滤阈值 (intro.md: bbox 大小需"适中")
 BBOX_MIN_AREA_RATIO = 0.005   # 面积占比下限: 过小 = 太远/遮挡, 不采
 BBOX_MAX_AREA_RATIO = 0.75    # 面积占比上限: 过大 = 几乎占满画面, 不采
 
-# 结构/背景类别 (非"物品", 不用于 bbox 提问; 可按需扩展)
-NON_OBJECT_CATEGORIES = {"background", "walls", "floors", "ceilings", "robot"}
 
 # bbox 坐标归一化到 [0, BBOX_NORM_SCALE]
 BBOX_NORM_SCALE = 1000
@@ -549,7 +543,7 @@ def _seg_category_bboxes(scene: StaticScene, frames_root: str | None) -> list[di
     candidates: list[dict[str, Any]] = []
     for sid in np.unique(sem):
         name = sem2name.get(int(sid))
-        if not name or name in NON_OBJECT_CATEGORIES:
+        if not name or name in STRUCTURAL_CATEGORIES:
             continue
         mask = sem == sid
         ratio = int(mask.sum()) / image_area
@@ -586,7 +580,7 @@ def _fallback_bbox_candidates(scene: StaticScene) -> list[dict[str, Any]]:
 
 def build_bbox_question(candidate: dict[str, Any]) -> str:
     """感知类(bbox grounding)题干: 问机器人主视角中物品类别/物体的 bounding box。"""
-    name = _humanize(candidate.get("category") or candidate.get("object_id") or "the object")
+    name = humanize(candidate.get("category") or candidate.get("object_id") or "the object")
     return f"What is the bounding box of the {name} in the robot's primary view?"
 
 
@@ -703,7 +697,7 @@ def _render_step_nl(step: dict[str, Any], task_instance: dict[str, Any],
     """
     prim = step.get("primitive") or ""
     target = step.get("target_object")
-    cat = _object_category(target, task_instance) or _humanize(target)
+    cat = object_category(target, task_instance) or humanize(target)
     if prim == PRIMITIVE_MOVE:
         return f"Move to the {cat}."
     if prim == PRIMITIVE_PICK:
@@ -711,8 +705,10 @@ def _render_step_nl(step: dict[str, Any], task_instance: dict[str, Any],
     if prim == PRIMITIVE_PLACE:
         return f"Place the {carried or 'object'} on the {cat}."
     if prim == PRIMITIVE_INTERACT:
-        tool = _object_category(step.get("tool_object"), task_instance)
-        return f"Operate the {cat} with the {tool}." if tool else f"Operate the {cat}."
+        tool = object_category(step.get("tool_object"), task_instance)
+        if tool and tool != cat:
+            return f"Operate the {cat} with the {tool}."
+        return f"Operate the {cat}."
     if prim == PRIMITIVE_WAIT:
         return "Wait."
     return f"{prim} the {cat}."
@@ -730,7 +726,7 @@ def _previous_action_nl(task_instance: dict[str, Any], t: int) -> str | None:
     carried: str | None = None
     for s in plan[: t - 1]:
         if (s.get("primitive") or "") == PRIMITIVE_PICK:
-            carried = _object_category(s.get("target_object"), task_instance) or _humanize(s.get("target_object"))
+            carried = object_category(s.get("target_object"), task_instance) or humanize(s.get("target_object"))
     return _render_step_nl(plan[t - 1], task_instance, carried)
 
 
@@ -747,32 +743,69 @@ def _carried_object_id(task_instance: dict[str, Any], t: int) -> str | None:
     return None
 
 
+def _surveillance_cam_line(task_instance: dict[str, Any] | None) -> str:
+    """渲染全局(监控)摄像头所在房间行 (多视角任务 B/D/E 才有; 单视角任务返回空串)。"""
+    cam_rooms = global_camera_rooms(task_instance)
+    if not cam_rooms:
+        return ""
+    if len(cam_rooms) == 1:
+        return f"There is a surveillance camera in the {cam_rooms[0]}.\n"
+    rooms_str = ", ".join(f"the {r}" for r in cam_rooms[:-1]) + f", and the {cam_rooms[-1]}"
+    return f"There are surveillance cameras in {rooms_str}.\n"
+
+
 def _build_english_question(ctx: GenContext, question_type: str) -> str:
     """生成英文题干 (home-care robot 场景), 避免中英混杂。
 
     规划类: 场景结构 + 任务指令(目标) + 上一步动作 + "下一步做什么"。
     预测类: 与规划类同结构, 但末句改为"执行下一步后场景会如何" (不给当前一步动作)。
+    主动响应类 (A/B): 点明"可能存在需要处理的异常", 但不点名异常是什么/在哪里 (异常由模型
+        从视觉观测自行发现); 不渲染 instruction 与上一步动作 (避免泄露灭火器/房间)。
+    消歧类 (E): 任务指令 (保持原句) + 候选对象类别列表 + "选择正确对象并给出动作步骤"。
     只给最近一步动作 (Markov 形式), 不罗列完整历史, 避免文本泄露答案。
     感知类: 让机器人指出当前可见物体 (discriminator 侧再改写为判别式选择题)。
     """
     if question_type in (QTYPE_PLANNING, QTYPE_PREDICTION):
         structure = _room_structure_nl(ctx.spatial_context)
+        current_room, _, _ = resolve_rooms(ctx.task_instance, ctx.scene, ctx.next_step)
+        current_line = f"You are currently in the {humanize(current_room)}.\n" if current_room else ""
+        cam_line = _surveillance_cam_line(ctx.task_instance)
+
+        # 多源信息消歧 (E): instruction + 候选对象 + "选择正确对象"
+        if ctx.task_type == TASK_DISAMBIGUATION:
+            instruction = (ctx.scene.global_task or "").strip().rstrip(".")
+            candidates = disambiguation_candidates(ctx.task_instance)
+            cand_line = f"The candidate objects are: {', '.join(candidates)}.\n" if candidates else ""
+            return (
+                "You are a home-care robot.\n"
+                f"You are in a room with structure {structure}.\n"
+                f"{current_line}"
+                f"{cam_line}"
+                f"Your task is: {instruction}.\n"
+                f"{cand_line}"
+                "Select the correct object, give the action steps and your reasoning."
+            )
+
+        # 主动响应 (A/B): 泛化异常提示, 不点名异常的具体内容/位置
+        if ctx.task_type in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
+            tail = (
+                "Determine what needs to be handled and give the next step."
+                if question_type == QTYPE_PLANNING
+                else "After your next action, which of the following will describe the scene?"
+            )
+            return (
+                "You are a home-care robot.\n"
+                f"You are in a room with structure {structure}.\n"
+                f"{current_line}"
+                f"{cam_line}"
+                "There may be an anomaly in the environment that needs to be handled.\n"
+                f"{tail}"
+            )
+
+        # 指令遵循 (C/D): 明确指令 + 上一步动作
         instruction = (ctx.scene.global_task or "").strip().rstrip(".")
-        current_room, _, _ = _resolve_rooms(ctx.task_instance, ctx.scene, ctx.next_step)
         previous = _previous_action_nl(ctx.task_instance, ctx.scene.simulation_step)
         previous_text = previous.rstrip(".") if previous else "none — the task has just started"
-        current_line = f"You are currently in the {_humanize(current_room)}.\n" if current_room else ""
-
-        # 全局(监控)摄像头所在房间: 多视角任务 (B/D/E) 才有; 单视角任务为空 → 不输出该行
-        cam_rooms = _global_camera_rooms(ctx.task_instance)
-        if not cam_rooms:
-            cam_line = ""
-        elif len(cam_rooms) == 1:
-            cam_line = f"There is a surveillance camera in the {cam_rooms[0]}.\n"
-        else:
-            rooms_str = ", ".join(f"the {r}" for r in cam_rooms[:-1]) + f", and the {cam_rooms[-1]}"
-            cam_line = f"There are surveillance cameras in {rooms_str}.\n"
-
         tail = (
             "Now what should you do next?"
             if question_type == QTYPE_PLANNING
@@ -796,7 +829,7 @@ def _primary_pair(ctx: GenContext, question_type: str,
     return _make_pair(
         ctx, question_type, question_type,
         _build_english_question(ctx, question_type),
-        build_answer(question_type, ctx.scene, ctx.next_step, ctx.task_instance),
+        build_answer(question_type, ctx.scene, ctx.next_step, ctx.task_instance, ctx.task_type),
         build_reasoning(ctx.task_type, question_type, ctx.scene, ctx.next_step, ctx.llm),
         context=context,
     )
@@ -822,6 +855,36 @@ def _gen_perception(ctx: GenContext) -> list[QRAPair]:
     return [_primary_pair(ctx, QTYPE_PERCEPTION)]
 
 
+def _gen_anomaly(ctx: GenContext) -> list[QRAPair]:
+    """异常检测题 (G 形式): 仅对主动响应任务 (A/B) 在初始采样点生成一条感知类问题。
+
+    题干让模型从视觉观测中指出场景异常 (不点名异常是什么/在哪里); 答案 ``kind="anomaly"``
+    携带异常物体 id / 状态 / 阶段, 供 distractor 生成判别式选择题。
+    """
+    if ctx.task_type not in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
+        return []
+    if ctx.strategy != SAMPLING_INITIAL:
+        return []
+    anomaly = (ctx.task_instance or {}).get("anomaly")
+    if not anomaly:
+        return []
+    question = "What anomaly or hazard do you detect in the scene?"
+    answer = {
+        "kind": "anomaly",
+        "object_id": anomaly.get("object_id"),
+        "objects": [anomaly.get("object_id")] if anomaly.get("object_id") else [],
+        "category": anomaly.get("category"),
+        "state": anomaly.get("state") or {},
+        "phase": anomaly.get("phase"),
+        "smoke_visible": anomaly.get("smoke_visible"),
+        "flame_visible": anomaly.get("flame_visible"),
+    }
+    return [
+        _make_pair(ctx, QTYPE_PERCEPTION, "anomaly", question, answer,
+                   build_reasoning(ctx.task_type, QTYPE_PERCEPTION, ctx.scene, None, ctx.llm))
+    ]
+
+
 def _predict_effect(next_step: dict[str, Any], task_instance: dict[str, Any],
                     t: int) -> dict[str, Any] | None:
     """由下一步动作预测其执行后的结果状态 (ΔSG 效应, 纯符号规则)。
@@ -841,7 +904,7 @@ def _predict_effect(next_step: dict[str, Any], task_instance: dict[str, Any],
             "object_id": target,
             "relation": "held",
             "support_id": None,
-            "category": _object_category(target, task_instance) or _humanize(target),
+            "category": object_category(target, task_instance) or humanize(target),
             "support_category": None,
         }
     if prim == PRIMITIVE_PLACE:
@@ -852,8 +915,8 @@ def _predict_effect(next_step: dict[str, Any], task_instance: dict[str, Any],
             "object_id": moved,
             "relation": "on",
             "support_id": target,
-            "category": _object_category(moved, task_instance) or _humanize(moved),
-            "support_category": _object_category(target, task_instance) or _humanize(target),
+            "category": object_category(moved, task_instance) or humanize(moved),
+            "support_category": object_category(target, task_instance) or humanize(target),
         }
     return None
 
@@ -865,6 +928,9 @@ def _gen_prediction(ctx: GenContext) -> list[QRAPair]:
     (held / on support), 不预测 bbox。非任务求解类问题: 不携带主干问题上下文 (context 为空),
     也不喂入 backbone (避免与本步 planning 互相泄露动作)。
     """
+    # 主动响应 (A/B) 不生成预测题: 预测题"给上一步动作+目标"与主动响应"自行发现异常"相矛盾
+    if ctx.task_type in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
+        return []
     if ctx.strategy != SAMPLING_DURING:
         return []
     next_step = ctx.next_step
@@ -897,6 +963,7 @@ def _gen_prediction(ctx: GenContext) -> list[QRAPair]:
 # (新增问题类型 = 在此追加一个生成器函数, 无需改动主流程)
 QUESTION_GENERATORS: list[Callable[[GenContext], list[QRAPair]]] = [
     _gen_planning,
+    _gen_anomaly,
     _gen_perception,
     _gen_bbox,
     _gen_prediction,
@@ -914,60 +981,39 @@ def _parse_event_id(event_id: str) -> tuple[int, str]:
     return int(m.group(1)), m.group(2)
 
 
-def build_room_topology(task_instance: dict[str, Any]) -> dict[str, Any]:
-    """从任务实例的场景图提取房间拓扑 (连通图 + 距离), 作为空间上下文。
+def _is_retry_event(event_id: str) -> bool:
+    """是否 nav_retry 事件 (step_NNN_post_nav_retry_M)。
 
-    数据源: task_instance 的 ``before_graph.navigation`` (回退 after_graph / debug.before_graph)。
-    返回::
-
-        {"rooms": ["bathroom_0", ...],                      # 所有房间名 (排序)
-         "edges": [["bathroom_0", "bathroom_1", 9.8], ...]}  # [源房间, 目标房间, 距离(米, 1位小数)]
-
-    无可用拓扑信息时返回空结构 (rooms / edges 为空)。
+    这类事件与同名 step 的 post 帧共享同一 simulation_step, 仅用于补充 bbox/perception 采样,
+    不重复生成主干规划/预测问题 (见 translate_task_instance 的去重)。
     """
-    graph = (task_instance.get("before_graph")
-             or task_instance.get("after_graph")
-             or (task_instance.get("debug") or {}).get("before_graph")
-             or {})
-    nav = graph.get("navigation") or {}
-    raw_edges = nav.get("room_edges") or []
-
-    rooms: set[str] = set()
-    edges: list[list[Any]] = []
-    for e in raw_edges:
-        src, tgt = e.get("source"), e.get("target")
-        if not src or not tgt:
-            continue
-        rooms.add(src)
-        rooms.add(tgt)
-        dist = e.get("distance")
-        edges.append([
-            src,
-            tgt,
-            round(dist, 1) if isinstance(dist, (int, float)) else None,
-        ])
-
-    return {"rooms": sorted(rooms), "edges": edges}
+    return bool(re.search(r"_nav_retry_\d+", event_id or ""))
 
 
 def load_task_context(task_instance: dict[str, Any]) -> dict[str, Any]:
     """把 task_instance.json 拍平成翻译器需要的扁平任务上下文。
 
-    任务信息集中在 ``task`` 子字典 (task_id/instruction/solution_plan/plan_objects)。
+    任务信息集中在 ``task`` 子字典 (task_id/instruction/solution_plan/plan_objects);
+    异常源 (Env-B) 在 ``task_environment.state_changed_objects``, 消歧信息 (Env-C) 在
+    ``task.semantic_reasoning``。
     """
     task = task_instance.get("task") or task_instance.get("task_environment", {}).get("task") or {}
-    robot = task_instance.get("robot") or task_instance.get("task_environment", {}).get("robot") or {}
+    task_env = task_instance.get("task_environment") or {}
+    robot = task_instance.get("robot") or task_env.get("robot") or {}
     nested = task_instance.get("task_instance") or {}
 
     env_type = (task.get("task_type") or nested.get("task_type")
-                or task_instance.get("task_environment", {}).get("env_type") or "")
+                or task_env.get("env_type") or "")
     instruction = task.get("instruction") or nested.get("instruction") or ""
     task_id = task.get("task_id") or nested.get("task_id") or task_instance.get("run_id") or ""
-    run_id = task_instance.get("run_id") or task_instance.get("task_environment", {}).get("env_id") or ""
+    run_id = task_instance.get("run_id") or task_env.get("env_id") or ""
     robot_id = robot.get("robot_id") or "robot_0"
 
     # 符号层方案 (MOVE/PICK/PLACE/INTERACT/WAIT), 与 intro.md 实例格式一致
     plan = task.get("solution_plan") or task_instance.get("solution_plan") or []
+
+    state_changed_objects = list(task_env.get("state_changed_objects") or [])
+    semantic_reasoning = task.get("semantic_reasoning") or task_env.get("semantic_reasoning")
 
     return {
         "task_id": task_id,
@@ -983,10 +1029,18 @@ def load_task_context(task_instance: dict[str, Any]) -> dict[str, Any]:
         "robot_initial_room": robot.get("initial_room") or "",
         "plan_objects": list(task.get("plan_objects") or nested.get("plan_objects") or []),
         "task_objects": list(task.get("task_objects") or task_instance.get("task_objects") or []),
-        "camera": list(task_instance.get("camera")
-                       or task_instance.get("task_environment", {}).get("camera") or []),
+        "added_objects": list(task_instance.get("added_objects") or task_env.get("added_objects") or []),
+        "camera": list(task_instance.get("camera") or task_env.get("camera") or []),
         "solution_plan": list(plan),
+        "state_changed_objects": state_changed_objects,
+        "semantic_reasoning": semantic_reasoning,
+        "anomaly": derive_anomaly(state_changed_objects),
         "room_topology": build_room_topology(task_instance),
+        # 场景图 (含 navigation.room_centers + nodes.pose/rooms), 供消歧题干生成空间特征。
+        "before_graph": (task_instance.get("before_graph")
+                         or task_instance.get("after_graph")
+                         or (task_instance.get("debug") or {}).get("before_graph")
+                         or {}),
     }
 
 
@@ -1054,6 +1108,7 @@ def load_sampling_scenes(expert_result: dict[str, Any], task_ctx: dict[str, Any]
             robot_pose=ev.get("robot_pose", {}),
             robot_visible=list(ev.get("robot_visible") or []),
             global_visible=list(ev.get("global_visible") or []),
+            is_retry=_is_retry_event(event_id),
         ))
     return scenes
 
@@ -1114,6 +1169,9 @@ def translate_task_instance(task_instance: dict[str, Any],
 
         # 问题类型生成迭代: 规划类在前(主干), 其余类型随后; 不适用则生成器返回空
         for generator in QUESTION_GENERATORS:
+            # nav_retry 事件仅保留 bbox/perception 采样, 不重复生成主干规划/预测
+            if scene.is_retry and generator in (_gen_planning, _gen_prediction):
+                continue
             generated = generator(ctx)
             pairs.extend(generated)
             # 主干(规划)问题生成后记入历史, 供后续轮次作为上下文
@@ -1195,7 +1253,7 @@ def _rule_answer_nl(pair: QRAPair) -> str:
     if kind == "done":
         return a.get("message") or "The task is complete."
     if kind == "bbox":
-        name = _humanize(a.get("category") or a.get("object_id") or "the object")
+        name = humanize(a.get("category") or a.get("object_id") or "the object")
         if not a.get("visible", True):
             return f"The {name} is not visible in the current view."
         bbox = a.get("bbox_xyxy")
@@ -1210,7 +1268,7 @@ def _rule_answer_nl(pair: QRAPair) -> str:
     name = category or (target or "").replace("_", " ") or "the object"
     if action == PRIMITIVE_MOVE:
         if cross_room and room:
-            return f"Move to the {name} in {room}."
+            return f"Find the {name} in {room}."
         if room:
             return f"Move to the {name} in the current room ({room})."
         if bbox:
@@ -1331,22 +1389,26 @@ def _required_views(task_type: str, robot_exists: bool,
 
 
 def _copy_view_images(event_id: str, view_name: str, rel_dir: str,
-                      frames_root: str, subfolder: str) -> dict[str, Any]:
+                      frames_root: str, subfolder: str,
+                      task_key: str | None = None) -> dict[str, Any]:
     """把某视角的图片从 frames_root 转存到输出子文件夹, 返回相对路径字典。
 
     返回形如 ``{"view": "...", "rgb": "images/...", ...}``; 仅当源文件存在时才写入键。
+    ``task_key`` 非空时, 图片落盘于 ``images/<task_key>/<event_id>/...`` 并在相对路径中
+    保留该前缀 (批次模式下按任务环境分目录); 为空时退化为单任务布局 ``images/<event_id>/...``。
     """
     file_map = _VIEW_FILES
     src_base = os.path.join(frames_root, "frames", event_id, rel_dir)
     entry: dict[str, Any] = {"view": view_name}
+    img_prefix = os.path.join("images", task_key) if task_key else "images"
     for key, fn in file_map.items():
         src = os.path.join(src_base, fn)
         if not os.path.exists(src):
             continue
-        dst = os.path.join(subfolder, "images", event_id, rel_dir, fn)
+        dst = os.path.join(subfolder, img_prefix, event_id, rel_dir, fn)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
-        entry[key] = os.path.join("images", event_id, rel_dir, fn)
+        entry[key] = os.path.join(img_prefix, event_id, rel_dir, fn)
     return entry
 
 
@@ -1402,6 +1464,64 @@ def export_task_dataset(pairs: list[QRAPair],
     return subfolder
 
 
+def _jsonl_line(pair: QRAPair, task_key: str | None = None) -> dict[str, Any]:
+    """把一条 QRA 精简为批次 jsonl 的一行: 精简字段 + 唯一任务键 / task_instance_id / event_id。
+
+    ``task_key`` (形如 ``<scene>__<sample_id>``) 是唯一标识, 与 images/ 目录键一致;
+    ``task_instance_id`` 为源 task_id (跨场景可能重名), ``event_id`` 为采样点。三者组合
+    便于在合并成单一 jsonl 后回溯每个问题所属的任务环境与采样点。
+    """
+    line = pair.to_simple_dict()
+    return {
+        "task_key": task_key or "",
+        "task_instance_id": pair.task_instance_id,
+        "event_id": pair.event_id,
+        **line,
+    }
+
+
+def export_batch_dataset(batch_items: list[dict[str, Any]],
+                         output_dir: str) -> str | None:
+    """把一批任务实例的 QRA 对汇总写到一个 jsonl + images/<task_key>/ 目录树。
+
+    ``batch_items`` 每项为 ``{"task_key", "pairs", "frames_root", "task_type"}``;
+    ``task_key`` 用于图片按任务环境分目录 (形如 ``<scene>__<sample_id>``)。输出结构::
+
+        <output_dir>/
+        ├── qra.jsonl                     # 全部问题, 一行一条
+        └── images/<task_key>/<event_id>/<view>/<file>   # 图片按任务环境分目录
+
+    返回 output_dir; 无样本时返回 None。
+    """
+    usable = [it for it in batch_items if it.get("pairs")]
+    if not usable:
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+
+    jsonl_path = os.path.join(output_dir, "qra.jsonl")
+    with open(jsonl_path, "w", encoding="utf-8") as fh:
+        for item in usable:
+            task_key = item["task_key"]
+            pairs: list[QRAPair] = item["pairs"]
+            frames_root = item.get("frames_root") or os.getcwd()
+            task_type = item.get("task_type") or (pairs[0].task_type if pairs else "")
+
+            event_ids = sorted({p.event_id for p in pairs if p.event_id})
+            image_map: dict[str, list[dict[str, Any]]] = {}
+            for event_id in event_ids:
+                robot_exists, global_ids = _discover_views(event_id, frames_root)
+                image_map[event_id] = [
+                    _copy_view_images(event_id, vn, rd, frames_root, output_dir, task_key=task_key)
+                    for vn, rd in _required_views(task_type, robot_exists, global_ids)
+                ]
+            for p in pairs:
+                p.images = image_map.get(p.event_id, [])
+                fh.write(json.dumps(_jsonl_line(p, task_key=task_key), ensure_ascii=False) + "\n")
+
+    logger.info("Exported batch (%d tasks) to %s", len(usable), jsonl_path)
+    return output_dir
+
+
 def generate_task_dataset_files(task_instance_path: str,
                                 expert_result_path: str,
                                 output_root: str = DEFAULT_OUTPUT_ROOT,
@@ -1444,6 +1564,92 @@ def generate_datasets(task_instance_paths: list[str],
         if sf:
             subfolders.append(sf)
     return subfolders
+
+
+def discover_task_instances(data_root: str,
+                            env_types: tuple[str, ...] = ("Env-A", "Env-B", "Env-C")) -> list[dict[str, Any]]:
+    """遍历 ``data_root/Env-X/<scene>/<sample_id>/`` 目录树, 定位 generation.json + expert/expert_result.json。
+
+    返回 ``[{env_type, scene, sample_id, generation_path, expert_result_path}, ...]``,
+    跳过缺失任一文件的目录。``frames_root`` 可由 ``dirname(expert_result_path)=<sample>/expert``
+    正确推导, 无需在此处理。
+    """
+    discovered: list[dict[str, Any]] = []
+    for env_type in env_types:
+        env_dir = os.path.join(data_root, env_type)
+        if not os.path.isdir(env_dir):
+            continue
+        for scene in sorted(os.listdir(env_dir)):
+            scene_dir = os.path.join(env_dir, scene)
+            if not os.path.isdir(scene_dir):
+                continue
+            for sample_id in sorted(os.listdir(scene_dir)):
+                sample_dir = os.path.join(scene_dir, sample_id)
+                gen_path = os.path.join(sample_dir, "generation.json")
+                er_path = os.path.join(sample_dir, "expert", "expert_result.json")
+                if os.path.isfile(gen_path) and os.path.isfile(er_path):
+                    discovered.append({
+                        "env_type": env_type,
+                        "scene": scene,
+                        "sample_id": sample_id,
+                        "generation_path": gen_path,
+                        "expert_result_path": er_path,
+                    })
+    return discovered
+
+
+def generate_datasets_from_data_root(data_root: str,
+                                     output_root: str = DEFAULT_OUTPUT_ROOT,
+                                     llm: Any = None) -> list[str]:
+    """从底层数据文件夹批量生成数据集 (``data_root`` 指向 Env-A/B/C 的父目录)。
+
+    逐条 (generation.json, expert/expert_result.json) 调 ``generate_task_dataset_files`` 导出;
+    返回所有已生成子文件夹的绝对路径列表。
+    """
+    subfolders: list[str] = []
+    for inst in discover_task_instances(data_root):
+        sf = generate_task_dataset_files(
+            inst["generation_path"], inst["expert_result_path"], output_root, llm)
+        if sf:
+            subfolders.append(sf)
+    return subfolders
+
+
+def generate_batch_dataset(instances: list[dict[str, Any]],
+                           output_dir: str,
+                           llm: Any = None) -> str | None:
+    """从一批 ``discover_task_instances`` 返回的实例生成批次数据集 (单一 qra.jsonl + 按任务环境分目录的图片)。
+
+    复用单实例生成链路 (translate → attach_mcq → NL 翻译), 但不逐实例导出, 而是汇总后经
+    ``export_batch_dataset`` 一次性写出; 图片目录 key 用 ``<scene>__<sample_id>`` 避免
+    run_id 跨场景重名冲突。
+    """
+    from distractor import attach_mcq
+
+    client = _ensure_llm(llm)
+    batch_items: list[dict[str, Any]] = []
+    for inst in instances:
+        gen_path = inst["generation_path"]
+        er_path = inst["expert_result_path"]
+        frames_root = os.path.dirname(er_path)
+        task_instance = load_json(gen_path)
+        expert_result = load_json(er_path)
+        pairs = translate_expert_result(task_instance, expert_result, llm, frames_root)
+
+        task_ctx = load_task_context(task_instance)
+        scenes_by_event = {s.observation_id: s for s in load_sampling_scenes(expert_result, task_ctx)}
+        attach_mcq(pairs, task_instance, scenes_by_event, client)
+        translate_pairs_to_nl(pairs, client)
+
+        task_key = _sanitize_dirname(f"{inst.get('scene', '')}__{inst.get('sample_id', '')}")
+        batch_items.append({
+            "task_key": task_key,
+            "pairs": pairs,
+            "frames_root": frames_root,
+            "task_type": pairs[0].task_type if pairs else "",
+        })
+
+    return export_batch_dataset(batch_items, output_dir)
 
 
 # ======================================================================
