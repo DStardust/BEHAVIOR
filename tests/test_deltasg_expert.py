@@ -1114,13 +1114,16 @@ def test_expert_frames_are_high_resolution_and_disable_temporal_ghosting():
 
     assert 'parser.add_argument("--view-width", type=int, default=640)' in source
     assert 'parser.add_argument("--view-height", type=int, default=480)' in source
-    assert 'settings.set_int("/rtx/post/aa/op", 0)' in source
-    assert 'settings.set_int("/rtx-defaults/post/aa/op", 0)' in source
+    assert (
+        'lazy.omni.replicator.core.settings.set_render_rtx_realtime(antialiasing="FXAA")'
+        in source
+    )
+    assert 'settings.set_int("/rtx-defaults/post/aa/op", 2)' in source
     assert 'settings.set_bool("/omni/replicator/captureMotionBlur", False)' in source
     assert 'settings.set_bool("/rtx/post/motionblur/enabled", False)' in source
     assert 'settings.set_bool("/rtx/raytracing/enableAccumulation", False)' in source
     capture_globals = source[
         source.index("def _capture_globals("):source.index("def _capture_event_unprotected(")
     ]
-    assert "cut_position[2] += 0.01" in capture_globals
-    assert capture_globals.count("sensor.set_position_orientation(") >= 2
+    assert "sensor.set_position_orientation(" not in capture_globals
+    assert "sensor.image_width = int(sensor.image_width)" not in capture_globals

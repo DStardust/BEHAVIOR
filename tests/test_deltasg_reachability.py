@@ -1551,8 +1551,7 @@ def test_expert_uses_one_instance_stream_and_fixed_official_global_rgb_views():
         source.index("def _capture_globals"):
         source.index("def _capture_event")
     ]
-    assert "position, orientation = sensor.get_position_orientation()" in capture_globals
-    assert "sensor.set_position_orientation(position=position, orientation=orientation)" in capture_globals
+    assert "sensor.set_position_orientation" not in capture_globals
     assert "fixed_official_global_rgb_sensor" in capture_globals
     assert "generation_frustum_physx_raycast" in capture_globals
     assert 'camera.get("visibility")' in capture_globals

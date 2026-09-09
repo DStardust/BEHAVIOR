@@ -3301,17 +3301,6 @@ def _capture_robot(
 def _capture_globals(camera_streams, directory, target_ids, min_pixels, instance_categories):
     results = []
     for camera, sensor in camera_streams:
-        # A fixed Replicator RenderProduct can retain the previous pose of a
-        # teleported object even with RTX temporal effects disabled. Force a
-        # camera cut, then restore the exact approved generation camera pose,
-        # so the saved frame contains only the current simulator state.
-        position, orientation = sensor.get_position_orientation()
-        cut_position = position.clone()
-        cut_position[2] += 0.01
-        sensor.set_position_orientation(position=cut_position, orientation=orientation)
-        og.sim.render()
-        sensor.set_position_orientation(position=position, orientation=orientation)
-        og.sim.render()
         obs, info = sensor.get_obs()
         camera_id = str(camera.get("camera_id") or f"global_{len(results)}")
         result = _save_camera_sample(
@@ -3749,8 +3738,11 @@ def _initialize_segmentation_streams(env, run, camera_resolution=(640, 480)):
     # symbolic navigation and placement. Dataset supervision must represent a
     # single simulator state, so use non-temporal AA at the higher resolution.
     settings = lazy.carb.settings.get_settings()
-    settings.set_int("/rtx/post/aa/op", 0)
-    settings.set_int("/rtx-defaults/post/aa/op", 0)
+    # Replicator recommends FXAA for non-sequential dataset frames. Its
+    # helper also disables RTX AA limited-ops, which can otherwise preserve
+    # stale RGB pixels even when the numeric AA mode is set to Off.
+    lazy.omni.replicator.core.settings.set_render_rtx_realtime(antialiasing="FXAA")
+    settings.set_int("/rtx-defaults/post/aa/op", 2)
     settings.set_bool("/omni/replicator/captureMotionBlur", False)
     settings.set_bool("/rtx/post/motionblur/enabled", False)
     settings.set_bool("/rtx-defaults/post/motionblur/enabled", False)
