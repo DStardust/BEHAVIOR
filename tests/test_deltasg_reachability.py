@@ -257,8 +257,10 @@ def test_env_b_infrastructure_task_conditions_robot_spawn_on_fixture():
         engine.index("def _choose_env_b_resolution_path")
     ]
     assert "require_reachable=False" in prepare
-    assert 'anomaly_type != "dirty_dishes"' in prepare
-    assert 'bindings.get("dishwasher") or bindings.get("sink")' in prepare
+    assert 'anomaly_type not in {"dirty_dishes", "dirty_clothes"}' in prepare
+    assert 'bindings.get("dishwasher")' in prepare
+    assert 'or bindings.get("sink")' in prepare
+    assert 'or bindings.get("washer")' in prepare
     assert "self._prepared_env_b_target_room = fixture_room" in prepare
     assert 'self._prepared_env_b_path_name = recipe["path_name"]' in prepare
     assert 'path={recipe[\'path_name\']}' in prepare
@@ -1569,9 +1571,9 @@ def test_expert_replays_generated_support_furniture_as_kinematic():
         source.index("def _spawn_added_objects"):
         source.index("def _apply_saved_initial_states")
     ]
-    expected = '"task_support" in set(record.get("semantic_roles") or [])'
-    assert expected in configs
-    assert expected in spawn
+    assert 'task_support = "task_support" in semantic_roles' in configs
+    assert 'task_destination = "task_destination" in semantic_roles' in configs
+    assert '"task_support" in set(record.get("semantic_roles") or [])' in spawn
     assert '"kinematic_only":' in configs
     assert "kinematic_only=" in spawn
     assert '"fixed_base": anchored_for_replay' in configs
@@ -2163,7 +2165,7 @@ def test_oracle_replay_anchors_portables_without_weakening_physical_replay():
         source.index("def _saved_robot_approaches")
     ]
     assert 'backend="physical_control"' in configs
-    assert "anchored_for_replay = task_support" in configs
+    assert "anchored_for_replay = (task_support or task_destination)" in configs
     assert '"fixed_base": anchored_for_replay' in configs
     assert '"kinematic_only": anchored_for_replay' in configs
     execute = source[source.index("def execute("):source.index("def main()")]
@@ -2357,13 +2359,39 @@ def test_physical_navigation_keeps_a_collision_free_pose_already_near_target():
         physical.index("def _navigate_to_pose(")
     ]
     assert "current_position, current_orientation = self.robot.get_position_orientation()" in navigate
-    assert "eef_pose is None and current_target_distance <= 0.75" in navigate
+    assert "current_target_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in navigate
     assert "yaw_error <= 0.2" in navigate
     assert 'pose_source = "current_satisfied_pose"' in navigate
     assert "yield self._postprocess_action(self._empty_action())" in navigate
     assert "_native_occupant_at_pose(" in navigate
     assert 'pose_source = "current_reachable_pose"' in navigate
     assert "yield from self._navigate_to_pose(pose" in navigate
+
+
+def test_symbolic_navigation_reuses_a_valid_operation_stance_without_teleporting():
+    source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    symbolic = source[
+        source.index("class DeltaSGOraclePrimitives"):
+        source.index("class DeltaSGPhysicalPrimitives")
+    ]
+    navigate = symbolic[
+        symbolic.index("def _navigate_to_obj("):
+        symbolic.index("def _navigate_to_pose(")
+    ]
+    assert "current_target_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in navigate
+    assert "current_operation_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in navigate
+    assert '"pose_source": "current_operation_pose_in_place_turn"' in navigate
+    reuse = navigate[
+        navigate.index('"pose_source": "current_operation_pose_in_place_turn"'):
+        navigate.index("return", navigate.index('"pose_source": "current_operation_pose_in_place_turn"')) + len("return")
+    ]
+    assert "yield from self._settle_robot()" in reuse
+    assert "_sync_inventory_to_eef()" in reuse
+    assert "_navigate_to_pose" not in reuse
+    before_diagnostics = navigate[:navigate.index('"pose_source": "current_operation_pose_in_place_turn"')]
+    assert "current_position.clone()" in before_diagnostics
+    assert "_teleport_robot_preserving_delta_objects(" in before_diagnostics
+    assert '"base_translation": 0.0' in navigate
 
 
 def test_expert_integrity_baseline_is_recorded_after_sensor_initialization_settles():

@@ -525,6 +525,65 @@ def _normalize_delivery_open_order(task_name: str, raw_plan: list[dict[str, Any]
     )
 
 
+def _normalize_hand_wash_cleanup(
+    task: dict[str, Any],
+    objects: dict[str, dict[str, Any]],
+    raw_plan: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    reasoning = task.get("semantic_reasoning") or {}
+    if (
+        task.get("primary_behavior_task") != "clean_dirty_dishes"
+        or reasoning.get("solution_path") != "hand_wash"
+    ):
+        return raw_plan, []
+    bindings = (reasoning.get("resolution_recipe") or {}).get(
+        "infrastructure_bindings"
+    ) or {}
+    sink_id = (bindings.get("sink") or {}).get("object_id")
+    sponge_id = next(
+        (
+            object_id
+            for object_id, record in objects.items()
+            if record.get("category") == "sponge"
+        ),
+        None,
+    )
+    if not sink_id or not sponge_id:
+        return raw_plan, []
+    wipe_index = next(
+        (
+            index
+            for index, step in enumerate(raw_plan)
+            if str(step.get("primitive") or "").upper() == "INTERACT"
+            and _interaction_primitive("clean_dirty_dishes", str(step.get("nl") or ""))
+            == "WIPE"
+        ),
+        None,
+    )
+    if wipe_index is None:
+        return raw_plan, []
+    already_released = any(
+        str(step.get("primitive") or "").upper() == "PLACE"
+        and step.get("target_object") == sink_id
+        for step in raw_plan[wipe_index + 1 :]
+    )
+    if already_released:
+        return raw_plan, []
+    normalized = [dict(step) for step in raw_plan]
+    normalized.insert(
+        wipe_index + 1,
+        {
+            "step_id": normalized[wipe_index].get("step_id") or wipe_index + 1,
+            "primitive": "PLACE",
+            "nl": "Place the used sponge inside the sink",
+            "target_object": sink_id,
+            "placement_mode": "inside",
+            "inventory": [sponge_id],
+        },
+    )
+    return normalized, ["inserted sponge placement before faucet shutdown"]
+
+
 def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
     """Compile an LLM plan into deterministic OmniGibson expert primitives.
 
@@ -552,7 +611,8 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
 
     default_target = _task_target(objects)
     raw_plan, ordering_warnings = _normalize_delivery_open_order(task_name, raw_plan)
-    warnings: list[str] = list(ordering_warnings)
+    raw_plan, hand_wash_warnings = _normalize_hand_wash_cleanup(task, objects, raw_plan)
+    warnings: list[str] = [*ordering_warnings, *hand_wash_warnings]
     provisional: list[dict[str, Any]] = []
     inventory: list[str] = []
     last_navigation_target: str | None = None
@@ -726,12 +786,13 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
                 ("TOGGLE_ON", faucet_id),
                 ("GRASP", sponge_id),
                 ("WIPE", dish_id),
+                ("PLACE_INSIDE", sink_id),
                 ("TOGGLE_OFF", faucet_id),
             ]
             if actual != expected:
                 raise ExpertPlanError(
                     "hand-wash contract requires dirty-dish pickup, sink placement, "
-                    "faucet on, sponge pickup, in-sink wipe, and faucet off"
+                    "faucet on, sponge pickup, in-sink wipe, sponge release, and faucet off"
                 )
             wipe = manipulations[4]
             if wipe.get("tool") != sponge_id or wipe.get("destination") != sink_id:

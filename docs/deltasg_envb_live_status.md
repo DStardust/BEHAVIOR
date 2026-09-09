@@ -175,9 +175,9 @@ The existing report is now explicitly labeled as legacy layout examples.
 Do not present those samples as validated realistic household storage.
 
 Generator now anchors hand-wash sponge/soap at the bound sink instead of the
-dirty dish. Policy: horizontal AABB-edge gap to dish >=0.4m and gap to sink
+ dirty dish. Policy: horizontal AABB-edge gap to dish >=0.4m and gap to sink
 <=1.0m, on an open support. Fire extinguisher is upright on a reachable floor,
->=1.5m horizontal edge gap from fire; no improvised furniture fallback. These
+>=2.5m horizontal edge gap from fire; no improvised furniture fallback. These
 are dataset layout heuristics, not safety-code compliance claims. Constraints
 are evaluated at candidate selection, actual placement, and after warmup;
 operation reach remains 1.15m and navigation must connect the separate locations.
@@ -207,7 +207,7 @@ vertical smoke column. Generation and expert replay both record mode
 `deltasg_usdz_flame_smoke_column_v1`; audit requires the flame asset, visible
 flame and smoke, radius 0.18 m, upward velocity 1.5, and fade 0.12.
 
-Fire-extinguisher placement is floor-only, upright, and at least 1.5 m from the
+Fire-extinguisher placement is floor-only, upright, and at least 2.5 m from the
 fire by horizontal AABB-edge distance. Reachable rooms other than the fire room
 are tried first; the fire room is the last fallback. A floor-placement control
 flow bug skipped the expert navigation preflight before breaking out of the
@@ -235,3 +235,41 @@ Runtime evidence:
 Static verification: 354 tests passed; Python compilation, shell syntax, and
 `git diff --check` passed. This is focused runtime evidence, not yet a broad
 multi-scene Env-B rate estimate.
+
+## Dirty-clothes Three-recipe Gate - 2026-09-09
+
+The Beechwood_0 regression exposed two independent generation defects. The
+machine recipe selected rigid clothing whose live AABB was larger than the
+washer's official fillable volume. The `cloth_basket` recipe is explicitly
+substituted with a real fillable `wicker_basket`, but incorrectly requested
+`OnTop` on its narrow rim. Generation now filters clothing models against the
+bound washer's official fillable/openfillable visual-boundary extents before
+spawning. The substituted wicker basket, hamper, and washer all require the
+official `Inside=True` predicate; no relation threshold was relaxed.
+
+Fresh generation evidence is
+`code/outputs/envb_clothes3_b0_fitfix_20260909`. Beechwood_0 produced 3/3
+requested samples in 3 raw attempts: `machine_wash_clothes`, `put_in_hamper`,
+and `put_on_cloth_basket`. All three selected the only installed rigid garment
+model that conservatively fits the destination (`sock::vpafgj`) and passed
+official `Inside` preflights. The machine sample additionally passed
+reversible official `Open` and `ToggledOn` preflights. Camera coverage passed
+for every generated sample.
+
+The first expert replay accepted only the machine recipe. The hamper and wicker
+basket both fell through the floor by 2.2345 m immediately after the first
+navigation capture, while all native objects and the robot remained stable.
+This was a reconstruction defect: generated task destinations were preloaded
+as dynamic bodies even though the plan never actuates those containers.
+Expert reconstruction now anchors rigid `task_destination` objects just like
+generated `task_support` objects. Grasped task objects and interaction tools
+remain dynamic.
+
+Targeted replay evidence is
+`code/outputs/runtime_checks/envb_clothes3_b0_anchorfix_20260909`. The three
+recipes are 3/3 accepted and QA-eligible with no failure stages, artifact
+violations, or scene-integrity movement. The washer recipe completes all eight
+steps through `OPEN`, `PLACE_INSIDE`, `CLOSE`, and `TOGGLE_ON`; hamper and wicker
+basket each complete four steps through `PLACE_INSIDE`. Static verification is
+379 tests passed plus Python compilation and `git diff --check`. This is a
+single-scene all-recipe gate; multi-scene Env-B regression remains required.

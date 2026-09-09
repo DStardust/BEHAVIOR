@@ -1527,10 +1527,15 @@ class OnlineDeltaSGEngine:
 
         anomaly_category = self._choose_env_b_anomaly_category(anomaly_type)
         anomaly_record = self._record_for_category(anomaly_category)
+        container_destination_key = None
         if anomaly_type == "dirty_dishes":
-            destination_key = (
+            container_destination_key = (
                 "sink" if recipe["path_name"] == "hand_wash" else "dishwasher"
             )
+        elif anomaly_type == "dirty_clothes" and recipe["path_name"] == "machine_wash_clothes":
+            container_destination_key = "washer"
+        if container_destination_key is not None:
+            destination_key = container_destination_key
             destination_id = recipe["infrastructure_bindings"][destination_key]["id"]
             destination = self.env.scene.object_registry("name", destination_id)
             container_extents = []
@@ -1551,7 +1556,7 @@ class OnlineDeltaSGEngine:
             compatible = {category: models for category, models in compatible.items() if models}
             if not compatible:
                 raise RuntimeError(
-                    f"No installed dirty-dish model fits {destination_key} {destination_id}"
+                    f"No installed {anomaly_type} model fits {destination_key} {destination_id}"
                 )
             if anomaly_category not in compatible:
                 anomaly_category = self.rng.choice(sorted(compatible))
@@ -1687,11 +1692,8 @@ class OnlineDeltaSGEngine:
                 if role != "task_destination" or not solution.get("ok"):
                     break
                 live = self.env.scene.object_registry("name", solution["object_name"])
-                destination_predicate = (
-                    "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
-                )
                 inside_check = self._preflight_env_b_inside(
-                    anomaly_obj, live, predicate=destination_predicate
+                    anomaly_obj, live, predicate="Inside"
                 )
                 solution["destination_preflight"] = inside_check
                 if inside_check["ok"]:
@@ -1741,6 +1743,8 @@ class OnlineDeltaSGEngine:
                 required_tools_ok = required_tools_ok and checked["ok"]
         destination_preflight = {"ok": True, "required": False}
         faucet_toggle_preflight = {"ok": True, "required": False}
+        infrastructure_open_preflight = {"ok": True, "required": False}
+        infrastructure_toggle_preflight = {"ok": True, "required": False}
         sweep_preflight = {"ok": True, "required": False}
         destination_name = None
         if required_tools_ok:
@@ -1766,12 +1770,12 @@ class OnlineDeltaSGEngine:
                         bindings.get("dishwasher") or bindings.get("washer") or {}
                     ).get("id")
                 destination = self.env.scene.object_registry("name", destination_name, None)
-                destination_predicate = (
-                    "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
-                )
                 destination_preflight = self._preflight_env_b_inside(
-                    anomaly_obj, destination, predicate=destination_predicate
+                    anomaly_obj, destination, predicate="Inside"
                 )
+                if recipe["path_name"] in {"machine_wash", "machine_wash_clothes"}:
+                    infrastructure_open_preflight = self._preflight_env_b_open(destination)
+                    infrastructure_toggle_preflight = self._preflight_env_b_toggle(destination)
             if anomaly_type == "broken_object":
                 dustpan_name = next(
                     item["object_name"] for item in solution_objects
@@ -1781,12 +1785,75 @@ class OnlineDeltaSGEngine:
                 sweep_preflight = self._preflight_env_b_inside(
                     anomaly_obj, dustpan, predicate="OnTop"
                 )
+        native_initial_state_records = []
+        native_initial_state_validation = {"ok": True, "objects": []}
+        required_native_states = {}
+        bindings = recipe.get("infrastructure_bindings") or {}
+        if recipe["path_name"] == "hand_wash":
+            faucet_name = bindings["faucet"]["id"]
+            required_native_states[faucet_name] = {"toggled_on": False}
+        elif recipe["path_name"] in {"machine_wash", "machine_wash_clothes"}:
+            infrastructure_key = (
+                "dishwasher" if recipe["path_name"] == "machine_wash" else "washer"
+            )
+            infrastructure_name = bindings[infrastructure_key]["id"]
+            required_native_states[infrastructure_name] = {
+                "open": False,
+                "toggled_on": False,
+            }
+        native_state_types = {
+            "open": object_states.Open,
+            "toggled_on": object_states.ToggledOn,
+        }
+        for object_id, desired_states in required_native_states.items():
+            obj = self.env.scene.object_registry("name", object_id, None)
+            state_checks = {}
+            for state_name, desired in desired_states.items():
+                state_cls = native_state_types[state_name]
+                state = obj.states.get(state_cls) if obj is not None else None
+                if state is None:
+                    state_checks[state_name] = {
+                        "ok": False,
+                        "reason": "missing_official_state",
+                    }
+                    native_initial_state_validation["ok"] = False
+                    continue
+                before = bool(state.get_value())
+                if before != desired:
+                    if state_cls is object_states.Open:
+                        state.set_value(desired, fully=True)
+                    else:
+                        state.set_value(desired)
+                state.clear_cache()
+                after = bool(state.get_value())
+                state_checks[state_name] = {
+                    "ok": after == desired,
+                    "before": before,
+                    "desired": desired,
+                    "after": after,
+                }
+                native_initial_state_validation["ok"] &= after == desired
+            native_initial_state_validation["objects"].append(
+                {"object_id": object_id, "states": state_checks}
+            )
+            native_initial_state_records.append(
+                {
+                    "object_id": object_id,
+                    "category": getattr(obj, "category", None),
+                    "room_id": next(iter(getattr(obj, "in_rooms", None) or [target_room])),
+                    "states": desired_states,
+                    "semantic_roles": ["required_infrastructure"],
+                }
+            )
         ok = bool(
             abnormal_state.get("ok")
             and required_tools_ok
             and destination_preflight["ok"]
             and faucet_toggle_preflight["ok"]
+            and infrastructure_open_preflight["ok"]
+            and infrastructure_toggle_preflight["ok"]
             and sweep_preflight["ok"]
+            and native_initial_state_validation["ok"]
             and settling.get("all_within_threshold")
         )
         if not ok:
@@ -1797,7 +1864,10 @@ class OnlineDeltaSGEngine:
                 f"required_tools_ok={required_tools_ok} "
                 f"destination_preflight={destination_preflight} "
                 f"faucet_toggle_preflight={faucet_toggle_preflight} "
+                f"infrastructure_open_preflight={infrastructure_open_preflight} "
+                f"infrastructure_toggle_preflight={infrastructure_toggle_preflight} "
                 f"sweep_preflight={sweep_preflight} "
+                f"native_initial_state_validation={native_initial_state_validation} "
                 f"settling_ok={settling.get('all_within_threshold')}"
             )
         after_graph = self.snapshot()
@@ -1822,7 +1892,7 @@ class OnlineDeltaSGEngine:
                     "held_object": source_name,
                     "operation_relation": "inside",
                 },
-                {"target": faucet_name, "held_object": source_name},
+                {"target": faucet_name, "held_object": None},
             ]
         elif anomaly_type == "broken_object":
             solutions_by_requested = {
@@ -1869,6 +1939,9 @@ class OnlineDeltaSGEngine:
             "solution_objects": solution_objects,
             "destination_preflight": destination_preflight,
             "faucet_toggle_preflight": faucet_toggle_preflight,
+            "infrastructure_open_preflight": infrastructure_open_preflight,
+            "infrastructure_toggle_preflight": infrastructure_toggle_preflight,
+            "native_initial_state_validation": native_initial_state_validation,
             "sweep_preflight": sweep_preflight,
             "navigation_preflight": navigation_preflight,
             "settling": settling,
@@ -1893,7 +1966,7 @@ class OnlineDeltaSGEngine:
             validation=validation,
             delta_sg=delta_sg,
             graph=after_graph,
-            state_changed_objects=[state_changed],
+            state_changed_objects=[state_changed, *native_initial_state_records],
         )
         return {
             "schema_version": "online_deltasg_env_b_anomaly.v1",
@@ -3611,6 +3684,16 @@ class OnlineDeltaSGEngine:
             if volume_fallback is not None:
                 result["volume_fallback"] = volume_fallback
             result["ok"] = reached
+            if reached:
+                relative_position, relative_orientation = T.relative_pose_transform(
+                    *obj.get_position_orientation(),
+                    *destination.get_position_orientation(),
+                )
+                result["verified_relative_pose"] = {
+                    "position": relative_position.tolist(),
+                    "orientation_xyzw": relative_orientation.tolist(),
+                    "source": "omnigibson_official_relation_preflight",
+                }
         finally:
             with sampling_macros.unlocked():
                 sampling_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = high
@@ -3647,6 +3730,40 @@ class OnlineDeltaSGEngine:
         finally:
             og.sim.load_state(saved, serialized=False)
         print(f"[env-b] faucet toggle preflight={result}", flush=True)
+        return result
+
+    def _preflight_env_b_open(self, obj):
+        """Exercise the official Open state in both directions and restore it."""
+        result = {
+            "ok": False,
+            "required": True,
+            "object": getattr(obj, "name", None),
+            "state": "Open",
+        }
+        if obj is None or object_states.Open not in obj.states:
+            result["reason"] = "missing_official_open_state"
+            return result
+        saved = og.sim.dump_state(serialized=False)
+        state = obj.states[object_states.Open]
+        try:
+            if bool(state.get_value()):
+                close_changed = bool(state.set_value(False, fully=True))
+                close_value = bool(state.get_value())
+                open_changed = bool(state.set_value(True, fully=True))
+                open_value = bool(state.get_value())
+            else:
+                open_changed = bool(state.set_value(True, fully=True))
+                open_value = bool(state.get_value())
+                close_changed = bool(state.set_value(False, fully=True))
+                close_value = bool(state.get_value())
+            result.update(
+                close={"setter_return": close_changed, "actual": close_value},
+                open={"setter_return": open_changed, "actual": open_value},
+            )
+            result["ok"] = close_changed and not close_value and open_changed and open_value
+        finally:
+            og.sim.load_state(saved, serialized=False)
+        print(f"[env-b] appliance open preflight={result}", flush=True)
         return result
 
     def _preflight_env_b_navigation_sequence(self, route_steps):
@@ -3826,7 +3943,7 @@ class OnlineDeltaSGEngine:
         self._prepared_env_b_target_room = None
         self._prepared_env_b_path_name = None
         for anomaly_type in sorted(requested, key=score):
-            if anomaly_type != "dirty_dishes":
+            if anomaly_type not in {"dirty_dishes", "dirty_clothes"}:
                 self._prepared_env_b_type = anomaly_type
                 return None
             paths = self._available_env_b_resolution_paths(
@@ -3850,21 +3967,24 @@ class OnlineDeltaSGEngine:
             )
             recipe = min(paths, key=path_score)
             bindings = recipe.get("infrastructure_bindings") or {}
-            fixture = bindings.get("dishwasher") or bindings.get("sink")
-            if fixture is None:
-                continue
-            fixture_rooms = list(fixture.get("rooms") or [])
+            fixture = (
+                bindings.get("dishwasher")
+                or bindings.get("sink")
+                or bindings.get("washer")
+            )
+            fixture_rooms = list(fixture.get("rooms") or []) if fixture else []
             fixture_room = target_room or (fixture_rooms[0] if fixture_rooms else None)
             self._prepared_env_b_type = anomaly_type
             self._prepared_env_b_target_room = fixture_room
             self._prepared_env_b_path_name = recipe["path_name"]
             print(
                 f"[env-b] preparing anomaly={anomaly_type} "
-                f"path={recipe['path_name']} fixture={fixture.get('id')} "
+                f"path={recipe['path_name']} "
+                f"fixture={fixture.get('id') if fixture else None} "
                 f"room={fixture_room}",
                 flush=True,
             )
-            return fixture.get("id")
+            return fixture.get("id") if fixture else None
         return None
 
     def _choose_env_b_resolution_path(self, anomaly_type, paths):
@@ -4027,8 +4147,9 @@ class OnlineDeltaSGEngine:
                 {"step_id": 8, "primitive": "PICK", "nl": "Pick up the sponge", "target_object": sponge_id},
                 {"step_id": 9, "primitive": "MOVE", "nl": "Move to the dirty dish in the sink", "target_object": anomaly_id, "inventory": [sponge_id]},
                 {"step_id": 10, "primitive": "INTERACT", "nl": "Wipe the dirty dish clean in the running water with the sponge and dish soap", "tool_object": sponge_id, "destination_object": sink_id, "target_object": anomaly_id, "inventory": [sponge_id]},
-                {"step_id": 11, "primitive": "MOVE", "nl": "Move to the faucet", "target_object": faucet_id, "inventory": [sponge_id]},
-                {"step_id": 12, "primitive": "INTERACT", "nl": "Turn off the faucet", "target_object": faucet_id, "inventory": [sponge_id]},
+                {"step_id": 11, "primitive": "PLACE", "nl": "Place the used sponge inside the sink", "target_object": sink_id, "placement_mode": "inside", "inventory": [sponge_id]},
+                {"step_id": 12, "primitive": "MOVE", "nl": "Move to the faucet", "target_object": faucet_id},
+                {"step_id": 13, "primitive": "INTERACT", "nl": "Turn off the faucet", "target_object": faucet_id},
             ]
             actionable = [anomaly_id, sink_id, faucet_id, sponge_id]
             instruction = (
@@ -4057,7 +4178,7 @@ class OnlineDeltaSGEngine:
                 {"step_id": step_id, "primitive": "MOVE", "nl": "Move to the dirty clothing", "target_object": anomaly_id},
                 {"step_id": step_id + 1, "primitive": "PICK", "nl": "Pick up the dirty clothing", "target_object": anomaly_id},
                 {"step_id": step_id + 2, "primitive": "MOVE", "nl": "Move to the laundry receptacle", "target_object": destination_id, "inventory": [anomaly_id]},
-                {"step_id": step_id + 3, "primitive": "PLACE", "nl": "Place the dirty clothing in the laundry collection area", "target_object": destination_id, "placement_mode": ("on_top" if recipe["path_name"] == "put_on_cloth_basket" else "inside"), "inventory": [anomaly_id]},
+                {"step_id": step_id + 3, "primitive": "PLACE", "nl": "Place the dirty clothing inside the laundry receptacle", "target_object": destination_id, "placement_mode": "inside", "inventory": [anomaly_id]},
             ])
             if machine:
                 plan.extend([
@@ -10206,6 +10327,10 @@ class OnlineDeltaSGEngine:
             else None,
             "settling": validation.get("settling"),
             "destination_preflight": validation.get("destination_preflight"),
+            "faucet_toggle_preflight": validation.get("faucet_toggle_preflight"),
+            "infrastructure_open_preflight": validation.get("infrastructure_open_preflight"),
+            "infrastructure_toggle_preflight": validation.get("infrastructure_toggle_preflight"),
+            "native_initial_state_validation": validation.get("native_initial_state_validation"),
             "sweep_preflight": validation.get("sweep_preflight"),
             "navigation_preflight": validation.get("navigation_preflight"),
             "camera_coverage": validation.get("camera_coverage"),

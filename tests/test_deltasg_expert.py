@@ -197,6 +197,11 @@ def hand_wash_sample():
                 "destination_object": "sink_0",
                 "nl": "Wipe the dirty dish in the sink",
             },
+            {
+                "primitive": "PLACE",
+                "target_object": "sink_0",
+                "placement_mode": "inside",
+            },
             {"primitive": "INTERACT", "target_object": "faucet_0", "nl": "Turn off the faucet"},
         ],
         [
@@ -231,8 +236,26 @@ def test_hand_wash_compiles_complete_official_state_sequence():
         ("TOGGLE_ON", "faucet_0"),
         ("GRASP", "sponge_0"),
         ("WIPE", "plate_0"),
+        ("PLACE_INSIDE", "sink_0"),
         ("TOGGLE_OFF", "faucet_0"),
     ]
+
+
+def test_hand_wash_legacy_plan_inserts_sponge_release_before_toggle_off():
+    run = hand_wash_sample()
+    run["task_environment"]["solution_plan"].pop(-2)
+    compiled = compile_expert_plan(run)
+    actions = [
+        (step.primitive, step.target_object)
+        for step in compiled.steps
+        if step.primitive != "NAVIGATE_TO"
+    ]
+    assert actions[-3:] == [
+        ("WIPE", "plate_0"),
+        ("PLACE_INSIDE", "sink_0"),
+        ("TOGGLE_OFF", "faucet_0"),
+    ]
+    assert "inserted sponge placement before faucet shutdown" in compiled.warnings
 
 
 def test_hand_wash_rejects_legacy_sponge_to_dish_shortcut():
@@ -302,7 +325,27 @@ def test_swept_payload_is_carried_by_dustpan_until_emptying():
     assert '"mode": "oracle_symbolic_dustpan_payload"' in source
     sweep = source[source.index('elif step.primitive == "SWEEP_INTO"'):]
     sweep = sweep[:sweep.index('elif step.primitive == "EMPTY_INTO"')]
-    assert sweep.index("controller._release()") < sweep.index("state.set_value(destination, True)")
+    assert sweep.index("state.set_value(destination, True)") < sweep.index("controller._release()")
+    assert 'saved_sweep_relation.get("verified_relative_pose")' in sweep
+    assert "T.pose_transform(*destination_pose, *relative_pose)" in sweep
+    assert '"omnigibson_official_on_top_preflight_pose_replay"' in sweep
+    empty = source[source.index('elif step.primitive == "EMPTY_INTO"'):]
+    empty = empty[:empty.index("else:\n                if args.backend")]
+    assert 'saved_destination_relation.get("verified_relative_pose")' in empty
+    assert "DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 1" in empty
+    assert "DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2" in empty
+    assert "payload.set_position_orientation(*target_pose)" in empty
+    assert '"omnigibson_official_inside_preflight_pose_replay"' in empty
+
+
+def test_expert_records_per_step_wall_time():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    execute = source[source.index("def execute("):source.index("def main()")]
+    assert "step_started = time.monotonic()" in execute
+    assert 'record["elapsed_seconds"] = time.monotonic() - step_started' in execute
+    assert 'elapsed={record[\'elapsed_seconds\']:.1f}s' in execute
 
 
 def test_wipe_uses_the_same_official_covered_transition_for_all_backends():
@@ -527,8 +570,10 @@ def test_place_inside_head_aim_targets_the_container_opening():
         source.index("def _restore_visible_observation_pose")
     ]
     assert "support_surface=False" in aim
-    assert "upper[2] - 0.05 * size[2]" in aim
+    assert "upper[2] + support_height_offset" in aim
     assert 'next_step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}' in source
+    assert "post_head_retry_{head_rank}" in source
+    assert "support_height_offset=height_offset" in source
 
 
 def test_inventory_objects_are_not_required_visible():
@@ -1098,7 +1143,8 @@ def test_symbolic_replay_isolates_preloaded_objects_without_kinematic_task_objec
         encoding="utf-8"
     )
 
-    assert "anchored_for_replay = task_support" in source
+    assert 'task_destination = "task_destination" in semantic_roles' in source
+    assert "anchored_for_replay = (task_support or task_destination)" in source
     assert '"fixed_base": anchored_for_replay' in source
     assert '"kinematic_only": anchored_for_replay' in source
     assert "def configure_preloaded_delta_objects(" in source

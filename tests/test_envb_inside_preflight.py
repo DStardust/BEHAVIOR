@@ -187,24 +187,37 @@ def test_inside_preflight_restores_scene_and_sampling_limits(monkeypatch, change
     sim.dump_state.return_value = {"initial": "state"}
     states = SimpleNamespace(Open="Open", Inside="Inside")
     fallback = Mock(return_value={"ok": False})
+    transform = SimpleNamespace(
+        relative_pose_transform=lambda *_: (
+            torch.tensor([0.1, 0.2, 0.3]),
+            torch.tensor([0.0, 0.0, 0.0, 1.0]),
+        )
+    )
     namespace = {"og": SimpleNamespace(sim=sim), "object_states": states,
                  "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS": 10,
-                 "place_inside_official_volume": fallback}
+                 "place_inside_official_volume": fallback, "T": transform}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     relation = Mock()
     relation.set_value.return_value = changed
     relation.get_value.return_value = reached
     extent = SimpleNamespace(tolist=lambda: [0.1, 0.1, 0.1])
-    obj = SimpleNamespace(name="dish", states={"Inside": relation}, aabb_extent=extent)
+    pose = (torch.tensor([0.0, 0.0, 0.0]), torch.tensor([0.0, 0.0, 0.0, 1.0]))
+    obj = SimpleNamespace(name="dish", states={"Inside": relation}, aabb_extent=extent,
+                          get_position_orientation=lambda: pose)
     container = SimpleNamespace(name="bin", states={}, links={
         "volume": SimpleNamespace(is_meta_link=True, meta_link_type="openfillable", aabb_extent=extent,
-                                  visual_boundary_points_world=torch.tensor([[0., 0., 0.], [1., 1., 1.]]))})
+                                  visual_boundary_points_world=torch.tensor([[0., 0., 0.], [1., 1., 1.]]))},
+                                get_position_orientation=lambda: pose)
     result = namespace[method.name](None, obj, container)
     assert result["ok"] is reached
     assert result["setter_return"] is changed
     assert result["predicate_after_set"] is reached
     assert result["sampling_attempts"] == {"high": 2, "low": 10}
     assert fallback.call_count == (0 if reached else 1)
+    if reached:
+        assert result["verified_relative_pose"]["source"] == (
+            "omnigibson_official_relation_preflight"
+        )
     relation.clear_cache.assert_called_once()
     sim.load_state.assert_called_once_with({"initial": "state"}, serialized=False)
     assert macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS == 10
@@ -234,6 +247,101 @@ def test_faucet_toggle_preflight_exercises_both_states_and_restores_scene():
     assert result["ok"] is True
     assert state.set_value.call_args_list == [call(True), call(False)]
     sim.load_state.assert_called_once_with({"initial": "state"}, serialized=False)
+
+
+def test_appliance_open_preflight_exercises_both_states_and_restores_scene():
+    source = Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py"
+    method = next(n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_preflight_env_b_open")
+    sim = Mock()
+    sim.dump_state.return_value = {"initial": "state"}
+    open_state = object()
+    state = Mock()
+    state.get_value.side_effect = [False, True, False]
+    state.set_value.side_effect = [True, True]
+    obj = SimpleNamespace(name="washer", states={open_state: state})
+    namespace = {"og": SimpleNamespace(sim=sim),
+                 "object_states": SimpleNamespace(Open=open_state)}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    result = namespace[method.name](None, obj)
+    assert result["ok"] is True
+    assert state.set_value.call_args_list == [
+        call(True, fully=True),
+        call(False, fully=True),
+    ]
+    sim.load_state.assert_called_once_with({"initial": "state"}, serialized=False)
+
+
+def test_envb_records_native_infrastructure_initial_states_for_expert_replay():
+    source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'required_native_states[faucet_name] = {"toggled_on": False}' in generator
+    assert '"open": False' in generator
+    assert '"toggled_on": False' in generator
+    assert '"native_initial_state_validation": native_initial_state_validation' in generator
+    assert "state_changed_objects=[state_changed, *native_initial_state_records]" in generator
+    assert '{"target": faucet_name, "held_object": None}' in generator
+
+
+def test_dirty_clothes_preselects_undercovered_resolution_path_before_robot_spawn():
+    source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
+    prepare = source[
+        source.index("def prepare_env_b_robot_spawn"):
+        source.index("def _choose_env_b_resolution_path")
+    ]
+    assert 'anomaly_type not in {"dirty_dishes", "dirty_clothes"}' in prepare
+    assert 'or bindings.get("washer")' in prepare
+    assert 'self._prepared_env_b_path_name = recipe["path_name"]' in prepare
+    assert 'return fixture.get("id") if fixture else None' in prepare
+
+
+def test_machine_wash_clothes_filters_models_by_official_washer_volume():
+    source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'recipe["path_name"] == "machine_wash_clothes"' in generator
+    assert 'container_destination_key = "washer"' in generator
+    assert "rank_fitting_models(" in generator
+    assert "visual_boundary_points_world" in generator
+    assert "No installed {anomaly_type} model fits" in generator
+
+
+def test_substituted_wicker_basket_requires_official_inside_relation():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "code" / "online_deltasg.py").read_text()
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'ENV_B_TOOL_ASSET_ALIASES.get(requested_category' in generator
+    assert 'anomaly_obj, live, predicate="Inside"' in generator
+    task_builder = source[
+        source.index("def _build_env_b_anomaly_task_instance"):
+        source.index("def _build_fire_task_instance")
+    ]
+    assert '"placement_mode": "inside"' in task_builder
+    audit = (root / "code" / "audit_deltasg_outputs.py").read_text()
+    assert 'expected_predicate = "Inside"' in audit
+
+
+def test_standard_validation_preserves_envb_native_state_preflights():
+    source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
+    standardize = source[
+        source.index("def _standard_validation"):
+        source.index("def _scene_model")
+    ]
+    for field in (
+        "faucet_toggle_preflight",
+        "infrastructure_open_preflight",
+        "infrastructure_toggle_preflight",
+        "native_initial_state_validation",
+    ):
+        assert f'"{field}": validation.get("{field}")' in standardize
 
 
 def test_official_inside_volume_fallback_requires_real_support_and_stable_settling():

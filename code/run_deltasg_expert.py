@@ -1222,6 +1222,61 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         operation_target_position = getattr(
             self, "_deltasg_navigation_operation_point", None
         )
+        current_position, _ = self.robot.get_position_orientation()
+        target_lower, target_upper = obj.aabb
+        nearest_target_xy = th.minimum(
+            th.maximum(current_position[:2], target_lower[:2]), target_upper[:2]
+        )
+        current_target_distance = float(
+            th.linalg.norm(current_position[:2] - nearest_target_xy)
+        )
+        current_operation_distance = (
+            float(th.linalg.norm(current_position[:2] - operation_target_position[:2]))
+            if operation_target_position is not None
+            else None
+        )
+        if (
+            eef_pose is None
+            and current_target_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+            and (
+                current_operation_distance is None
+                or current_operation_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+            )
+        ):
+            # The robot is already at a valid symbolic operation stance. Keep
+            # its position fixed, but face the operation target so the primary
+            # camera is not forced past Tiago's pan limit. This is an in-place
+            # NAVIGATE_TO turn, not post-capture visibility recovery.
+            aim_position = (
+                operation_target_position
+                if operation_target_position is not None
+                else obj.aabb_center
+            )
+            aim_delta = aim_position[:2] - current_position[:2]
+            if float(th.linalg.norm(aim_delta)) > 1e-4:
+                aim_yaw = math.atan2(float(aim_delta[1]), float(aim_delta[0]))
+                aim_orientation = th.tensor(
+                    [0.0, 0.0, math.sin(aim_yaw / 2.0), math.cos(aim_yaw / 2.0)],
+                    dtype=th.float32,
+                )
+                _teleport_robot_preserving_delta_objects(
+                    self.env, self.robot, current_position.clone(), aim_orientation
+                )
+            self.physical_approach_diagnostics = getattr(
+                self, "physical_approach_diagnostics", {}
+            )
+            self.physical_approach_diagnostics[obj.name] = {
+                "pose_source": "current_operation_pose_in_place_turn",
+                "base_translation": 0.0,
+                "horizontal_target_distance": current_target_distance,
+                "operation_target_distance": current_operation_distance,
+                "max_horizontal_target_distance": DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+            }
+            self.last_navigation_prerequisites = []
+            self.last_navigation_route_start_recovery = None
+            yield from self._settle_robot()
+            self._sync_inventory_to_eef()
+            return
         if (
             not obj.name.startswith("online_env_")
             and int(getattr(self, "_deltasg_navigation_fallback_rank", 0)) == 0
@@ -2683,7 +2738,10 @@ class DeltaSGPhysicalPrimitives(StarterSemanticActionPrimitives):
         current_target_distance = float(
             th.linalg.norm(nearest_target_to_robot_xy - current_position[:2])
         )
-        if eef_pose is None and current_target_distance <= 0.75:
+        if (
+            eef_pose is None
+            and current_target_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+        ):
             target_yaw = math.atan2(
                 float(target_position[1] - current_position[1]),
                 float(target_position[0] - current_position[0]),
@@ -3872,9 +3930,11 @@ def _physical_added_object_configs(run, backend="physical_control"):
         pose = record.get("pose") or record.get("final_pose_before_warmup") or placement.get("pose") or {}
         if not name or not record.get("category") or not pose.get("position"):
             raise RuntimeError(f"cannot configure added object {name!r}")
-        task_support = "task_support" in set(record.get("semantic_roles") or [])
+        semantic_roles = set(record.get("semantic_roles") or [])
+        task_support = "task_support" in semantic_roles
+        task_destination = "task_destination" in semantic_roles
         is_cloth = record.get("object_type") == "cloth"
-        anchored_for_replay = task_support and not is_cloth
+        anchored_for_replay = (task_support or task_destination) and not is_cloth
         config = {
             "type": "DatasetObject",
             "name": name,
@@ -3882,9 +3942,9 @@ def _physical_added_object_configs(run, backend="physical_control"):
             "position": pose["position"],
             "orientation": pose.get("orientation_xyzw") or [0, 0, 0, 1],
             "prim_type": PrimType.CLOTH if is_cloth else PrimType.RIGID,
-            # Delta supports are furniture, not task-actuated objects. Anchor
-            # them in the reconstructed environment so a robot contact cannot
-            # turn an otherwise valid manipulation episode into scene drift.
+            # Supports and destination receptacles are not task-actuated.
+            # Anchor them during reconstruction so a Replicator / PhysX view
+            # rebuild cannot drop a validated floor object through the scene.
             "fixed_base": anchored_for_replay,
             "kinematic_only": anchored_for_replay,
         }
@@ -4808,7 +4868,7 @@ def _rotate_toward(env, robot, obj, fallback_rank=0, fallback_yaw_offset=-10.0):
     }
 
 
-def _aim_tiago_head(robot, obj, support_surface=False):
+def _aim_tiago_head(robot, obj, support_surface=False, support_height_offset=0.20):
     """Point Tiago's official pan/tilt joints at the target AABB centre."""
     if str(getattr(robot, "model", "")).lower() != "tiago":
         return {"aimed": False, "reason": "robot_has_no_tiago_head"}
@@ -4817,7 +4877,10 @@ def _aim_tiago_head(robot, obj, support_surface=False):
         target_position = (lower + upper) * 0.5
         size = upper - lower
         if support_surface:
-            target_position[2] = upper[2] - 0.05 * size[2]
+            # Aim into the free operation space above the receptacle. Aiming at
+            # the fixture AABB itself leaves nearby sink and washer openings
+            # above the image while their cabinet fronts fill the frame.
+            target_position[2] = upper[2] + support_height_offset
         elif float(th.linalg.norm(size[:2])) >= 1.0 or float(size[2]) >= 0.6:
             target_position[2] = lower[2] + 0.05 * size[2]
         robot_pose = robot.get_position_orientation()
@@ -5241,11 +5304,15 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     assisted_interactions = []
     saved_robot_approaches = _saved_robot_approaches(run)
     saved_navigation_transitions = _saved_navigation_transitions(run)
+    task_validation = (run.get("task_environment") or {}).get("validation") or run.get("validation") or {}
+    saved_destination_relation = task_validation.get("destination_preflight") or {}
+    saved_sweep_relation = task_validation.get("sweep_preflight") or {}
     if controller is not None:
         controller._deltasg_saved_robot_approaches = saved_robot_approaches
         controller._deltasg_navigation_transitions = saved_navigation_transitions
 
     for step_index, step in enumerate(plan.steps if accepted else []):
+        step_started = time.monotonic()
         print(
             f"[expert] step={step.step_id}/{len(plan.steps)} primitive={step.primitive} "
             f"target={step.target_object}",
@@ -5641,26 +5708,50 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                             "dustpan": getattr(destination, "name", None),
                         },
                     )
-                # Finish the sweep gesture by releasing the broom before the
-                # official relation sampler runs. The grasp joint and attached
-                # broom otherwise become collision obstacles that were absent
-                # from the generation-time OnTop preflight.
-                for action in controller._release():
-                    _step_control_without_observation(env, action)
-                    action_rows.append(_to_numpy(action))
-                    record["actions_executed"] += 1
+                # The oracle-held broom has collisions disabled. Keep it in hand
+                # while the official relation sampler moves the broken payload;
+                # releasing first re-enables broom collisions at the gripper and
+                # corrupts the PhysX broad phase before the OnTop transition.
                 state = target.states.get(object_states.OnTop) if target is not None else None
                 changed = bool(state.set_value(destination, True)) if state is not None else False
                 if state is not None:
                     state.clear_cache()
                 reached = bool(state.get_value(destination)) if state is not None else False
-                if not changed or not reached:
+                saved_pose_replayed = False
+                verified_relative_pose = saved_sweep_relation.get("verified_relative_pose") or {}
+                if state is not None and not reached and verified_relative_pose.get("position"):
+                    relative_pose = (
+                        th.tensor(verified_relative_pose["position"], dtype=th.float32),
+                        th.tensor(
+                            verified_relative_pose.get("orientation_xyzw") or [0, 0, 0, 1],
+                            dtype=th.float32,
+                        ),
+                    )
+                    destination_pose = destination.get_position_orientation()
+                    target_pose = T.pose_transform(*destination_pose, *relative_pose)
+                    target.set_position_orientation(*target_pose)
+                    target.keep_still()
+                    for _ in range(8):
+                        with og.sim.render_on_step(False):
+                            og.sim.step()
+                    state.clear_cache()
+                    reached = bool(state.get_value(destination))
+                    saved_pose_replayed = reached
+                if not reached or not (changed or saved_pose_replayed):
                     raise ActionPrimitiveError(
                         ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
                         "Official OnTop transition did not sweep the broken pieces onto the dustpan",
-                        {"state_set_succeeded": changed, "state_reached": reached},
+                        {
+                            "state_set_succeeded": changed,
+                            "state_reached": reached,
+                            "official_preflight_pose_replayed": saved_pose_replayed,
+                        },
                     )
                 controller.register_swept_payload(target, destination)
+                for action in controller._release():
+                    _step_control_without_observation(env, action)
+                    action_rows.append(_to_numpy(action))
+                    record["actions_executed"] += 1
                 interaction = {
                     "step_id": step.step_id,
                     "primitive": step.primitive,
@@ -5670,7 +5761,12 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     "relation": "OnTop",
                     "state_set_succeeded": changed,
                     "state_reached": reached,
-                    "mode": "omnigibson_official_on_top_sweep_transition",
+                    "official_preflight_pose_replayed": saved_pose_replayed,
+                    "mode": (
+                        "omnigibson_official_on_top_sweep_transition"
+                        if changed
+                        else "omnigibson_official_on_top_preflight_pose_replay"
+                    ),
                 }
                 record["assisted_interaction"] = interaction
                 assisted_interactions.append(interaction)
@@ -5693,10 +5789,49 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     )
                 controller.release_carried_payload(payload)
                 state = payload.states.get(object_states.Inside)
-                changed = bool(state.set_value(target, True)) if state is not None else False
+                changed = False
+                if state is not None:
+                    from omnigibson.utils.object_state_utils import m as object_state_macros
+
+                    old_high = object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS
+                    old_low = object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS
+                    try:
+                        with object_state_macros.unlocked():
+                            # Generation already proved and saved one legal
+                            # official Inside pose. Keep one bounded official
+                            # setter attempt, then replay that evidence instead
+                            # of spending minutes resampling the same container.
+                            object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 1
+                            object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2
+                        changed = bool(state.set_value(target, True))
+                    finally:
+                        with object_state_macros.unlocked():
+                            object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = old_high
+                            object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = old_low
                 if state is not None:
                     state.clear_cache()
                 reached = bool(state.get_value(target)) if state is not None else False
+                saved_pose_replayed = False
+                verified_relative_pose = saved_destination_relation.get("verified_relative_pose") or {}
+                if state is not None and not reached and verified_relative_pose.get("position"):
+                    relative_pose = (
+                        th.tensor(verified_relative_pose["position"], dtype=th.float32),
+                        th.tensor(
+                            verified_relative_pose.get("orientation_xyzw") or [0, 0, 0, 1],
+                            dtype=th.float32,
+                        ),
+                    )
+                    target_pose = T.pose_transform(
+                        *target.get_position_orientation(), *relative_pose
+                    )
+                    payload.set_position_orientation(*target_pose)
+                    payload.keep_still()
+                    for _ in range(8):
+                        with og.sim.render_on_step(False):
+                            og.sim.step()
+                    state.clear_cache()
+                    reached = bool(state.get_value(target))
+                    saved_pose_replayed = reached
                 interaction = {
                     "step_id": step.step_id,
                     "primitive": step.primitive,
@@ -5706,12 +5841,17 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     "relation": "Inside",
                     "state_set_succeeded": changed,
                     "state_reached": reached,
+                    "official_preflight_pose_replayed": saved_pose_replayed,
                     "payload_transport_mode": "oracle_symbolic_dustpan_payload",
-                    "mode": "omnigibson_official_inside_empty_transition",
+                    "mode": (
+                        "omnigibson_official_inside_empty_transition"
+                        if changed
+                        else "omnigibson_official_inside_preflight_pose_replay"
+                    ),
                 }
                 record["assisted_interaction"] = interaction
                 assisted_interactions.append(interaction)
-                if not changed or not reached:
+                if not reached or not (changed or saved_pose_replayed):
                     raise ActionPrimitiveError(
                         ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
                         "Official Inside transition did not empty the broken pieces into the trash can",
@@ -5870,27 +6010,21 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             navigation_visibility_recovery = []
             if (
                 args.backend == "oracle_symbolic"
-                and step.primitive == "NAVIGATE_TO"
                 and target is not None
                 and post_visibility_errors
             ):
-                for fallback_rank in (1, 2):
-                    controller._deltasg_navigation_fallback_rank = fallback_rank
-                    try:
-                        for _ in controller.apply_ref(
-                            primitive_map["NAVIGATE_TO"], target, attempts=1
-                        ):
-                            pass
+                if post_visibility_step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}:
+                    for head_rank, height_offset in enumerate((0.40, 0.60), 1):
                         head_aim = _aim_tiago_head(
                             env.robots[0], target,
-                            support_surface=post_visibility_step.primitive
-                            in {"PLACE_ON_TOP", "PLACE_INSIDE"},
+                            support_surface=True,
+                            support_height_offset=height_offset,
                         )
                         recovered_post = _capture_event(
                             env,
                             run,
                             output_dir,
-                            f"step_{step.step_id:03d}_post_nav_retry_{fallback_rank}",
+                            f"step_{step.step_id:03d}_post_head_retry_{head_rank}",
                             target_ids,
                             args.min_bbox_pixels,
                             step.target_object,
@@ -5906,7 +6040,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         )
                         navigation_visibility_recovery.append(
                             {
-                                "fallback_rank": fallback_rank,
+                                "head_only_rank": head_rank,
+                                "support_height_offset": height_offset,
                                 "head_aim": head_aim,
                                 "observation": recovered_post["event_id"],
                                 "errors": retry_errors,
@@ -5917,10 +6052,54 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         post_visibility_errors = retry_errors
                         if not retry_errors:
                             break
-                    except Exception as exc:
-                        navigation_visibility_recovery.append(
-                            {"fallback_rank": fallback_rank, "error": repr(exc)}
-                        )
+                if step.primitive == "NAVIGATE_TO" and post_visibility_errors:
+                    for fallback_rank in (1, 2):
+                        controller._deltasg_navigation_fallback_rank = fallback_rank
+                        try:
+                            for _ in controller.apply_ref(
+                                primitive_map["NAVIGATE_TO"], target, attempts=1
+                            ):
+                                pass
+                            head_aim = _aim_tiago_head(
+                                env.robots[0], target,
+                                support_surface=post_visibility_step.primitive
+                                in {"PLACE_ON_TOP", "PLACE_INSIDE"},
+                            )
+                            recovered_post = _capture_event(
+                                env,
+                                run,
+                                output_dir,
+                                f"step_{step.step_id:03d}_post_nav_retry_{fallback_rank}",
+                                target_ids,
+                                args.min_bbox_pixels,
+                                step.target_object,
+                                camera_streams,
+                            )
+                            events.append(recovered_post)
+                            retry_errors = validate_visibility_snapshot(
+                                post_visibility_step,
+                                recovered_post["robot_visible"],
+                                recovered_post["global_visible"],
+                                recovered_post["robot_primary"]["bboxes"],
+                                args.min_bbox_pixels,
+                            )
+                            navigation_visibility_recovery.append(
+                                {
+                                    "fallback_rank": fallback_rank,
+                                    "head_aim": head_aim,
+                                    "observation": recovered_post["event_id"],
+                                    "errors": retry_errors,
+                                }
+                            )
+                            post = recovered_post
+                            last_post = recovered_post
+                            post_visibility_errors = retry_errors
+                            if not retry_errors:
+                                break
+                        except Exception as exc:
+                            navigation_visibility_recovery.append(
+                                {"fallback_rank": fallback_rank, "error": repr(exc)}
+                            )
                 controller._deltasg_navigation_fallback_rank = 0
             record["navigation_visibility_recovery"] = navigation_visibility_recovery
             record["post_observation"] = post["event_id"]
@@ -6046,10 +6225,12 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             cleanup_errors = getattr(controller, "last_cleanup_errors", None)
             if cleanup_errors:
                 record["cleanup_errors"] = cleanup_errors
+            record["elapsed_seconds"] = time.monotonic() - step_started
         records.append(record)
         print(
             f"[expert] step={step.step_id} accepted={accepted} "
-            f"actions={record.get('actions_executed', 0)}",
+            f"actions={record.get('actions_executed', 0)} "
+            f"elapsed={record['elapsed_seconds']:.1f}s",
             flush=True,
         )
         if not accepted:

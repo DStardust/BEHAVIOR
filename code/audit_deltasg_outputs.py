@@ -425,12 +425,7 @@ def check_run(path: Path, run: dict):
                 # Early anomaly.v1 exports kept this evidence at the run root.
                 preflight = (run.get("validation") or {}).get("destination_preflight")
             preflight = preflight or {}
-            expected_predicate = (
-                "OnTop"
-                if primary == "collect_dirty_clothes"
-                and recipe.get("path_name") == "put_on_cloth_basket"
-                else "Inside"
-            )
+            expected_predicate = "Inside"
             if (
                 preflight.get("ok") is not True
                 or preflight.get("predicate") != expected_predicate
