@@ -43,9 +43,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from llm_client import create_llm_client
 import llm_client as llm_prompts
-from api import validate_robot_stability
+from api import (
+    place_inside_official_volume,
+    validate_robot_stability,
+)
 from deltasg_room_topology import nearby_door_rooms, traversable_room_pairs
-from deltasg_layout import evaluate_tool_layout, rigid_bbox_fits
+from deltasg_layout import (
+    FIRE_EXTINGUISHER_LAYOUT_POLICY,
+    FIRE_EXTINGUISHER_MIN_TARGET_GAP,
+    evaluate_tool_layout,
+    rank_fitting_models,
+    rigid_bbox_fits,
+)
 from deltasg_visual_effects import (
     SMOKE_FLOW_WARMUP_STEPS,
     covered_particle_record,
@@ -85,6 +94,9 @@ TaskAssetDatabase = _load_task_asset_database_class()
 
 STRUCTURAL_CATEGORIES = {"agent", "ceilings", "ceiling", "floors", "floor", "walls", "wall"}
 NON_BLOCKING_NAVIGATION_CATEGORIES = STRUCTURAL_CATEGORIES | {"carpet", "rug", "mat"}
+CAMERA_SCENE_CONTENT_EXCLUDED_TOKENS = STRUCTURAL_CATEGORIES | {
+    "carpet", "curtain", "door", "mat", "mirror", "picture", "rug", "switch", "window",
+}
 SUPPORT_SURFACE_TOKENS = {
     "bar",
     "bed",
@@ -426,6 +438,7 @@ class OnlineDeltaSGConfig:
     min_global_cameras: int = 2
     max_global_cameras: int = 3
     visibility_min_pixels: int = 8
+    camera_min_scene_content_pixels: int = 1024
     max_camera_pose_attempts_per_room: int = 6
     camera_pose_render_steps: int = 4
 
@@ -1514,6 +1527,42 @@ class OnlineDeltaSGEngine:
 
         anomaly_category = self._choose_env_b_anomaly_category(anomaly_type)
         anomaly_record = self._record_for_category(anomaly_category)
+        if anomaly_type == "dirty_dishes":
+            destination_key = (
+                "sink" if recipe["path_name"] == "hand_wash" else "dishwasher"
+            )
+            destination_id = recipe["infrastructure_bindings"][destination_key]["id"]
+            destination = self.env.scene.object_registry("name", destination_id)
+            container_extents = []
+            for link in destination.links.values():
+                if not link.is_meta_link or link.meta_link_type not in {"fillable", "openfillable"}:
+                    continue
+                points = link.visual_boundary_points_world
+                if len(points):
+                    container_extents.append(
+                        (points.max(dim=0).values - points.min(dim=0).values).tolist()
+                    )
+            compatible = {
+                category: rank_fitting_models(
+                    self._env_b_model_sizes(category), container_extents
+                )
+                for category in ENV_B_ANOMALY_ASSETS[anomaly_type]
+            }
+            compatible = {category: models for category, models in compatible.items() if models}
+            if not compatible:
+                raise RuntimeError(
+                    f"No installed dirty-dish model fits {destination_key} {destination_id}"
+                )
+            if anomaly_category not in compatible:
+                anomaly_category = self.rng.choice(sorted(compatible))
+                anomaly_record = self._record_for_category(anomaly_category)
+            anomaly_record["_preferred_models"] = compatible[anomaly_category]
+            print(
+                f"[env-b] {recipe['path_name']} container-compatible "
+                f"category={anomaly_category} models={len(compatible[anomaly_category])} "
+                f"destination={destination_id}",
+                flush=True,
+            )
         if anomaly_type == "dirty_clothes" and recipe["path_name"] != "machine_wash_clothes":
             if anomaly_record.get("object_type") != "cloth":
                 container_category = "hamper" if recipe["path_name"] == "put_in_hamper" else "wicker_basket"
@@ -1592,6 +1641,7 @@ class OnlineDeltaSGEngine:
                 sink = self.env.scene.object_registry("name", sink_id)
                 tool_position = sink.get_position_orientation()[0].tolist()
                 record["_open_surface_only"] = True
+                record["_excluded_support_ids"] = [sink_id]
                 record["_household_layout"] = {
                     "name": "cleaning_station_v1", "target": anomaly_obj.name,
                     "min_target_gap": 0.4, "anchor": sink_id, "max_anchor_gap": 1.0,
@@ -1690,23 +1740,38 @@ class OnlineDeltaSGEngine:
                 item["placement"]["household_layout"] = checked
                 required_tools_ok = required_tools_ok and checked["ok"]
         destination_preflight = {"ok": True, "required": False}
+        faucet_toggle_preflight = {"ok": True, "required": False}
         sweep_preflight = {"ok": True, "required": False}
-        if required_tools_ok and recipe["path_name"] != "hand_wash":
-            destination_name = next(
-                (item["object_name"] for item in solution_objects
-                 if item.get("semantic_role") == "task_destination"),
-                None,
-            )
-            if destination_name is None:
-                bindings = recipe.get("infrastructure_bindings") or {}
-                destination_name = (bindings.get("dishwasher") or bindings.get("washer") or {}).get("id")
-            destination = self.env.scene.object_registry("name", destination_name, None)
-            destination_predicate = (
-                "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
-            )
-            destination_preflight = self._preflight_env_b_inside(
-                anomaly_obj, destination, predicate=destination_predicate
-            )
+        destination_name = None
+        if required_tools_ok:
+            bindings = recipe.get("infrastructure_bindings") or {}
+            if recipe["path_name"] == "hand_wash":
+                destination_name = bindings["sink"]["id"]
+                destination = self.env.scene.object_registry("name", destination_name, None)
+                destination_preflight = self._preflight_env_b_inside(
+                    anomaly_obj, destination, predicate="Inside"
+                )
+                faucet = self.env.scene.object_registry(
+                    "name", bindings["faucet"]["id"], None
+                )
+                faucet_toggle_preflight = self._preflight_env_b_toggle(faucet)
+            else:
+                destination_name = next(
+                    (item["object_name"] for item in solution_objects
+                     if item.get("semantic_role") == "task_destination"),
+                    None,
+                )
+                if destination_name is None:
+                    destination_name = (
+                        bindings.get("dishwasher") or bindings.get("washer") or {}
+                    ).get("id")
+                destination = self.env.scene.object_registry("name", destination_name, None)
+                destination_predicate = (
+                    "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
+                )
+                destination_preflight = self._preflight_env_b_inside(
+                    anomaly_obj, destination, predicate=destination_predicate
+                )
             if anomaly_type == "broken_object":
                 dustpan_name = next(
                     item["object_name"] for item in solution_objects
@@ -1720,6 +1785,7 @@ class OnlineDeltaSGEngine:
             abnormal_state.get("ok")
             and required_tools_ok
             and destination_preflight["ok"]
+            and faucet_toggle_preflight["ok"]
             and sweep_preflight["ok"]
             and settling.get("all_within_threshold")
         )
@@ -1730,13 +1796,34 @@ class OnlineDeltaSGEngine:
                 f"abnormal_state_errors={abnormal_state.get('errors', [])} "
                 f"required_tools_ok={required_tools_ok} "
                 f"destination_preflight={destination_preflight} "
+                f"faucet_toggle_preflight={faucet_toggle_preflight} "
                 f"sweep_preflight={sweep_preflight} "
                 f"settling_ok={settling.get('all_within_threshold')}"
             )
         after_graph = self.snapshot()
         if recipe["path_name"] == "hand_wash":
             source_name = next(item["object_name"] for item in solution_objects if item["category"] == "sponge")
-            route_targets = [source_name, anomaly_obj.name]
+            sink_name = recipe["infrastructure_bindings"]["sink"]["id"]
+            faucet_name = recipe["infrastructure_bindings"]["faucet"]["id"]
+            route_targets = [
+                {"target": anomaly_obj.name, "held_object": None},
+                {
+                    "target": sink_name,
+                    "held_object": anomaly_obj.name,
+                    "operation_relation": "inside",
+                },
+                {"target": faucet_name, "held_object": None},
+                {"target": source_name, "held_object": None},
+                # After PLACE_INSIDE the dish is at the sink, not at its saved
+                # generation pose. Preflight the post-placement approach
+                # against the sink volume that will contain it.
+                {
+                    "target": sink_name,
+                    "held_object": source_name,
+                    "operation_relation": "inside",
+                },
+                {"target": faucet_name, "held_object": source_name},
+            ]
         elif anomaly_type == "broken_object":
             solutions_by_requested = {
                 item["requested_category"]: item for item in solution_objects
@@ -1781,6 +1868,7 @@ class OnlineDeltaSGEngine:
             "resolution_recipe": self._serializable_env_b_recipe(recipe),
             "solution_objects": solution_objects,
             "destination_preflight": destination_preflight,
+            "faucet_toggle_preflight": faucet_toggle_preflight,
             "sweep_preflight": sweep_preflight,
             "navigation_preflight": navigation_preflight,
             "settling": settling,
@@ -1839,6 +1927,10 @@ class OnlineDeltaSGEngine:
             self._env_bc_attempt_prepared = False
         else:
             self._cleanup_spawned_objects(prefer_reset=True)
+        # The USDZ effect root is outside the scene object registry and is not
+        # restored by an OmniGibson state load. A failed prior sample can leave
+        # its flame visible even after all online_env objects are gone.
+        remove_usdz_flame()
         self._pre_run_state = og.sim.dump_state(serialized=False)
         before_graph = self.snapshot()
         target_room = target_room or self._choose_fire_source_room(before_graph) or self._choose_room_with_objects(before_graph)
@@ -1871,8 +1963,11 @@ class OnlineDeltaSGEngine:
         extinguisher_record["_force_floor_only"] = True
         extinguisher_record["_prefer_floor_first"] = True
         extinguisher_record["_household_layout"] = {
-            "name": "separate_fire_safety_tool_v1", "target": fire_target["name"],
-            "min_target_gap": 1.5,
+            "name": FIRE_EXTINGUISHER_LAYOUT_POLICY,
+            "target": fire_target["name"],
+            "target_room": target_room,
+            "min_target_gap": FIRE_EXTINGUISHER_MIN_TARGET_GAP,
+            "prefer_different_room": True,
         }
         extinguisher_record["_placement_orientation_xyzw"] = [
             0.0,
@@ -3449,7 +3544,19 @@ class OnlineDeltaSGEngine:
     def _validate_household_tool_layout(self, obj, policy):
         target = self.env.scene.object_registry("name", policy["target"])
         anchor = self.env.scene.object_registry("name", policy["anchor"]) if policy.get("anchor") else None
-        return evaluate_tool_layout(obj.aabb, target.aabb, policy, anchor.aabb if anchor is not None else None)
+        result = evaluate_tool_layout(
+            obj.aabb, target.aabb, policy, anchor.aabb if anchor is not None else None
+        )
+        tool_rooms = sorted(set(getattr(obj, "in_rooms", None) or []))
+        target_rooms = sorted(set(getattr(target, "in_rooms", None) or []))
+        result.update(
+            tool_rooms=tool_rooms,
+            target_rooms=target_rooms,
+            room_relation=(
+                "same_room" if set(tool_rooms) & set(target_rooms) else "different_room"
+            ),
+        )
+        return result
 
     def _preflight_env_b_inside(self, obj, destination, predicate="Inside"):
         """Test an official collection relation and restore the initial anomaly."""
@@ -3492,12 +3599,18 @@ class OnlineDeltaSGEngine:
             changed = bool(obj.states[state_cls].set_value(destination, True))
             obj.states[state_cls].clear_cache()
             reached = bool(obj.states[state_cls].get_value(destination))
+            volume_fallback = None
+            if predicate == "Inside" and not reached:
+                volume_fallback = place_inside_official_volume(obj, destination)
+                reached = bool(volume_fallback["ok"])
             result.update(setter_return=changed, predicate_after_set=reached,
                           sampling_attempts={
                               "high": 2,
                               "low": INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate == "Inside" else 2,
                           })
-            result["ok"] = changed and reached
+            if volume_fallback is not None:
+                result["volume_fallback"] = volume_fallback
+            result["ok"] = reached
         finally:
             with sampling_macros.unlocked():
                 sampling_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = high
@@ -3506,27 +3619,90 @@ class OnlineDeltaSGEngine:
         print(f"[env-b] destination preflight={result}", flush=True)
         return result
 
-    def _preflight_env_b_navigation_sequence(self, target_names):
+    def _preflight_env_b_toggle(self, obj):
+        """Exercise the official ToggledOn state in both directions and restore it."""
+        result = {
+            "ok": False,
+            "required": True,
+            "object": getattr(obj, "name", None),
+            "state": "ToggledOn",
+        }
+        if obj is None or object_states.ToggledOn not in obj.states:
+            result["reason"] = "missing_official_toggled_on_state"
+            return result
+        saved = og.sim.dump_state(serialized=False)
+        state = obj.states[object_states.ToggledOn]
+        try:
+            if bool(state.get_value()):
+                state.set_value(False)
+            on_changed = bool(state.set_value(True))
+            on_value = bool(state.get_value())
+            off_changed = bool(state.set_value(False))
+            off_value = bool(state.get_value())
+            result.update(
+                on={"setter_return": on_changed, "actual": on_value},
+                off={"setter_return": off_changed, "actual": off_value},
+            )
+            result["ok"] = on_changed and on_value and off_changed and not off_value
+        finally:
+            og.sim.load_state(saved, serialized=False)
+        print(f"[env-b] faucet toggle preflight={result}", flush=True)
+        return result
+
+    def _preflight_env_b_navigation_sequence(self, route_steps):
         """Plan the complete pickup/delivery route after every tool is present."""
-        from run_deltasg_expert import _connected_observation_pose, _target_framing_distance
+        from run_deltasg_expert import (
+            _connected_observation_pose,
+            _container_operation_point,
+            _target_framing_distance,
+        )
 
         robot = self.env.robots[0]
         start_pose = None
-        held_object = None
+        inferred_held_object = None
         approaches = []
-        for name in target_names:
+        for route_step in route_steps:
+            if isinstance(route_step, str):
+                name = route_step
+                held_object = inferred_held_object
+            else:
+                name = route_step["target"]
+                held_name = route_step.get("held_object")
+                held_object = (
+                    self.env.scene.object_registry("name", held_name)
+                    if held_name else None
+                )
             target = self.env.scene.object_registry("name", name)
+            operation_target_position = (
+                _container_operation_point(target)
+                if not isinstance(route_step, str)
+                and route_step.get("operation_relation") == "inside"
+                else None
+            )
             pose = _connected_observation_pose(
                 self.env, robot, target,
                 preferred_distance=_target_framing_distance(target, robot=robot),
                 require_route=True, route_clearance_margin=0.0,
                 route_target=target, max_target_aabb_distance=1.15,
+                operation_target_position=operation_target_position,
+                max_operation_target_distance=(
+                    1.15 if operation_target_position is not None else None
+                ),
                 start_pose=start_pose, held_object=held_object,
             )
-            approaches.append({"target": name, "pose": pose.tolist()})
+            approaches.append({
+                "target": name,
+                "held_object": getattr(held_object, "name", None),
+                "pose": pose.tolist(),
+                "operation_target_position": (
+                    operation_target_position.tolist()
+                    if operation_target_position is not None
+                    else None
+                ),
+            })
             start_pose = pose
-            if held_object is None:
-                held_object = target
+            if isinstance(route_step, str) and inferred_held_object is None:
+                inferred_held_object = target
         return {"ok": True, "approaches": approaches, "robot_moved": False}
 
     def _infrastructure_candidates(
@@ -3542,6 +3718,9 @@ class OnlineDeltaSGEngine:
             if infrastructure == "faucet":
                 matches = "faucet" in category
             if not matches:
+                continue
+            available_states = set(node.get("available_states") or [])
+            if infrastructure == "faucet" and "ToggledOn" not in available_states:
                 continue
             position = (node.get("pose") or {}).get("position")
             bbox = node.get("bbox") or {}
@@ -3594,6 +3773,24 @@ class OnlineDeltaSGEngine:
                 if not candidates:
                     valid = False
                     break
+                if infrastructure == "faucet" and "sink" in bindings:
+                    sink = bindings["sink"]
+                    sink_rooms = set(sink.get("rooms") or [])
+                    candidates = [
+                        node for node in candidates
+                        if sink_rooms & set(node.get("rooms") or [])
+                    ]
+                    if not candidates:
+                        valid = False
+                        break
+                    sink_position = (sink.get("pose") or {}).get("position") or [0.0, 0.0]
+                    candidates.sort(key=lambda node: (
+                        math.dist(
+                            sink_position[:2],
+                            ((node.get("pose") or {}).get("position") or [math.inf, math.inf])[:2],
+                        ),
+                        str(node.get("id") or ""),
+                    ))
                 bindings[infrastructure] = candidates[0]
             if valid:
                 item = copy.deepcopy(recipe)
@@ -3817,14 +4014,27 @@ class OnlineDeltaSGEngine:
         elif anomaly_type == "dirty_dishes":
             sponge = solutions_by_requested["sponge"]
             sponge_id = sponge["object_name"]
+            sink_id = bindings["sink"]["id"]
+            faucet_id = bindings["faucet"]["id"]
             plan = [
-                {"step_id": 1, "primitive": "MOVE", "nl": "Move to the sponge", "target_object": sponge_id},
-                {"step_id": 2, "primitive": "PICK", "nl": "Pick up the sponge", "target_object": sponge_id},
-                {"step_id": 3, "primitive": "MOVE", "nl": "Move to the dirty dish", "target_object": anomaly_id, "inventory": [sponge_id]},
-                {"step_id": 4, "primitive": "INTERACT", "nl": "Wipe the dirty dish clean with the sponge and dish soap", "tool_object": sponge_id, "target_object": anomaly_id, "inventory": [sponge_id]},
+                {"step_id": 1, "primitive": "MOVE", "nl": "Move to the dirty dish", "target_object": anomaly_id},
+                {"step_id": 2, "primitive": "PICK", "nl": "Pick up the dirty dish", "target_object": anomaly_id},
+                {"step_id": 3, "primitive": "MOVE", "nl": "Carry the dirty dish to the sink", "target_object": sink_id, "inventory": [anomaly_id]},
+                {"step_id": 4, "primitive": "PLACE", "nl": "Place the dirty dish inside the sink", "target_object": sink_id, "placement_mode": "inside", "inventory": [anomaly_id]},
+                {"step_id": 5, "primitive": "MOVE", "nl": "Move to the faucet", "target_object": faucet_id},
+                {"step_id": 6, "primitive": "INTERACT", "nl": "Turn on the faucet", "target_object": faucet_id},
+                {"step_id": 7, "primitive": "MOVE", "nl": "Move to the sponge", "target_object": sponge_id},
+                {"step_id": 8, "primitive": "PICK", "nl": "Pick up the sponge", "target_object": sponge_id},
+                {"step_id": 9, "primitive": "MOVE", "nl": "Move to the dirty dish in the sink", "target_object": anomaly_id, "inventory": [sponge_id]},
+                {"step_id": 10, "primitive": "INTERACT", "nl": "Wipe the dirty dish clean in the running water with the sponge and dish soap", "tool_object": sponge_id, "destination_object": sink_id, "target_object": anomaly_id, "inventory": [sponge_id]},
+                {"step_id": 11, "primitive": "MOVE", "nl": "Move to the faucet", "target_object": faucet_id, "inventory": [sponge_id]},
+                {"step_id": 12, "primitive": "INTERACT", "nl": "Turn off the faucet", "target_object": faucet_id, "inventory": [sponge_id]},
             ]
-            actionable = [anomaly_id, sponge_id]
-            instruction = "Use the sponge and dish soap to clean the visibly dirty dish."
+            actionable = [anomaly_id, sink_id, faucet_id, sponge_id]
+            instruction = (
+                "Put the dirty dish in the sink, turn on the faucet, scrub it with "
+                "the sponge and dish soap, then turn off the faucet."
+            )
         elif anomaly_type == "dirty_clothes":
             if recipe["path_name"] == "machine_wash_clothes":
                 destination = bindings["washer"]
@@ -7917,6 +8127,8 @@ class OnlineDeltaSGEngine:
         for node in graph["nodes"]:
             if node.get("type") != "object" or target_room not in node.get("rooms", []):
                 continue
+            if node.get("id") in set(record.get("_excluded_support_ids") or []):
+                continue
             if not self._is_valid_support_node(node, target_room):
                 continue
             receptacle = ((node.get("semantic") or {}).get("receptacle") or {})
@@ -10158,6 +10370,43 @@ class OnlineDeltaSGEngine:
                     points.append(np.asarray(position[:3], dtype=np.float32))
             return np.mean(points, axis=0) if points else None
 
+        def room_scene_content_names(room_id):
+            candidates = []
+            for name, node in graph_nodes.items():
+                rooms = node.get("rooms") or []
+                if room_id not in rooms:
+                    continue
+                if (
+                    self._tokens(node.get("category"))
+                    & CAMERA_SCENE_CONTENT_EXCLUDED_TOKENS
+                ):
+                    continue
+                bbox = node.get("bbox") or {}
+                lower = bbox.get("min")
+                upper = bbox.get("max")
+                volume = 0.0
+                if lower and upper:
+                    extent = np.maximum(
+                        np.asarray(upper[:3], dtype=np.float32)
+                        - np.asarray(lower[:3], dtype=np.float32),
+                        0.0,
+                    )
+                    volume = float(np.prod(extent))
+                candidates.append((volume, name))
+            # Large fixtures provide a cheap, robust proxy for whether the
+            # frame contains room content instead of a blank wall. Always keep
+            # actionable objects even when they are small.
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            names = {name for _, name in candidates[:16]}
+            names.update(
+                name for name in target_names
+                if room_id in (
+                    targets[name].get("room_ids")
+                    or [targets[name].get("room_id")]
+                )
+            )
+            return names
+
         while (
             uncovered
             or (robot_name and robot_visibility_count == 0)
@@ -10314,9 +10563,13 @@ class OnlineDeltaSGEngine:
                 : self.config.max_camera_pose_attempts_per_room
             ]
             best_camera = None
+            scene_query_names = room_scene_content_names(room_id)
             for cam_pos, orientation, method, pose_key in unused_candidates:
                 visibility = self._global_camera_visibility(
                     cam_pos, orientation, query_names
+                )
+                scene_visibility = self._global_camera_visibility(
+                    cam_pos, orientation, scene_query_names, verbose=False
                 )
                 visible_names = set(visibility)
                 target_visibility = {
@@ -10325,23 +10578,43 @@ class OnlineDeltaSGEngine:
                     if name in target_names
                 }
                 sees_robot = bool(robot_name and robot_name in visible_names)
+                content_visibility = dict(scene_visibility)
+                content_visibility.update(visibility)
+                content_pixel_count = sum(
+                    item.get("pixel_count", 0)
+                    for item in content_visibility.values()
+                )
+                content_quality_ok = bool(content_visibility) and (
+                    content_pixel_count >= self.config.camera_min_scene_content_pixels
+                )
+                if not content_quality_ok:
+                    print(
+                        f"[camera-coverage] rejected empty/wall-facing room={room_id} "
+                        f"pose={method} content={sorted(content_visibility)} "
+                        f"pixels={content_pixel_count}",
+                        flush=True,
+                    )
+                    continue
                 score = (
                     len(visible_names & uncovered),
                     int(sees_robot and robot_visibility_count == 0),
                     sum(target_visibility_counts[name] > 0 for name in target_visibility)
                     + int(sees_robot and robot_visibility_count > 0),
                     len(target_visibility) + int(sees_robot),
-                    sum(item.get("pixel_count", 0) for item in visibility.values()),
+                    len(content_visibility),
+                    content_pixel_count,
                 )
                 print(
                     f"[camera-coverage] tested room={room_id} pose={method} "
-                    f"targets={sorted(target_visibility)} robot={sees_robot}",
+                    f"targets={sorted(target_visibility)} robot={sees_robot} "
+                    f"content={sorted(content_visibility)} pixels={content_pixel_count}",
                     flush=True,
                 )
                 if best_camera is None or score > best_camera[0]:
                     best_camera = (
                         score, cam_pos, orientation, method, pose_key,
-                        target_visibility, sees_robot,
+                        target_visibility, sees_robot, content_visibility,
+                        content_pixel_count,
                     )
 
             required_visible = True
@@ -10366,7 +10639,8 @@ class OnlineDeltaSGEngine:
 
             (
                 _, cam_pos, orientation, camera_method, pose_key,
-                target_visibility, sees_robot,
+                target_visibility, sees_robot, content_visibility,
+                content_pixel_count,
             ) = best_camera
             camera_index = len(global_camera_records) + 1
             camera_id = f"global_{room_id}_{camera_index}"
@@ -10385,6 +10659,16 @@ class OnlineDeltaSGEngine:
                 "visible_task_objects": sorted(target_visibility),
                 "visible_robot_objects": [robot_name] if sees_robot else [],
                 "visibility": target_visibility,
+                "visible_scene_content": sorted(content_visibility),
+                "scene_content_categories": {
+                    name: (
+                        (graph_nodes.get(name) or {}).get("category")
+                        or ("agent" if name == robot_name else None)
+                    )
+                    for name in sorted(content_visibility)
+                },
+                "scene_content_pixel_count": int(content_pixel_count),
+                "scene_content_quality_ok": True,
             }
             cameras.append(camera_record)
             global_camera_records.append(camera_record)
@@ -10405,6 +10689,12 @@ class OnlineDeltaSGEngine:
             robot_visibility_count >= 2
             or any(count >= 2 for count in target_visibility_counts.values())
         )
+        if len(global_camera_records) < camera_minimum:
+            errors.append({
+                "error": "insufficient_content_valid_global_cameras",
+                "required": camera_minimum,
+                "actual": len(global_camera_records),
+            })
         coverage = {
             "ok": bool(target_names)
             and not errors
@@ -10412,7 +10702,7 @@ class OnlineDeltaSGEngine:
             and bool(robot_name)
             and robot_visibility_count >= 1
             and len(global_camera_records) >= camera_minimum,
-            "policy": "global_multiview_robot_and_target_v4",
+            "policy": "global_multiview_robot_target_content_v5",
             "min_global_cameras": camera_minimum,
             "max_global_cameras": camera_cap,
             "desired_global_cameras": desired_camera_count,
@@ -10429,6 +10719,14 @@ class OnlineDeltaSGEngine:
             "visible_objects": sorted(visible),
             "uncovered_objects": sorted(target_names - set(global_visible)),
             "global_camera_rooms": [camera["room_id"] for camera in global_camera_records],
+            "global_camera_content_quality": {
+                camera["camera_id"]: {
+                    "ok": camera["scene_content_quality_ok"],
+                    "visible_scene_content": camera["visible_scene_content"],
+                    "pixel_count": camera["scene_content_pixel_count"],
+                }
+                for camera in global_camera_records
+            },
             "errors": errors,
         }
         if not target_names:
@@ -10680,10 +10978,11 @@ class OnlineDeltaSGEngine:
             traceback.print_exc()
             return {}
 
-    def _global_camera_visibility(self, position, orientation, target_names):
+    def _global_camera_visibility(self, position, orientation, target_names, verbose=True):
         try:
             return self._geometric_camera_visibility(
-                position, orientation, target_names, width=1280, height=720
+                position, orientation, target_names, width=1280, height=720,
+                verbose=verbose,
             )
         except Exception as exc:
             print(f"[camera-coverage] global geometric probe failed: {exc}", flush=True)
@@ -10691,7 +10990,8 @@ class OnlineDeltaSGEngine:
             return {}
 
     def _geometric_camera_visibility(
-        self, position, orientation, target_names, width, height, horizontal_fov_deg=65.0
+        self, position, orientation, target_names, width, height,
+        horizontal_fov_deg=65.0, verbose=True,
     ):
         camera_position = np.asarray(position, dtype=np.float64)
         rotation = T.quat2mat(th.as_tensor(orientation, dtype=th.float32)).cpu().numpy()
@@ -10722,7 +11022,8 @@ class OnlineDeltaSGEngine:
             camera_points = (corners - camera_position) @ rotation
             in_front = camera_points[:, 2] < -0.05
             if not np.any(in_front):
-                print(f"[camera-coverage] geometric reject {name}: behind_camera", flush=True)
+                if verbose:
+                    print(f"[camera-coverage] geometric reject {name}: behind_camera", flush=True)
                 continue
             points = camera_points[in_front]
             depth = -points[:, 2]
@@ -10733,18 +11034,20 @@ class OnlineDeltaSGEngine:
             x2 = min(width - 1, int(math.ceil(float(np.max(pixels_x)))))
             y2 = min(height - 1, int(math.ceil(float(np.max(pixels_y)))))
             if x2 <= x1 or y2 <= y1:
-                print(
-                    f"[camera-coverage] geometric reject {name}: outside_frame "
-                    f"raw_bbox={[float(np.min(pixels_x)), float(np.min(pixels_y)), float(np.max(pixels_x)), float(np.max(pixels_y))]}",
-                    flush=True,
-                )
+                if verbose:
+                    print(
+                        f"[camera-coverage] geometric reject {name}: outside_frame "
+                        f"raw_bbox={[float(np.min(pixels_x)), float(np.min(pixels_y)), float(np.max(pixels_x)), float(np.max(pixels_y))]}",
+                        flush=True,
+                    )
                 continue
             pixel_count = (x2 - x1 + 1) * (y2 - y1 + 1)
             if pixel_count < self.config.visibility_min_pixels:
-                print(
-                    f"[camera-coverage] geometric reject {name}: pixels={pixel_count}",
-                    flush=True,
-                )
+                if verbose:
+                    print(
+                        f"[camera-coverage] geometric reject {name}: pixels={pixel_count}",
+                        flush=True,
+                    )
                 continue
             center = (lower + upper) * 0.5
             target_path = str(getattr(obj, "prim_path", ""))
@@ -10776,11 +11079,12 @@ class OnlineDeltaSGEngine:
                     break
                 blocked_paths.append(f"{hit_path}@{hit_distance:.2f}m")
             if not surface_visible:
-                print(
-                    f"[camera-coverage] geometric reject {name}: occluded_by="
-                    f"{sorted(set(blocked_paths))[:5]}",
-                    flush=True,
-                )
+                if verbose:
+                    print(
+                        f"[camera-coverage] geometric reject {name}: occluded_by="
+                        f"{sorted(set(blocked_paths))[:5]}",
+                        flush=True,
+                    )
                 continue
             margin = max(2, int(round(min(width, height) * 0.01)))
             visibility[name] = {

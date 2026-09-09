@@ -6,10 +6,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from deltasg_expert import ExpertPlanError, validate_env_a_plan_contract
+from deltasg_layout import (
+    FIRE_EXTINGUISHER_LAYOUT_POLICY,
+    FIRE_EXTINGUISHER_MIN_TARGET_GAP,
+)
+from deltasg_expert import ExpertPlanError, compile_expert_plan, validate_env_a_plan_contract
 
 
 EXPECTED_LABELS = {
@@ -27,6 +32,10 @@ EXPECTED_LABELS = {
 
 SMOKE_ONLY_ON_FIRE_MODE = "omnigibson_on_fire_smoke_only"
 USDZ_FLAME_SMOKE_MODE = "deltasg_usdz_flame_smoke_column_v1"
+CAMERA_SCENE_CONTENT_EXCLUDED_TOKENS = {
+    "agent", "carpet", "ceiling", "ceilings", "curtain", "door", "floor", "floors",
+    "mat", "mirror", "picture", "rug", "switch", "wall", "walls", "window",
+}
 
 
 def fire_visual_issue(state_changed):
@@ -161,6 +170,40 @@ def check_run(path: Path, run: dict):
             issues.append("global_cameras_missing_task_targets")
         if camera_coverage.get("global_robot_visible") is not True:
             issues.append("global_cameras_missing_robot")
+        for camera in global_cameras:
+            if camera.get("scene_content_quality_ok") is False:
+                issues.append(
+                    f"global_camera_empty_or_wall_facing:{camera.get('camera_id')}"
+                )
+            if (
+                "scene_content_quality_ok" in camera
+                and not camera.get("visible_scene_content")
+            ):
+                issues.append(
+                    f"global_camera_missing_scene_content:{camera.get('camera_id')}"
+                )
+            if "scene_content_categories" in camera:
+                categories = camera.get("scene_content_categories") or {}
+                meaningful = bool(
+                    camera.get("visible_task_objects")
+                    or camera.get("visible_robot_objects")
+                    or any(
+                        not (
+                            {
+                                token for token in re.split(
+                                    r"[_\-\W]+", str(category).lower()
+                                ) if token
+                            }
+                            & CAMERA_SCENE_CONTENT_EXCLUDED_TOKENS
+                        )
+                        for category in categories.values()
+                        if category
+                    )
+                )
+                if not meaningful:
+                    issues.append(
+                        f"global_camera_only_wall_fixtures:{camera.get('camera_id')}"
+                    )
     robot_stability = validation.get("robot_stability") or {}
     if robot_stability and robot_stability.get("ok") is not True:
         issues.append("robot_stability_failed")
@@ -376,9 +419,7 @@ def check_run(path: Path, run: dict):
         )
         reasoning = te.get("semantic_reasoning") or task.get("semantic_reasoning") or {}
         recipe = reasoning.get("resolution_recipe") or {}
-        if primary in {"collect_dirty_clothes", "clean_up_broken_object"} or (
-            primary == "clean_dirty_dishes" and recipe.get("path_name") == "machine_wash"
-        ):
+        if primary in {"collect_dirty_clothes", "clean_up_broken_object", "clean_dirty_dishes"}:
             preflight = (te.get("validation") or {}).get("destination_preflight")
             if preflight is None:
                 # Early anomaly.v1 exports kept this evidence at the run root.
@@ -407,7 +448,11 @@ def check_run(path: Path, run: dict):
             layout = ((extinguishers[0].get("placement") or {}).get("household_layout") or {}) if extinguishers else {}
             if (
                 layout.get("ok") is not True
-                or float(layout.get("target_horizontal_gap") or 0.0) < 1.5
+                or (layout.get("policy") or {}).get("name")
+                != FIRE_EXTINGUISHER_LAYOUT_POLICY
+                or float(layout.get("target_horizontal_gap") or 0.0)
+                < FIRE_EXTINGUISHER_MIN_TARGET_GAP
+                or layout.get("room_relation") not in {"same_room", "different_room"}
             ):
                 issues.append("envB_extinguisher_too_close_to_fire")
         elif primary == "clean_dirty_dishes":
@@ -422,6 +467,18 @@ def check_run(path: Path, run: dict):
                 category in tool_text for category in ("sponge", "bottle_of_dish_soap")
             ):
                 issues.append("envB_dirty_dishes_incomplete_hand_wash_bundle")
+            if recipe.get("path_name") == "hand_wash":
+                faucet_preflight = (
+                    (te.get("validation") or {}).get("faucet_toggle_preflight")
+                    or (run.get("validation") or {}).get("faucet_toggle_preflight")
+                    or {}
+                )
+                if faucet_preflight.get("ok") is not True:
+                    issues.append("envB_dirty_dishes_faucet_preflight_failed")
+                try:
+                    compile_expert_plan(run)
+                except ExpertPlanError:
+                    issues.append("envB_dirty_dishes_plan_contract_invalid")
         elif primary == "collect_dirty_clothes":
             covered = [
                 item for item in state_changed

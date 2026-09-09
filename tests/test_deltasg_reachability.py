@@ -381,7 +381,9 @@ def test_env_b_fire_extinguisher_is_upright_and_separated_on_floor():
         source.index("def generate_env_c_fire_disambiguation")
     ]
     assert 'extinguisher_record["_force_floor_only"] = True' in fire
-    assert '"min_target_gap": 1.5' in fire
+    assert '"min_target_gap": FIRE_EXTINGUISHER_MIN_TARGET_GAP' in fire
+    assert '"prefer_different_room": True' in fire
+    assert '"target_room": target_room' in fire
     assert 'avoid_position=fire_position' in fire
     assert 'preferred_position=fire_position' not in fire
     assert 'extinguisher_record["_placement_orientation_xyzw"]' in fire
@@ -1880,6 +1882,54 @@ def test_supplemental_global_cameras_keep_official_orientation_and_do_not_repeat
     assert "required_visible = bool(best_camera[5] or best_camera[6])" not in cameras
 
 
+def test_every_global_camera_rejects_empty_or_wall_facing_views():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
+    assert "room_scene_content_names" in cameras
+    assert "camera_min_scene_content_pixels" in source
+    assert "CAMERA_SCENE_CONTENT_EXCLUDED_TOKENS" in source
+    assert "if not content_quality_ok:" in cameras
+    assert "len(content_visibility),\n                    content_pixel_count" in cameras
+    assert '"scene_content_quality_ok": True' in cameras
+    assert '"scene_content_categories"' in cameras
+    assert '"global_camera_content_quality"' in cameras
+    audit = (CODE_DIR / "audit_deltasg_outputs.py").read_text(encoding="utf-8")
+    assert "global_camera_empty_or_wall_facing" in audit
+    assert "global_camera_only_wall_fixtures" in audit
+
+
+def test_output_audit_rejects_a_supplemental_camera_with_only_wall_fixtures():
+    run = _run()
+    run["task_environment"]["camera"] = [
+        {
+            "camera_id": "global_room_0_1",
+            "camera_type": "global_camera",
+            "visible_task_objects": ["book_0"],
+            "visible_robot_objects": ["robot_0"],
+            "visible_scene_content": ["book_0", "robot_0"],
+            "scene_content_categories": {"book_0": "book", "robot_0": "agent"},
+            "scene_content_quality_ok": True,
+        },
+        {
+            "camera_id": "global_corridor_0_2",
+            "camera_type": "global_camera",
+            "visible_task_objects": [],
+            "visible_robot_objects": [],
+            "visible_scene_content": ["door_0", "switch_0"],
+            "scene_content_categories": {"door_0": "door", "switch_0": "electric_switch"},
+            "scene_content_quality_ok": True,
+        },
+    ]
+    run["task_environment"]["validation"]["camera_coverage"] = {
+        "ok": True,
+        "target_objects": ["book_0"],
+        "global_visible_objects": ["book_0"],
+        "global_robot_visible": True,
+    }
+    issues = check_run(Path("sample.json"), run)
+    assert "global_camera_only_wall_fixtures:global_corridor_0_2" in issues
+
+
 def test_third_camera_prefers_an_unused_non_target_room_after_redundancy():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     cameras = source[source.index("def _camera_records"):source.index("def _global_camera_candidates")]
@@ -2560,7 +2610,8 @@ def test_oracle_native_support_uses_official_symbolic_place_flow():
     assert "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate is object_states.Inside else 2" in place
     assert "deadline = time.monotonic() + PLACE_NATIVE_MAX_WALL_SECONDS" in place
     assert "if time.monotonic() > deadline:" in place
-    assert "for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):" in place
+    assert "for _ in range(attempt_limit):" in place
+    assert "predicate is object_states.Inside" in place
     assert "changed = bool(state.set_value(obj, True))" in place
     assert "reached = bool(state.get_value(obj))" in place
     assert "placed_object_distance = _horizontal_target_aabb_distance(" in place

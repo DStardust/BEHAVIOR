@@ -1,4 +1,11 @@
-from deltasg_layout import evaluate_tool_layout, horizontal_bbox_gap, rigid_bbox_fits
+from deltasg_layout import (
+    FIRE_EXTINGUISHER_LAYOUT_POLICY,
+    FIRE_EXTINGUISHER_MIN_TARGET_GAP,
+    evaluate_tool_layout,
+    horizontal_bbox_gap,
+    rank_fitting_models,
+    rigid_bbox_fits,
+)
 
 
 def test_laundry_floor_grasp_policy_is_scoped_and_has_a_lower_bound():
@@ -18,6 +25,18 @@ def test_rigid_clothing_requires_real_container_capacity():
     assert not rigid_bbox_fits([1.0075, 0.6656, 0.2181], basket)
     assert rigid_bbox_fits([0.2828, 0.1890, 0.1165], basket)
     assert not rigid_bbox_fits([0.2828, 0.1890, 0.1165], [0.10, 0.10, 0.15])
+
+
+def test_container_model_ranking_keeps_only_compact_fitting_models():
+    models = {
+        "wide": [0.28, 0.28, 0.04],
+        "compact": [0.10, 0.12, 0.02],
+        "small": [0.12, 0.14, 0.03],
+        "too_tall": [0.08, 0.09, 0.14],
+    }
+    assert rank_fitting_models(models, [[0.32, 0.31, 0.13]], limit=2) == [
+        "compact", "small"
+    ]
 
 
 def test_fire_storage_filter_precedes_floor_shortlisting():
@@ -46,6 +65,8 @@ def test_cleaning_station_requires_both_target_separation_and_sink_proximity():
 
 def test_extinguisher_is_not_accepted_next_to_fire():
     fire = ([0, 0, 0], [0.2, 0.2, 1])
-    policy = {"min_target_gap": 1.5}
+    assert FIRE_EXTINGUISHER_LAYOUT_POLICY == "separate_fire_safety_tool_v2"
+    assert FIRE_EXTINGUISHER_MIN_TARGET_GAP == 2.5
+    policy = {"min_target_gap": FIRE_EXTINGUISHER_MIN_TARGET_GAP}
     assert not evaluate_tool_layout(([0.4, 0, 0], [0.6, 0.2, 1]), fire, policy)["ok"]
-    assert evaluate_tool_layout(([2, 0, 0], [2.2, 0.2, 1]), fire, policy)["ok"]
+    assert evaluate_tool_layout(([3, 0, 0], [3.2, 0.2, 1]), fire, policy)["ok"]

@@ -10,6 +10,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from deltasg_expert import (  # noqa: E402
+    CompiledExpertPlan,
     ExpertPlanError,
     ExpertStep,
     PLACE_SAMPLING_SURFACE_RAY_OFFSET_FRACTION,
@@ -34,6 +35,7 @@ from deltasg_expert import (  # noqa: E402
     evaluate_manipulation_height,
     validate_env_a_plan_contract,
     validate_visibility_snapshot,
+    symbolic_grasp_hold_targets,
 )
 from audit_deltasg_expert import (  # noqa: E402
     action_artifact_error,
@@ -132,18 +134,6 @@ def test_fire_tasks_compile_to_official_extinguish_state_transition(task_name):
     ("task_name", "plan", "objects", "expected"),
     [
         (
-            "clean_dirty_dishes",
-            [
-                {"primitive": "PICK", "target_object": "sponge_0"},
-                {"primitive": "INTERACT", "target_object": "plate_0", "nl": "Wipe the dirty dish"},
-            ],
-            [
-                {"object_id": "sponge_0", "category": "sponge"},
-                {"object_id": "plate_0", "category": "plate"},
-            ],
-            {"GRASP", "WIPE"},
-        ),
-        (
             "collect_dirty_clothes",
             [
                 {"primitive": "PICK", "target_object": "shirt_0"},
@@ -192,6 +182,101 @@ def test_env_b_anomaly_tasks_compile_to_executable_plans(task_name, plan, object
     assert expected <= {step.primitive for step in compiled.steps}
 
 
+def hand_wash_sample():
+    run = sample(
+        "clean_dirty_dishes",
+        [
+            {"primitive": "PICK", "target_object": "plate_0"},
+            {"primitive": "PLACE", "target_object": "sink_0", "placement_mode": "inside"},
+            {"primitive": "INTERACT", "target_object": "faucet_0", "nl": "Turn on the faucet"},
+            {"primitive": "PICK", "target_object": "sponge_0"},
+            {
+                "primitive": "INTERACT",
+                "target_object": "plate_0",
+                "tool_object": "sponge_0",
+                "destination_object": "sink_0",
+                "nl": "Wipe the dirty dish in the sink",
+            },
+            {"primitive": "INTERACT", "target_object": "faucet_0", "nl": "Turn off the faucet"},
+        ],
+        [
+            {"object_id": "plate_0", "category": "plate", "semantic_role": "anomaly"},
+            {"object_id": "sponge_0", "category": "sponge"},
+            {"object_id": "sink_0", "category": "sink"},
+            {"object_id": "faucet_0", "category": "faucet"},
+        ],
+    )
+    run["task_environment"]["task"]["semantic_reasoning"] = {
+        "solution_path": "hand_wash",
+        "resolution_recipe": {
+            "infrastructure_bindings": {
+                "sink": {"object_id": "sink_0"},
+                "faucet": {"object_id": "faucet_0"},
+            }
+        },
+    }
+    return run
+
+
+def test_hand_wash_compiles_complete_official_state_sequence():
+    compiled = compile_expert_plan(hand_wash_sample())
+    actions = [
+        (step.primitive, step.target_object)
+        for step in compiled.steps
+        if step.primitive != "NAVIGATE_TO"
+    ]
+    assert actions == [
+        ("GRASP", "plate_0"),
+        ("PLACE_INSIDE", "sink_0"),
+        ("TOGGLE_ON", "faucet_0"),
+        ("GRASP", "sponge_0"),
+        ("WIPE", "plate_0"),
+        ("TOGGLE_OFF", "faucet_0"),
+    ]
+
+
+def test_hand_wash_rejects_legacy_sponge_to_dish_shortcut():
+    run = hand_wash_sample()
+    run["task_environment"]["solution_plan"] = [
+        {"primitive": "PICK", "target_object": "sponge_0"},
+        {"primitive": "INTERACT", "target_object": "plate_0", "nl": "Wipe the dirty dish"},
+    ]
+    with pytest.raises(ExpertPlanError, match="hand-wash contract requires"):
+        compile_expert_plan(run)
+
+
+def test_inside_fallback_uses_official_volume_and_state_in_generation_and_expert():
+    code_dir = Path(__file__).resolve().parents[1] / "code"
+    api = (code_dir / "api.py").read_text(encoding="utf-8")
+    generator = (code_dir / "online_deltasg.py").read_text(encoding="utf-8")
+    expert = (code_dir / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    assert "def place_inside_official_volume" in api
+    assert "visual_boundary_points_world" in api
+    assert "state.get_value(destination)" in api
+    assert "robot_position[:2]" in api
+    assert "place_inside_official_volume(obj, destination)" in generator
+    assert "place_inside_official_volume(held, obj)" in expert
+    assert "predicate is object_states.Inside" in expert
+    assert "placed_object_distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in expert
+    assert 'record["inside_placement_evidence"]' in expert
+
+
+def test_navigation_displacement_uses_the_current_step_start_pose():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text()
+    assert "target_position_before_primitive" in source
+    assert "task_object_baseline" not in source
+    assert "current_target_position - target_position_before_primitive" in source
+    assert "stable_target_position - target_position_before_primitive" in source
+
+
+def test_place_inside_navigation_targets_the_official_container_volume():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text()
+    assert "def _container_operation_point" in source
+    assert "max_operation_target_distance" in source
+    assert 'next_step.primitive == "PLACE_INSIDE"' in source
+    assert 'record["navigation_operation_point"]' in source
+
+
 def test_broken_object_plan_rejects_direct_hand_pick():
     run = sample(
         "clean_up_broken_object",
@@ -215,6 +300,9 @@ def test_swept_payload_is_carried_by_dustpan_until_emptying():
     assert "controller.register_swept_payload(target, destination)" in source
     assert "controller.release_carried_payload(payload)" in source
     assert '"mode": "oracle_symbolic_dustpan_payload"' in source
+    sweep = source[source.index('elif step.primitive == "SWEEP_INTO"'):]
+    sweep = sweep[:sweep.index('elif step.primitive == "EMPTY_INTO"')]
+    assert sweep.index("controller._release()") < sweep.index("state.set_value(destination, True)")
 
 
 def test_wipe_uses_the_same_official_covered_transition_for_all_backends():
@@ -406,7 +494,7 @@ def test_fine_operation_rejects_bbox_clipped_by_image_edge():
     assert any("bbox is clipped" in error for error in errors)
 
 
-def test_place_support_may_continue_below_image_when_top_is_framed():
+def test_place_support_may_continue_to_sides_or_below_when_top_is_framed():
     step = ExpertStep(
         step_id=1,
         primitive="PLACE_ON_TOP",
@@ -422,9 +510,25 @@ def test_place_support_may_continue_below_image_when_top_is_framed():
     }
     assert validate_visibility_snapshot(step, ["table_0"], [], bbox) == []
 
-    bbox["table_0"]["bbox_xyxy"] = [0, 70, 260, 239]
+    bbox["table_0"]["bbox_xyxy"] = [0, 70, 319, 239]
+    assert validate_visibility_snapshot(step, ["table_0"], [], bbox) == []
+
+    bbox["table_0"]["bbox_xyxy"] = [0, 0, 319, 239]
     errors = validate_visibility_snapshot(step, ["table_0"], [], bbox)
     assert any("bbox is clipped" in error for error in errors)
+
+
+def test_place_inside_head_aim_targets_the_container_opening():
+    source = (
+        Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py"
+    ).read_text(encoding="utf-8")
+    aim = source[
+        source.index("def _aim_tiago_head"):
+        source.index("def _restore_visible_observation_pose")
+    ]
+    assert "support_surface=False" in aim
+    assert "upper[2] - 0.05 * size[2]" in aim
+    assert 'next_step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}' in source
 
 
 def test_inventory_objects_are_not_required_visible():
@@ -950,7 +1054,8 @@ def test_symbolic_navigation_and_placement_stay_in_manipulation_range():
         source.index("class DeltaSGPhysicalPrimitives")
     ]
     assert "saved_xy = None" in oracle
-    assert "for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):" in oracle
+    assert "for _ in range(attempt_limit):" in oracle
+    assert "predicate is object_states.Inside" in oracle
     assert "time.monotonic() > deadline" in oracle
     assert "placed_object_distance = _horizontal_target_aabb_distance(" in oracle
     assert "placed_object_distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in oracle
@@ -972,6 +1077,20 @@ def test_symbolic_navigation_recovers_the_saved_transition_start_after_bbox_fall
     assert "yield from self._navigate_to_pose(recovery_pose)" in oracle
     assert "held_object=self._get_obj_in_hand()" in oracle
     assert 'record["navigation_route_start_recovery"]' in source
+
+
+def test_symbolic_hold_keeps_relation_destinations_collidable_until_grasp():
+    plan = CompiledExpertPlan(
+        task_name="clean_up_broken_object",
+        task_family="anomaly",
+        object_ids=("broom", "dustpan", "pieces"),
+        steps=(
+            ExpertStep(1, "GRASP", target_object="broom"),
+            ExpertStep(2, "SWEEP_INTO", target_object="pieces", destination_object="dustpan"),
+            ExpertStep(3, "GRASP", target_object="dustpan"),
+        ),
+    )
+    assert symbolic_grasp_hold_targets(plan) == {"broom"}
 
 
 def test_symbolic_replay_isolates_preloaded_objects_without_kinematic_task_objects():

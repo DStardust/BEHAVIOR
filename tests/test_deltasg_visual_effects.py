@@ -68,6 +68,29 @@ def test_fire_audit_requires_combined_flame_and_smoke_contract():
     assert fire_visual_issue(state) == "on_fire_visual_contract_invalid"
 
 
+def test_generation_and_persistent_expert_clear_previous_usdz_flames():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "code"
+    generator = (root / "online_deltasg.py").read_text(encoding="utf-8")
+    expert = (root / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    fire = generator[
+        generator.index("def generate_env_b_fire") :
+        generator.index("def generate_env_c_fire_disambiguation")
+    ]
+    replay = expert[
+        expert.index("def _apply_saved_initial_states") :
+        expert.index("def _delta_replay_integrity")
+    ]
+    persistent_reset = expert[
+        expert.index("def prepare_persistent_scene_reset") :
+        expert.index("def configure_preloaded_delta_objects")
+    ]
+    assert "remove_usdz_flame()" in fire
+    assert "remove_usdz_flame()" in replay
+    assert "remove_usdz_flame()" in persistent_reset
+
+
 def test_covered_snapshot_restores_local_attachments_without_resampling():
     from types import SimpleNamespace
     import torch

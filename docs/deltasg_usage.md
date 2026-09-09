@@ -17,13 +17,38 @@
 | Env-B | `fire`、`dirty_dishes`、`dirty_clothes`、`broken_object` |
 | Env-C | `retrieval_delivery`、`open_close`、`appliance`、`fire` |
 
+## 当前验收状态
+
+截至 2026-09-09，代码仓库中的“完成”分为两级，不能混用：
+
+- 聚焦回归：Env-A 在 `Beechwood_0_int` 已生成 6/6 个不同任务样本且审计无问题；
+  对这 6 个样本使用当前专家实现回放，5/6 通过（83.3%，失败项为
+  `deliver_drink` 的官方 `OnTop` 终态）；
+  Env-B fire 在 `Ihlen_1_int` 已生成 3/3、专家接受 3/3，并验证官方
+  `OnFire=False`、场景完整性、摄像头和步骤图片。
+- 全覆盖发布：必须再通过 15 场景、全部任务/物品覆盖审计。聚焦回归通过不等于该门禁
+  已完成，批量发布时仍应按“全任务批处理”一节执行并保留审计报告。
+
+`code/outputs` 下的原始数据不提交 Git；仓库只保存必要代码、手册和少量经过人工核验的
+示例图。这样可以复核行为，又不会把大型训练数据混入源码历史。
+
+本次上传前的最终相机门回归位于本机
+`code/outputs/release_camera_score_final_20260909_143339`：Env-A 生成 1/1、审计 1/1，
+三台全局相机依次使用 `official_preferred_target_aim`、`official_wall_SE_NE_45` 和
+`official_corner_SE_20`，有效内容投影量分别为 466208、608502 和 873668 像素。
+第三台位于非目标厨房并拍到冰箱、烤箱、水槽和多组柜体；三台相机均通过非结构物体
+内容质量门。它们的位姿与本手册下方三张 1280x720 原始画面逐项一致（最大数值差
+为 0），日志也明确淘汰了多个纯墙/空内容候选。另一个随机 fire 冒烟样本在前三次
+物理放置或机器人稳定性检查失败后由有界重试生成成功；失败尝试没有写入数据集。
+这说明过滤和续跑生效，但该单样本不能替代多场景成功率统计。
+
 ## 运行约束
 
 OmniGibson 必须使用单张 GPU。仅对 OmniGibson 子进程取消代理，不要在当前 shell 中全局取消代理：
 
 ```bash
-env -u ALL_PROXY -u all_proxy \
-  PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+DELTASG_GPU=0 PYTHONUNBUFFERED=1 \
+  code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/run_online_deltasg.py ...
 ```
@@ -58,8 +83,8 @@ OmniGibson 子进程取消代理；可通过 `DELTASG_ENV_FILE` 显式指定另�
 下面的命令在 `Beechwood_0_int` 生成 10 个 Env-A retrieval/delivery 样本：
 
 ```bash
-env -u ALL_PROXY -u all_proxy \
-  PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 \
+DELTASG_GPU=0 PYTHONUNBUFFERED=1 \
+  code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/run_online_deltasg.py \
     --scene Beechwood_0_int \
@@ -75,7 +100,14 @@ env -u ALL_PROXY -u all_proxy \
 
 `--allow-repeat-tasks` 允许重复抽取任务类别，不允许生成完全相同的样本。样本指纹包含初始场景、任务、房间、物品、承接面和量化后的位置；相同物品放在不同合理位置会被视为不同样本。
 
-初始摄像头布置使用真实 `seg_instance` 观测进行验证。系统先检查机器人头部主相机，再针对仍不可见的任务物品，在其所在房间按官方房间相机策略逐台布置全局相机；每个房间最多一台。使用命令行参数 `--max-global-cameras` 或批处理环境变量 `MAX_GLOBAL_CAMERAS` 设置上限（默认 `3`）。达到上限、无法解析物品房间，或房间相机仍看不到对应物品时，该样本会被拒绝并重试。
+初始摄像头布置使用官方相机内参、视锥投影与 PhysX 射线遮挡检查。系统先检查
+机器人头部主相机，再针对仍不可见的任务物品，在其所在房间按官方墙角/墙面相机
+策略布置 2-3 台全局相机。所有任务物品必须至少被一台全局相机覆盖，机器人也必须
+至少被一台全局相机覆盖。约 50% 的样本请求第三视角；该视角可以在非目标房间，
+但每台全局相机都必须拍到达到最小投影面积的家具、任务物或机器人；门、窗、开关和
+墙饰不能单独让补充相机通过。纯墙面、天空或空画面候选会在生成阶段被拒绝。JSON 的 `validation.camera_coverage` 和每条相机记录会保存
+可见物体、像素量及 `scene_content_quality_ok`。达到相机上限、无法解析物品房间，
+或没有足够的内容合格视角时，样本会被拒绝并重试。
 
 ## Env-A 多场景
 
@@ -123,7 +155,7 @@ NUM=20 \
 bash code/run_batch100_all.sh code/outputs/smoke
 
 # 枚举将要使用的初始场景
-env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+DELTASG_GPU=0 code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/list_deltasg_scenes.py --scope interior
 ```
@@ -170,19 +202,20 @@ Env-B 的正式标签是 `envB_all`，包含四类异常：
 | `--env-b-types` | 异常证据 | 解决路径 |
 | --- | --- | --- |
 | `fire` | 官方 `OnFire=True` + `code/assets/Flame_Animation.usdz` 动画火焰 | `fire_extinguisher` |
-| `dirty_dishes` | 官方 `Covered(stain)=True` | 原生 dishwasher，或完整的 sponge + dish soap |
+| `dirty_dishes` | 官方 `Covered(stain)=True` | 原生 dishwasher，或 sink + faucet + sponge + dish soap 的完整手洗流程 |
 | `dirty_clothes` | 官方 `Covered(dirt)=True` | 原生 washer，或 hamper / basket |
 | `broken_object` | `broken_glass` / `broken_light_bulb` 真实破损资产 | 完整的 broom + dustpan + trash can |
 
 火焰的任务状态仍由 OmniGibson 官方 `OnFire` 管理。生成器只关闭其原有 Flow
 显示器，并按 `demo_flame_rs_int_backup.py` 的材质、朝向、缩放和光源逻辑加载
-仓库内 USDZ；可视化和专家回放会从样本记录重建同一个效果，灭火后再移除。
+仓库内 USDZ；可视化和专家回放会从样本记录重建同一个效果。灭火后移除火焰，
+烟雾可作为灭火后的短时残留继续存在；开始下一个任务前会清理旧火焰，避免跨样本重影。
 这不是 marker，也不以图片效果代替官方状态验证。
 
 单场景四类各生成一个样本：
 
 ```bash
-env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+DELTASG_GPU=0 code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/run_online_deltasg.py \
     --scene Ihlen_1_int --robot Tiago --env-type B \
@@ -201,6 +234,27 @@ sink + faucet，再把机器人出生点限制到该基础设施 1.15 m 操作�
 数据中的 `cloth_basket` 请求会显式记录为 `wicker_basket` 资产替换，因为当前
 BEHAVIOR 资产库没有 `cloth_basket` 类别。
 
+手洗样本必须包含以下完整步骤，缺少任一步都会被计划编译器和审计器拒绝：
+
+1. 导航到脏餐具并抓取。
+2. 导航到水槽，将餐具以官方 `Inside=True` 放入水槽。
+3. 导航到水龙头，以官方 `ToggledOn=True` 打开水。
+4. 导航到海绵并抓取。
+5. 导航回水槽，在餐具仍位于水槽且水龙头开启时执行擦洗。
+6. 以官方 `Covered(stain)=False` 验证污渍已去除。
+7. 导航到水龙头，以官方 `ToggledOn=False` 关闭水。
+
+生成 JSON 中对应 12 条源步骤（每次导航和操作分别保存）。当 sink 本身同时提供
+faucet 状态时，编译器会删除紧邻的同目标冗余导航，因此专家结果通常为 11 条步骤；
+状态操作不会被删除。每一步均保存机器人主视角和 2-3 个全局摄像头的 pre/post
+RGB 与分割图。
+海绵和洗洁精必须放在水槽附近的开放承接面，但不能使用水槽本体作为承接面，也
+不能紧贴脏餐具。餐具进入水槽/洗碗机时首先调用 OmniGibson 官方 `Inside` setter；
+若该资产的随机射线采样失败，只允许根据同一资产的官方 `fillable/openfillable`
+体积寻找真实 PhysX 承托面。物理步进后必须同时满足沉降位移不超过 3 cm、完整 AABB
+仍在官方体积内、官方 `Inside.get_value()` 为真；任一条件失败都拒绝，不能把掉进柜体
+内部的物品或伪造状态写入数据集。
+
 对已生成样本执行同一进程的符号专家回放（每一步均保存官方状态变更前后视觉）：
 
 ```bash
@@ -211,7 +265,8 @@ DELTASG_GPU=0 EXPERT_BACKEND=oracle_symbolic EXPERT_LABELS=all \
     code/outputs/envb_all_rs_int_expert 0
 ```
 
-火灾必须以 `OnFire=False` 结束并移除 USDZ 火焰，手洗必须以官方
+火灾必须以 `OnFire=False` 结束并移除 USDZ 火焰，灭火器与火源的水平 AABB 边缘
+距离必须至少为 2.5 m；手洗必须以官方
 `Covered(stain)=False` 结束，衣物和破损物清理必须得到官方 `Inside=True`；
 dishwasher / washer 路径还要验证官方 `Open`、`ToggledOn` 状态序列。只有
 `expert_result.json` 同时满足 `accepted=true` 与 `qa_eligible=true` 才是专家
@@ -260,7 +315,7 @@ tail -f "$OUT"/*/expert/logs/persistent_worker.log
 可视化使用正常物体放置结果和官方摄像头策略，不依赖 marker：
 
 ```bash
-env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+DELTASG_GPU=0 code/run_omnigibson_single_gpu.sh \
   conda run --no-capture-output -n behavior \
   python code/visualize_deltasg_batch.py \
     --scene Beechwood_0_int \
@@ -281,6 +336,50 @@ python code/audit_deltasg_outputs.py \
 ```
 
 只有同时满足生成成功、初始场景完整、物理稳定、非重复且可视化审计通过的样本，才应进入训练数据集。生成输出和大批量图像不提交到 Git；应作为带 manifest 和审计报告的 release artifact 或外部数据集发布。
+
+## 已验收的可视化示例
+
+以下第一组图片来自同一个已通过的 `Beechwood_0_int` 检索专家样本，展示初始状态、
+导航后的机器人视角和抓取后的双视角。第二组来自同一个 `Ihlen_1_int` fire 专家样本。
+全部为原始 640x480 渲染，没有 marker 或后期合成。
+
+| 检索任务初始全局视角 | 导航到药瓶后的机器人视角 |
+| --- | --- |
+| ![检索初始状态](assets/deltasg_examples/retrieval/01_initial_global.png) | ![导航后机器人视角](assets/deltasg_examples/retrieval/02_navigation_robot.png) |
+
+| 抓取药瓶后的全局视角 | 抓取后的机器人视角 |
+| --- | --- |
+| ![抓取后全局视角](assets/deltasg_examples/retrieval/03_grasped_global.png) | ![抓取后机器人视角](assets/deltasg_examples/retrieval/04_grasped_robot.png) |
+
+检索样本的 `expert_result.json` 为 `accepted=true`。下面 fire 的第 1、2、4 张为
+全局摄像头，第 3 张为机器人主视角。
+
+| 初始火焰与上升烟柱 | 抓取远处灭火器后 |
+| --- | --- |
+| ![初始火焰与烟柱](assets/deltasg_examples/fire/01_initial_global.png) | ![抓取灭火器](assets/deltasg_examples/fire/02_grasped_extinguisher_global.png) |
+
+| 机器人视角中的灭火器 | 官方灭火状态变更后 |
+| --- | --- |
+| ![机器人视角](assets/deltasg_examples/fire/03_extinguisher_robot.png) | ![灭火后保留短时烟雾](assets/deltasg_examples/fire/04_extinguished_global.png) |
+
+对应结果的生成与专家审计均为 3/3。灭火前使用仓库内
+`code/assets/Flame_Animation.usdz` 与 OmniGibson Flow 烟雾；灭火后移除火焰，短时烟雾
+允许保留。下一个持久化样本开始前会清理上一个样本的火焰效果。
+
+### 全局摄像头画面核验
+
+以下三张为同一个样本记录的原始 1280x720 全局相机输出。前两张在目标客厅，均看到
+任务药瓶；第三张按指南放在非目标厨房，不要求看到任务物或机器人，但清楚覆盖实际
+家具和电器。相机候选选择先比较可见有效物体数量，再以投影面积排序，避免近墙物体的
+重叠 AABB 像素把半墙画面错误排到首位。
+
+| 目标房间主视角 | 目标房间第二视角 |
+| --- | --- |
+| ![客厅主视角](assets/deltasg_examples/cameras/01_target_room_primary.png) | ![客厅第二视角](assets/deltasg_examples/cameras/02_target_room_secondary.png) |
+
+| 非目标厨房补充视角 |
+| --- |
+| ![厨房补充视角](assets/deltasg_examples/cameras/03_supplemental_kitchen.png) |
 
 ## 常见错误
 

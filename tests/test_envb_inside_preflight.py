@@ -3,7 +3,7 @@
 import ast
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 from contextlib import nullcontext
 import sys
 import pytest
@@ -50,7 +50,9 @@ def test_navigation_preflight_chains_virtual_poses_without_moving_robot(monkeypa
     poses = [torch.tensor([1., 2., 0.]), torch.tensor([3., 4., 0.])]
     planner = Mock(side_effect=poses)
     monkeypatch.setitem(sys.modules, "run_deltasg_expert", SimpleNamespace(
-        _connected_observation_pose=planner, _target_framing_distance=lambda *a, **kw: 1.25))
+        _connected_observation_pose=planner,
+        _container_operation_point=lambda obj: None,
+        _target_framing_distance=lambda *a, **kw: 1.25))
     namespace = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     objects = {name: SimpleNamespace(name=name) for name in ("tool", "target")}
@@ -63,6 +65,44 @@ def test_navigation_preflight_chains_virtual_poses_without_moving_robot(monkeypa
     assert planner.call_args_list[1].kwargs["start_pose"] is poses[0]
     assert planner.call_args_list[1].kwargs["held_object"] is objects["tool"]
     robot.set_position_orientation.assert_not_called()
+
+
+def test_navigation_preflight_uses_explicit_inventory_for_hand_wash(monkeypatch):
+    import torch
+    source = Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py"
+    method = next(n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_preflight_env_b_navigation_sequence")
+    planner = Mock(side_effect=[torch.tensor([1., 2., 0.]), torch.tensor([3., 4., 0.])])
+    operation_point = torch.tensor([4., 5., 1.])
+    monkeypatch.setitem(sys.modules, "run_deltasg_expert", SimpleNamespace(
+        _connected_observation_pose=planner,
+        _container_operation_point=lambda obj: operation_point,
+        _target_framing_distance=lambda *a, **kw: 1.15))
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    objects = {name: SimpleNamespace(name=name) for name in ("dish", "sink")}
+    engine = SimpleNamespace(env=SimpleNamespace(robots=[Mock()], scene=SimpleNamespace(
+        object_registry=lambda _, name: objects[name])))
+    result = namespace[method.name](engine, [
+        {"target": "dish", "held_object": None},
+        {"target": "sink", "held_object": "dish", "operation_relation": "inside"},
+    ])
+    assert result["approaches"][0]["held_object"] is None
+    assert result["approaches"][1]["held_object"] == "dish"
+    assert planner.call_args_list[0].kwargs["held_object"] is None
+    assert planner.call_args_list[1].kwargs["held_object"] is objects["dish"]
+    assert planner.call_args_list[1].kwargs["operation_target_position"] is operation_point
+    assert planner.call_args_list[1].kwargs["max_operation_target_distance"] == 1.15
+
+
+def test_hand_wash_tools_cannot_use_sink_as_their_support():
+    source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
+    hand_wash = source[source.index('if recipe["path_name"] == "hand_wash":'):
+                       source.index('if actual_category in {"fire_extinguisher"')]
+    support_selection = source[source.index("def _choose_support_node"):
+                               source.index("def _build_placement_for_support")]
+    assert 'record["_excluded_support_ids"] = [sink_id]' in hand_wash
+    assert 'node.get("id") in set(record.get("_excluded_support_ids") or [])' in support_selection
 
 
 def test_exhausted_envb_slot_stops_before_robot_respawn():
@@ -146,8 +186,10 @@ def test_inside_preflight_restores_scene_and_sampling_limits(monkeypatch, change
     sim = Mock()
     sim.dump_state.return_value = {"initial": "state"}
     states = SimpleNamespace(Open="Open", Inside="Inside")
+    fallback = Mock(return_value={"ok": False})
     namespace = {"og": SimpleNamespace(sim=sim), "object_states": states,
-                 "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS": 10}
+                 "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS": 10,
+                 "place_inside_official_volume": fallback}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     relation = Mock()
     relation.set_value.return_value = changed
@@ -158,10 +200,11 @@ def test_inside_preflight_restores_scene_and_sampling_limits(monkeypatch, change
         "volume": SimpleNamespace(is_meta_link=True, meta_link_type="openfillable", aabb_extent=extent,
                                   visual_boundary_points_world=torch.tensor([[0., 0., 0.], [1., 1., 1.]]))})
     result = namespace[method.name](None, obj, container)
-    assert result["ok"] is (changed and reached)
+    assert result["ok"] is reached
     assert result["setter_return"] is changed
     assert result["predicate_after_set"] is reached
     assert result["sampling_attempts"] == {"high": 2, "low": 10}
+    assert fallback.call_count == (0 if reached else 1)
     relation.clear_cache.assert_called_once()
     sim.load_state.assert_called_once_with({"initial": "state"}, serialized=False)
     assert macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS == 10
@@ -171,3 +214,33 @@ def test_inside_preflight_restores_scene_and_sampling_limits(monkeypatch, change
     result = namespace[method.name](None, obj, container)
     assert result["reason"] == "missing_official_container_volume"
     sim.dump_state.assert_not_called()
+
+
+def test_faucet_toggle_preflight_exercises_both_states_and_restores_scene():
+    source = Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py"
+    method = next(n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_preflight_env_b_toggle")
+    sim = Mock()
+    sim.dump_state.return_value = {"initial": "state"}
+    toggled_on = object()
+    state = Mock()
+    state.get_value.side_effect = [False, True, False]
+    state.set_value.side_effect = [True, True]
+    obj = SimpleNamespace(name="sink", states={toggled_on: state})
+    namespace = {"og": SimpleNamespace(sim=sim),
+                 "object_states": SimpleNamespace(ToggledOn=toggled_on)}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    result = namespace[method.name](None, obj)
+    assert result["ok"] is True
+    assert state.set_value.call_args_list == [call(True), call(False)]
+    sim.load_state.assert_called_once_with({"initial": "state"}, serialized=False)
+
+
+def test_official_inside_volume_fallback_requires_real_support_and_stable_settling():
+    source = (Path(__file__).resolve().parents[1] / "code" / "api.py").read_text()
+    helper = source[source.index("def place_inside_official_volume"):
+                    source.index("def validate_robot_stability")]
+    assert "support_body" in helper
+    assert 'float(hit_normal[2]) < 0.7' in helper
+    assert "settled_center_displacement <= 0.03" in helper
+    assert "reached and inside_bounds and settled_center_displacement" in helper

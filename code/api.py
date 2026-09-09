@@ -14,6 +14,7 @@ from omnigibson.macros import gm
 gm.ENABLE_OBJECT_STATES = True
 
 import omnigibson as og
+from omnigibson import object_states
 from omnigibson.utils.sampling_utils import raytest
 
 
@@ -55,6 +56,130 @@ def write_json(path: str, data):
 
 def safe_name(s: str) -> str:
     return str(s).replace(":", "_").replace("/", "_").replace(" ", "_")
+
+
+def place_inside_official_volume(obj, destination, settle_steps=8):
+    """Place on a real internal support and verify OmniGibson's Inside state."""
+    import torch as th
+
+    state = obj.states.get(object_states.Inside)
+    links = [
+        link for link in destination.links.values()
+        if link.is_meta_link and link.meta_link_type in {"fillable", "openfillable"}
+    ]
+    result = {
+        "ok": False,
+        "method": "official_fillable_volume_pose_v1",
+        "subject": obj.name,
+        "object": destination.name,
+        "attempts": [],
+    }
+    if state is None or not links:
+        result["reason"] = "missing_inside_state_or_fillable_volume"
+        return result
+
+    obj_position, obj_orientation = obj.get_position_orientation()
+    obj_lower, obj_upper = obj.aabb
+    half_extent = (obj_upper - obj_lower) * 0.5
+    center_offset = (obj_lower + obj_upper) * 0.5 - obj_position
+    for link in links:
+        points = link.visual_boundary_points_world
+        if len(points) == 0:
+            continue
+        lower = points.min(dim=0).values
+        upper = points.max(dim=0).values
+        usable_lower = lower + half_extent + 0.005
+        usable_upper = upper - half_extent - 0.005
+        if bool(th.any(usable_lower >= usable_upper)):
+            continue
+        center = (usable_lower + usable_upper) * 0.5
+        xy_candidates = []
+        robots = list(getattr(destination.scene, "robots", None) or [])
+        if robots:
+            robot_position, _ = robots[0].get_position_orientation()
+            near_xy = th.minimum(
+                th.maximum(robot_position[:2], usable_lower[:2]), usable_upper[:2]
+            )
+            xy_candidates.append(near_xy)
+        xy_candidates.append(center[:2])
+        for x_fraction, y_fraction in ((0.25, 0.5), (0.75, 0.5), (0.5, 0.25), (0.5, 0.75)):
+            xy_candidates.append(
+                th.stack([
+                    usable_lower[0] + (usable_upper[0] - usable_lower[0]) * x_fraction,
+                    usable_lower[1] + (usable_upper[1] - usable_lower[1]) * y_fraction,
+                ])
+            )
+
+        destination_bodies = {candidate.prim_path for candidate in destination.links.values()}
+        object_bodies = {candidate.prim_path for candidate in obj.links.values()}
+        candidates = []
+        for xy in xy_candidates:
+            cast = raytest(
+                start_point=th.tensor([xy[0], xy[1], upper[2] + 0.15]),
+                end_point=th.tensor([xy[0], xy[1], lower[2] - 0.15]),
+                only_closest=True,
+                ignore_bodies=object_bodies,
+            )
+            hit_body = str(cast.get("rigidBody") or "")
+            hit_position = cast.get("position")
+            hit_normal = cast.get("normal")
+            if (
+                not cast.get("hit")
+                or hit_body not in destination_bodies
+                or hit_position is None
+                or hit_normal is None
+                or float(hit_normal[2]) < 0.7
+            ):
+                continue
+            supported_center_z = hit_position[2] + half_extent[2] + 0.005
+            if supported_center_z < usable_lower[2] or supported_center_z > usable_upper[2]:
+                continue
+            candidates.append((
+                th.tensor([xy[0], xy[1], supported_center_z], dtype=th.float32),
+                {
+                    "support_body": hit_body,
+                    "support_position": hit_position.tolist(),
+                    "support_normal": hit_normal.tolist(),
+                },
+            ))
+
+        # A volume-only pose is retained as a bounded last resort, but it must
+        # remain stable instead of falling through coarse container metadata.
+        candidates.extend([
+            (th.tensor([center[0], center[1], usable_upper[2]], dtype=th.float32), None),
+            (center.to(dtype=th.float32), None),
+        ])
+        for target_center, support in candidates:
+            obj.set_position_orientation(
+                position=target_center - center_offset.to(dtype=th.float32),
+                orientation=obj_orientation,
+            )
+            obj.keep_still()
+            for _ in range(settle_steps):
+                og.sim.step_physics()
+            state.clear_cache()
+            reached = bool(state.get_value(destination))
+            live_lower, live_upper = obj.aabb
+            live_center = (live_lower + live_upper) * 0.5
+            settled_center_displacement = float(th.linalg.norm(live_center - target_center))
+            inside_bounds = bool(
+                th.all(live_lower >= lower - 0.005)
+                and th.all(live_upper <= upper + 0.005)
+            )
+            attempt = {
+                "link": link.name,
+                "target_center": target_center.tolist(),
+                "inside_state": reached,
+                "inside_volume_bounds": inside_bounds,
+                "settled_center_displacement": settled_center_displacement,
+                "support": support,
+            }
+            result["attempts"].append(attempt)
+            if reached and inside_bounds and settled_center_displacement <= 0.03:
+                result.update(ok=True, accepted=attempt)
+                return result
+    result["reason"] = "no_stable_verified_inside_pose"
+    return result
 
 
 def validate_robot_stability(env, max_tilt=0.15, min_ground_gap=-0.05, max_ground_gap=0.15):

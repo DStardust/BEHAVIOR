@@ -326,6 +326,22 @@ class CompiledExpertPlan:
         }
 
 
+def symbolic_grasp_hold_targets(plan: CompiledExpertPlan) -> set[str]:
+    """Return grasp targets that are not relation destinations before grasp."""
+    relation_destinations: set[str] = set()
+    targets: set[str] = set()
+    for step in plan.steps:
+        if (
+            step.primitive == "GRASP"
+            and step.target_object
+            and step.target_object not in relation_destinations
+        ):
+            targets.add(step.target_object)
+        if step.destination_object:
+            relation_destinations.add(step.destination_object)
+    return targets
+
+
 def task_environment(run: dict[str, Any]) -> dict[str, Any]:
     return run.get("task_environment") or run
 
@@ -678,6 +694,52 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
             raise ExpertPlanError("EMPTY_INTO tool must be a dustpan")
         if empties[0]["payload"] != sweeps[0]["target"]:
             raise ExpertPlanError("EMPTY_INTO payload must be the swept broken object")
+    if task_name == "clean_dirty_dishes":
+        reasoning = task.get("semantic_reasoning") or {}
+        solution_path = reasoning.get("solution_path")
+        if solution_path == "hand_wash":
+            recipe = reasoning.get("resolution_recipe") or {}
+            bindings = recipe.get("infrastructure_bindings") or {}
+            sink_id = (bindings.get("sink") or {}).get("object_id")
+            faucet_id = (bindings.get("faucet") or {}).get("object_id")
+            anomaly_ids = [
+                object_id for object_id, record in objects.items()
+                if record.get("semantic_role") == "anomaly"
+            ]
+            sponge_ids = [
+                object_id for object_id, record in objects.items()
+                if record.get("category") == "sponge"
+            ]
+            if len(anomaly_ids) != 1 or len(sponge_ids) != 1 or not sink_id or not faucet_id:
+                raise ExpertPlanError(
+                    "hand-wash contract requires one dirty dish, one sponge, one sink, and one faucet"
+                )
+            dish_id, sponge_id = anomaly_ids[0], sponge_ids[0]
+            manipulations = [
+                item for item in provisional if item["primitive"] != "NAVIGATE_TO"
+                and item["primitive"] != "WAIT"
+            ]
+            actual = [(item["primitive"], item["target"]) for item in manipulations]
+            expected = [
+                ("GRASP", dish_id),
+                ("PLACE_INSIDE", sink_id),
+                ("TOGGLE_ON", faucet_id),
+                ("GRASP", sponge_id),
+                ("WIPE", dish_id),
+                ("TOGGLE_OFF", faucet_id),
+            ]
+            if actual != expected:
+                raise ExpertPlanError(
+                    "hand-wash contract requires dirty-dish pickup, sink placement, "
+                    "faucet on, sponge pickup, in-sink wipe, and faucet off"
+                )
+            wipe = manipulations[4]
+            if wipe.get("tool") != sponge_id or wipe.get("destination") != sink_id:
+                raise ExpertPlanError(
+                    "hand-wash WIPE must use the sponge while the dish is inside the sink"
+                )
+        elif solution_path != "machine_wash":
+            raise ExpertPlanError("clean_dirty_dishes is missing a supported solution path")
 
     # An inside receptacle with an Open state must be opened with an empty hand.
     # Some LLM plans omit this entirely; add the uniquely implied state change
@@ -912,13 +974,17 @@ def validate_visibility_snapshot(
             if len(image_size) == 2:
                 width, height = (int(value) for value in image_size)
                 margin = max(2, int(round(min(width, height) * 0.01)))
-                clipped = x1 < margin or y1 < margin or x2 >= width - margin
-                # PLACE operates on the support's visible top/opening. A
-                # floor-standing table or cabinet may legitimately continue
-                # below the primary image; requiring all legs / the full body
-                # adds no manipulation evidence and rejects well-framed tops.
-                if step.primitive not in {"PLACE_ON_TOP", "PLACE_INSIDE"}:
-                    clipped = clipped or y2 >= height - margin
+                if step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}:
+                    # PLACE operates on the support's visible top/opening. A
+                    # wide sink, table, or cabinet may legitimately continue
+                    # to the sides or below the image; the operational surface
+                    # itself must not continue above the primary image.
+                    clipped = y1 < margin
+                else:
+                    clipped = (
+                        x1 < margin or y1 < margin
+                        or x2 >= width - margin or y2 >= height - margin
+                    )
                 if clipped:
                     errors.append(f"manipulation target {step.target_object!r} bbox is clipped")
     return errors

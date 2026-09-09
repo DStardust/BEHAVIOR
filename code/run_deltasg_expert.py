@@ -55,7 +55,12 @@ from omnigibson.sensors import VisionSensor
 from omnigibson.utils.constants import PrimType
 from omnigibson.utils import transform_utils as T
 
-from api import create_env, get_all_scene_objects, validate_robot_stability
+from api import (
+    create_env,
+    get_all_scene_objects,
+    place_inside_official_volume,
+    validate_robot_stability,
+)
 from deltasg_visual_effects import (
     SMOKE_FLOW_RENDER_WARMUP_FRAMES,
     SMOKE_FLOW_WARMUP_STEPS,
@@ -100,6 +105,7 @@ from deltasg_expert import (
     evaluate_manipulation_height,
     place_descent_corridor_blockers,
     plan_object_index,
+    symbolic_grasp_hold_targets,
     validate_visibility_snapshot,
 )
 
@@ -290,11 +296,18 @@ def _connected_observation_pose(
     route_clearance_margin=0.20,
     route_target=None,
     max_target_aabb_distance=None,
+    operation_target_position=None,
+    max_operation_target_distance=None,
     start_pose=None,
     held_object=None,
 ):
     """Choose a traversable pose in the robot's current connected component."""
     target_position, _ = obj.get_position_orientation()
+    operation_target_position = (
+        th.as_tensor(operation_target_position, dtype=th.float32)
+        if operation_target_position is not None
+        else target_position
+    )
     robot_position, _ = robot.get_position_orientation()
     if start_pose is not None:
         robot_position = robot_position.clone()
@@ -364,7 +377,7 @@ def _connected_observation_pose(
             f"Robot traversable component is empty on floor {floor}",
             {"object": obj.name},
         )
-    target_pixel = trav_map.world_to_map(target_position[:2]).to(pixels.device)
+    target_pixel = trav_map.world_to_map(operation_target_position[:2]).to(pixels.device)
     preferred_pixels = preferred_distance / float(trav_map.map_resolution)
     distances = th.linalg.norm(pixels.float() - target_pixel.float(), dim=1)
     robot_pixel = trav_map.world_to_map(robot_position[:2]).to(pixels.device).float()
@@ -471,9 +484,21 @@ def _connected_observation_pose(
         target_aabb_distance = float(
             np.linalg.norm(np.asarray(xy[:2].cpu(), dtype=float) - nearest_target_xy)
         )
+        operation_target_distance = float(
+            np.linalg.norm(
+                np.asarray(xy[:2].cpu(), dtype=float)
+                - np.asarray(operation_target_position[:2].cpu(), dtype=float)
+            )
+        )
         if (
             max_target_aabb_distance is not None
             and target_aabb_distance > max_target_aabb_distance
+        ):
+            rejected["operation_distance"] += 1
+            continue
+        if (
+            max_operation_target_distance is not None
+            and operation_target_distance > max_operation_target_distance
         ):
             rejected["operation_distance"] += 1
             continue
@@ -507,8 +532,8 @@ def _connected_observation_pose(
             rejected["line_of_sight"] += 1
             continue
         direct_yaw = math.atan2(
-            float(target_position[1] - xy[1]),
-            float(target_position[0] - xy[0]),
+            float(operation_target_position[1] - xy[1]),
+            float(operation_target_position[0] - xy[0]),
         )
         if relative_camera is not None:
             fallback_yaw = direct_yaw + math.radians(fallback_yaw_offset)
@@ -587,6 +612,16 @@ def _connected_observation_pose(
             },
         )
     return th.tensor([candidate_xy[0], candidate_xy[1], candidate_yaw], dtype=th.float32)
+
+
+def _container_operation_point(obj):
+    """Return the centre of the first official fillable manipulation volume."""
+    for link in obj.links.values():
+        if link.is_meta_link and link.meta_link_type in {"fillable", "openfillable"}:
+            points = link.visual_boundary_points_world
+            if len(points):
+                return (points.min(dim=0).values + points.max(dim=0).values) * 0.5
+    return None
 
 
 def _target_framing_distance(obj, robot=None, minimum=1.25):
@@ -1049,6 +1084,7 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
 
     def _place_with_predicate(self, obj, predicate, near_poses=None, near_poses_threshold=None):
         """Apply the official symbolic relation before clearing inventory."""
+        self._deltasg_inside_placement_evidence = None
         held = self._get_obj_in_hand()
         if held is None:
             raise ActionPrimitiveError(
@@ -1102,7 +1138,10 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = (
                     INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate is object_states.Inside else 2
                 )
-            for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):
+            attempt_limit = (
+                1 if predicate is object_states.Inside else PLACE_NATIVE_MAX_ATTEMPTS
+            )
+            for _ in range(attempt_limit):
                 if time.monotonic() > deadline:
                     break
                 attempts_tried += 1
@@ -1121,6 +1160,28 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 held.keep_still()
                 self._set_inventory_gravity(False)
                 self._set_inventory_collisions(False)
+            if (
+                predicate is object_states.Inside
+                and (
+                    not reached
+                    or placed_object_distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                )
+            ):
+                self._set_inventory_collisions(True)
+                self._set_inventory_gravity(True)
+                inside_fallback = place_inside_official_volume(held, obj)
+                self._deltasg_inside_placement_evidence = inside_fallback
+                reached = bool(inside_fallback["ok"])
+                changed = changed or reached
+                if reached:
+                    placed_object_distance = _horizontal_target_aabb_distance(
+                        self.robot, held
+                    )
+                    print(
+                        f"[expert] Inside official-volume fallback target={obj.name} "
+                        f"verified={reached}",
+                        flush=True,
+                    )
         finally:
             with object_state_macros.unlocked():
                 object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = old_high
@@ -1158,6 +1219,9 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             position, orientation = obj.get_position_orientation()
             restore_target_pose = (position.clone(), orientation.clone())
         saved_xy = None
+        operation_target_position = getattr(
+            self, "_deltasg_navigation_operation_point", None
+        )
         if (
             not obj.name.startswith("online_env_")
             and int(getattr(self, "_deltasg_navigation_fallback_rank", 0)) == 0
@@ -1175,6 +1239,13 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             if (
                 float(np.linalg.norm(saved_xy_array - nearest_xy))
                 > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                or operation_target_position is not None
+                and float(
+                    np.linalg.norm(
+                        saved_xy_array
+                        - np.asarray(operation_target_position[:2].cpu(), dtype=float)
+                    )
+                ) > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
                 or (target_rooms and candidate_room not in target_rooms)
             ):
                 saved_xy = None
@@ -1219,6 +1290,12 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                     route_clearance_margin=0.0,
                     route_target=obj,
                     max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                    operation_target_position=operation_target_position,
+                    max_operation_target_distance=(
+                        DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                        if operation_target_position is not None
+                        else None
+                    ),
                 )
             route = _connected_navigation_waypoints(
                 self.env,
@@ -3044,6 +3121,24 @@ def _name(record):
     return record.get("object_name") or record.get("object_id") or record.get("name")
 
 
+def _hand_wash_context_ids(run):
+    te = run.get("task_environment") or run
+    task = te.get("task") or run.get("task") or {}
+    reasoning = task.get("semantic_reasoning") or {}
+    if (
+        task.get("primary_behavior_task") != "clean_dirty_dishes"
+        or reasoning.get("solution_path") != "hand_wash"
+    ):
+        return None
+    bindings = (reasoning.get("resolution_recipe") or {}).get(
+        "infrastructure_bindings"
+    ) or {}
+    return {
+        "sink": (bindings.get("sink") or {}).get("object_id"),
+        "faucet": (bindings.get("faucet") or {}).get("object_id"),
+    }
+
+
 def _iter_modalities(obs, info, path=()):
     if not isinstance(obs, dict):
         return
@@ -3724,6 +3819,7 @@ def cleanup_persistent_camera_streams(camera_streams):
 
 def prepare_persistent_scene_reset(env):
     """Refresh PhysX views before hard-reset removes the previous Delta objects."""
+    remove_usdz_flame()
     # Clearing a visual particle system removes its template object and
     # invalidates PhysX views. Do it before the rebuild, not inside restore().
     if og.sim.is_playing():
@@ -3916,6 +4012,9 @@ def _hold_symbolic_grasp_targets(env, grasp_target_ids):
 
 def _apply_saved_initial_states(env, run):
     """Replay task setup states before executing the saved expert plan."""
+    # Effect prims live outside scene state and survive persistent hard resets.
+    # Clear the previous sample before recreating only this run's fire visual.
+    remove_usdz_flame()
     state_types = {
         "open": object_states.Open,
         "toggled_on": object_states.ToggledOn,
@@ -4717,7 +4816,7 @@ def _rotate_toward(env, robot, obj, fallback_rank=0, fallback_yaw_offset=-10.0):
     }
 
 
-def _aim_tiago_head(robot, obj):
+def _aim_tiago_head(robot, obj, support_surface=False):
     """Point Tiago's official pan/tilt joints at the target AABB centre."""
     if str(getattr(robot, "model", "")).lower() != "tiago":
         return {"aimed": False, "reason": "robot_has_no_tiago_head"}
@@ -4725,7 +4824,9 @@ def _aim_tiago_head(robot, obj):
         lower, upper = obj.aabb
         target_position = (lower + upper) * 0.5
         size = upper - lower
-        if float(th.linalg.norm(size[:2])) >= 1.0 or float(size[2]) >= 0.6:
+        if support_surface:
+            target_position[2] = upper[2] - 0.05 * size[2]
+        elif float(th.linalg.norm(size[:2])) >= 1.0 or float(size[2]) >= 0.6:
             target_position[2] = lower[2] + 0.05 * size[2]
         robot_pose = robot.get_position_orientation()
         target_in_base = T.relative_pose_transform(
@@ -4889,7 +4990,8 @@ def _physical_look_at(env, controller, obj):
 
 
 def _check_postcondition(
-    primitive, target, carried, controller, destination=None, payload=None
+    primitive, target, carried, controller, destination=None, payload=None,
+    covered_system_name=None,
 ):
     if primitive == "GRASP":
         actual = controller._get_obj_in_hand()
@@ -4918,6 +5020,8 @@ def _check_postcondition(
         covered_systems = []
         if state is not None:
             for system in target.scene.system_registry.objects:
+                if covered_system_name and system.name != covered_system_name:
+                    continue
                 try:
                     if state.get_value(system):
                         covered_systems.append(system.name)
@@ -4926,6 +5030,7 @@ def _check_postcondition(
         return not covered_systems, {
             "state": "Covered",
             "expected": False,
+            "system": covered_system_name,
             "actual_systems": sorted(covered_systems),
         }
     if primitive == "SWEEP_INTO":
@@ -4956,6 +5061,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     if plan.task_family not in {"retrieval_delivery", "open_close", "appliance", "fire", "anomaly"}:
         raise ExpertPlanError(f"expert v1 does not execute task family {plan.task_family!r}")
     te = run.get("task_environment") or {}
+    hand_wash_context = _hand_wash_context_ids(run)
     generation_profile = (te.get("generation") or {}).get("solvability_profile")
     if generation_profile is not None and generation_profile != args.backend:
         raise ExpertPlanError(
@@ -4963,9 +5069,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             f"expert backend {args.backend!r}"
         )
     generation_profile_verified = generation_profile == args.backend
-    symbolic_grasp_targets = {
-        step.target_object for step in plan.steps if step.primitive == "GRASP"
-    }
+    symbolic_grasp_targets = symbolic_grasp_hold_targets(plan)
     scene = (te.get("base_scene") or {}).get("scene_model")
     if not scene:
         raise ExpertPlanError("base scene model is missing")
@@ -5090,10 +5194,6 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 }
     baseline = _native_pose_snapshot(env)
     _nav_diag_checkpoint(env, env.robots[0], "post_baseline")
-    task_object_baseline = {
-        object_id: np.asarray(objects[object_id].get_position_orientation()[0], dtype=float)
-        for object_id in plan.object_ids
-    }
     # Fix P: reference sampler-input geometry, captured pre-grasp (before any
     # FixedJoint/stop-play can transiently corrupt get_base_aligned_bbox).
     # Fix P5: for every object a plan step may place on, also snapshot the
@@ -5173,7 +5273,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             # from a global camera. Aim the robot head only for a fine operation;
             # navigation itself moves and faces the robot before its post frame.
             if target is not None and step.primitive in MANIPULATION_PRIMITIVES:
-                _aim_tiago_head(env.robots[0], target)
+                _aim_tiago_head(
+                    env.robots[0], target,
+                    support_surface=step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"},
+                )
             pre = _capture_event(
                 env, run, output_dir, f"step_{step.step_id:03d}_pre", target_ids,
                 args.min_bbox_pixels, step.target_object, camera_streams
@@ -5277,7 +5380,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 )
                 recovery["succeeded"] = not visibility_errors
             else:
-                head_aim = _aim_tiago_head(env.robots[0], target)
+                head_aim = _aim_tiago_head(
+                    env.robots[0], target,
+                    support_surface=step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"},
+                )
                 recovered = _capture_event(
                     env,
                     run,
@@ -5360,7 +5466,29 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         # primitive. Keep those controls at the front of the exported step
         # trace so replay and VLA supervision see the complete trajectory.
         action_rows = list(recovery_action_rows)
+        target_position_before_primitive = (
+            np.asarray(target.get_position_orientation()[0], dtype=float).copy()
+            if target is not None
+            else None
+        )
         try:
+            next_step = plan.steps[step_index + 1] if step_index + 1 < len(plan.steps) else None
+            navigation_operation_point = (
+                _container_operation_point(target)
+                if (
+                    target is not None
+                    and step.primitive == "NAVIGATE_TO"
+                    and next_step is not None
+                    and next_step.target_object == step.target_object
+                    and next_step.primitive == "PLACE_INSIDE"
+                )
+                else None
+            )
+            controller._deltasg_navigation_operation_point = navigation_operation_point
+            if navigation_operation_point is not None:
+                record["navigation_operation_point"] = _jsonable(
+                    navigation_operation_point
+                )
             _nav_diag_checkpoint(env, env.robots[0], f"step{step.step_id}_pre:{step.primitive}")
             if step.primitive == "WAIT":
                 for _ in range(args.wait_steps):
@@ -5447,8 +5575,41 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         "Target has no Covered state",
                         {"target object": getattr(target, "name", None)},
                     )
+                wash_evidence = None
+                if hand_wash_context is not None:
+                    sink = objects.get(hand_wash_context["sink"])
+                    faucet = objects.get(hand_wash_context["faucet"])
+                    held = controller._get_obj_in_hand()
+                    inside_state = target.states.get(object_states.Inside)
+                    dish_inside = bool(
+                        inside_state is not None
+                        and sink is not None
+                        and inside_state.get_value(sink)
+                    )
+                    faucet_state = (
+                        faucet.states.get(object_states.ToggledOn)
+                        if faucet is not None else None
+                    )
+                    faucet_on = bool(faucet_state is not None and faucet_state.get_value())
+                    sponge_held = held is carried and getattr(carried, "category", None) == "sponge"
+                    wash_evidence = {
+                        "dish_inside_sink": dish_inside,
+                        "sink_object": getattr(sink, "name", None),
+                        "faucet_toggled_on": faucet_on,
+                        "faucet_object": getattr(faucet, "name", None),
+                        "sponge_in_hand": sponge_held,
+                        "held_object": getattr(held, "name", None),
+                    }
+                    if not all((dish_inside, faucet_on, sponge_held)):
+                        raise ActionPrimitiveError(
+                            ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                            "Hand washing requires the dish in the sink, running water, and the sponge in hand",
+                            wash_evidence,
+                        )
                 removed_systems = []
                 for system in target.scene.system_registry.objects:
+                    if hand_wash_context is not None and system.name != "stain":
+                        continue
                     if state.get_value(system) and state.set_value(system, False):
                         removed_systems.append(system.name)
                 # Covered._set_value reads the old value before removing
@@ -5461,6 +5622,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     "removed_systems": sorted(removed_systems),
                     "mode": "omnigibson_official_covered_transition",
                 }
+                if wash_evidence is not None:
+                    interaction["hand_wash_preconditions"] = wash_evidence
                 record["assisted_interaction"] = interaction
                 assisted_interactions.append(interaction)
                 if not removed_systems:
@@ -5486,6 +5649,14 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                             "dustpan": getattr(destination, "name", None),
                         },
                     )
+                # Finish the sweep gesture by releasing the broom before the
+                # official relation sampler runs. The grasp joint and attached
+                # broom otherwise become collision obstacles that were absent
+                # from the generation-time OnTop preflight.
+                for action in controller._release():
+                    _step_control_without_observation(env, action)
+                    action_rows.append(_to_numpy(action))
+                    record["actions_executed"] += 1
                 state = target.states.get(object_states.OnTop) if target is not None else None
                 changed = bool(state.set_value(destination, True)) if state is not None else False
                 if state is not None:
@@ -5498,10 +5669,6 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         {"state_set_succeeded": changed, "state_reached": reached},
                     )
                 controller.register_swept_payload(target, destination)
-                for action in controller._release():
-                    _step_control_without_observation(env, action)
-                    action_rows.append(_to_numpy(action))
-                    record["actions_executed"] += 1
                 interaction = {
                     "step_id": step.step_id,
                     "primitive": step.primitive,
@@ -5613,6 +5780,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             post_ok, postcondition = _check_postcondition(
                 step.primitive, target, carried, controller,
                 destination=destination, payload=payload,
+                covered_system_name=(
+                    "stain"
+                    if hand_wash_context is not None and step.primitive == "WIPE"
+                    else None
+                ),
             )
             if step.primitive == "NAVIGATE_TO" and target is not None:
                 navigation_approach_distance = _horizontal_target_aabb_distance(
@@ -5632,7 +5804,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     target.get_position_orientation()[0], dtype=float
                 )
                 target_displacement = float(
-                    np.linalg.norm(current_target_position - task_object_baseline[target.name])
+                    np.linalg.norm(current_target_position - target_position_before_primitive)
                 )
                 postcondition["target_displacement"] = target_displacement
                 postcondition["max_target_displacement"] = args.max_task_object_displacement
@@ -5657,7 +5829,20 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 skipped, diagnostics = _release_motion_generator(controller)
                 skipped_collision_meshes.extend(skipped)
                 approach_diagnostics.update(diagnostics)
-            post_head_aim = _aim_tiago_head(env.robots[0], target) if target is not None else None
+            next_step = plan.steps[step_index + 1] if step_index + 1 < len(plan.steps) else None
+            post_support_surface = bool(
+                step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}
+                or step.primitive == "NAVIGATE_TO"
+                and next_step is not None
+                and next_step.target_object == step.target_object
+                and next_step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}
+            )
+            post_head_aim = (
+                _aim_tiago_head(
+                    env.robots[0], target, support_surface=post_support_surface
+                )
+                if target is not None else None
+            )
             post = _capture_event(
                 env, run, output_dir, f"step_{step.step_id:03d}_post", target_ids,
                 args.min_bbox_pixels, step.target_object, camera_streams
@@ -5704,7 +5889,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                             primitive_map["NAVIGATE_TO"], target, attempts=1
                         ):
                             pass
-                        head_aim = _aim_tiago_head(env.robots[0], target)
+                        head_aim = _aim_tiago_head(
+                            env.robots[0], target,
+                            support_surface=post_visibility_step.primitive
+                            in {"PLACE_ON_TOP", "PLACE_INSIDE"},
+                        )
                         recovered_post = _capture_event(
                             env,
                             run,
@@ -5754,6 +5943,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             stable_post_ok, stable_postcondition = _check_postcondition(
                 step.primitive, target, carried, controller,
                 destination=destination, payload=payload,
+                covered_system_name=(
+                    "stain"
+                    if hand_wash_context is not None and step.primitive == "WIPE"
+                    else None
+                ),
             )
             if step.primitive == "NAVIGATE_TO" and target is not None:
                 stable_navigation_approach_distance = _horizontal_target_aabb_distance(
@@ -5776,7 +5970,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 )
                 stable_target_displacement = float(
                     np.linalg.norm(
-                        stable_target_position - task_object_baseline[target.name]
+                        stable_target_position - target_position_before_primitive
                     )
                 )
                 stable_postcondition["target_displacement"] = stable_target_displacement
@@ -5844,6 +6038,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 skipped, diagnostics = _release_motion_generator(controller)
                 skipped_collision_meshes.extend(skipped)
                 approach_diagnostics.update(diagnostics)
+            inside_placement_evidence = getattr(
+                controller, "_deltasg_inside_placement_evidence", None
+            )
+            if inside_placement_evidence is not None:
+                record["inside_placement_evidence"] = inside_placement_evidence
             actions_dir = output_dir / "actions"
             actions_dir.mkdir(parents=True, exist_ok=True)
             action_path = actions_dir / f"step_{step.step_id:03d}.npy"
