@@ -14,7 +14,7 @@
 | 环境 | 任务类型 |
 | --- | --- |
 | Env-A | `retrieval_delivery`、`open_close`、`appliance` |
-| Env-B | `fire` |
+| Env-B | `fire`、`dirty_dishes`、`dirty_clothes`、`broken_object` |
 | Env-C | `retrieval_delivery`、`open_close`、`appliance`、`fire` |
 
 ## 运行约束
@@ -49,6 +49,9 @@ export DELTASG_LLM_MODEL='<model-name>'
 较便宜的模型可用于开发和小规模回测，但不同模型的计划合法率可能不同；正式数据集应在 manifest 中保留实际的 `llm_model`，并分模型审计成功率。
 
 仓库不保存 API 密钥。可选的兼容接口地址通过 `LLM_BASE_URL` 设置。
+`code/run_omnigibson_single_gpu.sh` 会加载当前工作树根目录的 `.env`，再仅对
+OmniGibson 子进程取消代理；可通过 `DELTASG_ENV_FILE` 显式指定另一个项目内
+环境文件。不要从其他项目的 `.env` 读取密钥。
 
 ## 单场景生成
 
@@ -115,7 +118,7 @@ tmux new-session -d -s "deltasg_${RUN_ID}" \
 ```bash
 # 只跑指定场景和标签
 SCENES='Beechwood_0_int Merom_0_int' \
-LABELS='envA_retrieval_delivery,envB_fire' \
+LABELS='envA_retrieval_delivery,envB_all' \
 NUM=20 \
 bash code/run_batch100_all.sh code/outputs/smoke
 
@@ -159,6 +162,98 @@ python code/build_enva_native_eligibility.py \
 工具要求 15 个版本化场景均有图，并且每个场景至少存在一个高度合格的 open/close 和 appliance 目标族，否则非零退出。
 
 具体模型连续两次放置失败后会在当前断点中暂停调度，避免一个坏资产造成无限重试；它不会从覆盖清单中消失，因此最终覆盖审计仍会报告该模型缺失。应修复模型或放置策略后续跑，而不是降低审计标准。
+
+## Env-B 异常任务
+
+Env-B 的正式标签是 `envB_all`，包含四类异常：
+
+| `--env-b-types` | 异常证据 | 解决路径 |
+| --- | --- | --- |
+| `fire` | 官方 `OnFire=True` + `code/assets/Flame_Animation.usdz` 动画火焰 | `fire_extinguisher` |
+| `dirty_dishes` | 官方 `Covered(stain)=True` | 原生 dishwasher，或完整的 sponge + dish soap |
+| `dirty_clothes` | 官方 `Covered(dirt)=True` | 原生 washer，或 hamper / basket |
+| `broken_object` | `broken_glass` / `broken_light_bulb` 真实破损资产 | 完整的 broom + dustpan + trash can |
+
+火焰的任务状态仍由 OmniGibson 官方 `OnFire` 管理。生成器只关闭其原有 Flow
+显示器，并按 `demo_flame_rs_int_backup.py` 的材质、朝向、缩放和光源逻辑加载
+仓库内 USDZ；可视化和专家回放会从样本记录重建同一个效果，灭火后再移除。
+这不是 marker，也不以图片效果代替官方状态验证。
+
+单场景四类各生成一个样本：
+
+```bash
+env -u ALL_PROXY -u all_proxy CUDA_VISIBLE_DEVICES=0 \
+  conda run --no-capture-output -n behavior \
+  python code/run_online_deltasg.py \
+    --scene Ihlen_1_int --robot Tiago --env-type B \
+    --env-b-types fire,dirty_dishes,dirty_clothes,broken_object \
+    --allow-repeat-tasks --num-envs 4 \
+    --min-global-cameras 2 --max-global-cameras 3 \
+    --llm-model qwen3.8-max \
+    --output-dir code/outputs/envb_all_rs_int
+```
+
+`dirty_dishes` 会先从完整场景图选择原生 dishwasher，或绑定同一房间内的
+sink + faucet，再把机器人出生点限制到该基础设施 1.15 m 操作范围内；不会因为
+一次随机出生点落在其他连通分量就错误判定 recipe 不可用。其余 recipe 无基础
+设施要求并生成整套解决物品。hamper、basket、trash can 等任务终点会先按官方
+资产元数据过滤不可操作尺寸，落地后仍必须通过实时 AABB 高度和导航检查。
+数据中的 `cloth_basket` 请求会显式记录为 `wicker_basket` 资产替换，因为当前
+BEHAVIOR 资产库没有 `cloth_basket` 类别。
+
+对已生成样本执行同一进程的符号专家回放（每一步均保存官方状态变更前后视觉）：
+
+```bash
+DELTASG_GPU=0 EXPERT_BACKEND=oracle_symbolic EXPERT_LABELS=all \
+  EXPERT_TASKS=all EXPERT_ROBOT=Tiago DELTASG_LLM_MODEL=qwen3.8-max \
+  code/run_deltasg_expert_batch.sh \
+    code/outputs/envb_all_rs_int \
+    code/outputs/envb_all_rs_int_expert 0
+```
+
+火灾必须以 `OnFire=False` 结束并移除 USDZ 火焰，手洗必须以官方
+`Covered(stain)=False` 结束，衣物和破损物清理必须得到官方 `Inside=True`；
+dishwasher / washer 路径还要验证官方 `Open`、`ToggledOn` 状态序列。只有
+`expert_result.json` 同时满足 `accepted=true` 与 `qa_eligible=true` 才是专家
+端到端合格样本。
+
+### Env-A/B/C 多场景端到端脚本
+
+`code/run_envbc_multiscene_e2e.sh` 按场景串行完成生成、审计和专家回放，避免每个
+样本重复冷启动。单个任务失败会记录到日志和 checkpoint，不会阻止后续场景继续
+运行；重新执行同一命令时，退出码为 0 的阶段会跳过，失败阶段会从已有 checkpoint
+续跑。
+
+```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+OUT="code/outputs/envbc_e2e_${RUN_ID}"
+tmux new-session -d -s "envbc_${RUN_ID}" \
+  "cd '$PWD' && DELTASG_GPU=0 DELTASG_LLM_MODEL=qwen3.8-max \
+   SCENES='Ihlen_1_int Beechwood_0_int' \
+   ENVA_NUM=0 ENVB_NUM=8 \
+   ENVB_TYPES='fire,dirty_dishes,dirty_clothes,broken_object' \
+   ENVC_NUM=0 RUN_EXPERT=1 \
+   bash code/run_envbc_multiscene_e2e.sh '$OUT' \
+   > '$OUT.console.log' 2>&1"
+```
+
+其中 `ENVA_NUM`、`ENVB_NUM`、`ENVC_NUM` 是每个场景的请求数量。只验证 fire 时
+可设 `ENVB_TYPES=fire`；不设置 `SCENES` 时使用
+`code/configs/env_a_scenes.txt` 中的场景。脚本通过
+`code/run_omnigibson_single_gpu.sh` 保证每个 OmniGibson 子进程只看到一张 GPU，
+并且只在子进程内取消代理。
+
+实时查看生成数和专家端到端接受率：
+
+```bash
+python code/monitor_envbc_multiscene_e2e.py "$OUT"
+tail -f "$OUT"/*/logs/envb.log
+tail -f "$OUT"/*/expert/logs/persistent_worker.log
+```
+
+结束后每个场景包含 `generation_audit.json`、专家目录和独立退出码；总览写入
+`final_report.txt`。生成成功不能代替专家成功，只有监控表中的 `accepted` 才表示
+专家结果同时通过 `accepted=true` 和 `qa_eligible=true`。
 
 ## 可视化与审计
 

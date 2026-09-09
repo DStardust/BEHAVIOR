@@ -19,6 +19,7 @@ MIN_MANIPULATION_HEIGHT="${EXPERT_MIN_MANIPULATION_HEIGHT:-0.10}"
 MAX_MANIPULATION_HEIGHT="${EXPERT_MAX_MANIPULATION_HEIGHT:-1.55}"
 MIN_ACCEPT_RATE="${EXPERT_MIN_ACCEPT_RATE:-0.0}"
 SAMPLE_TIMEOUT="${EXPERT_SAMPLE_TIMEOUT:-1800}"
+PERSISTENT_SAMPLE_TIMEOUT="${EXPERT_PERSISTENT_SAMPLE_TIMEOUT:-180}"
 SAMPLE_RETRIES="${EXPERT_SAMPLE_RETRIES:-2}"
 mkdir -p "$OUTPUT_ROOT/logs"
 AUDIT_PROFILE_ARGS=(--require-backend "$BACKEND")
@@ -59,6 +60,7 @@ if [[ "$BACKEND" == "oracle_symbolic" ]]; then
         --robot "$REQUESTED_ROBOT" \
         --limit "$LIMIT" \
         --max-per-cell "$MAX_PER_CELL" \
+        --sample-timeout "$PERSISTENT_SAMPLE_TIMEOUT" \
         --min-manipulation-height "$MIN_MANIPULATION_HEIGHT" \
         --max-manipulation-height "$MAX_MANIPULATION_HEIGHT" \
         >>"$OUTPUT_ROOT/logs/persistent_worker.log" 2>&1 || worker_status=$?
@@ -66,7 +68,13 @@ if [[ "$BACKEND" == "oracle_symbolic" ]]; then
       persistent_status=0
       break
     fi
-    disposition="$({ python - "$OUTPUT_ROOT" "${EXPERT_PROCESS_RETRIES_PER_SAMPLE:-2}" <<'PY'
+    process_retry_limit="${EXPERT_PROCESS_RETRIES_PER_SAMPLE:-2}"
+    if [[ "$worker_status" -eq 142 ]]; then
+      process_retry_limit=1
+      echo "[expert-batch] sample hard-timeout=${PERSISTENT_SAMPLE_TIMEOUT}s" \
+        >>"$OUTPUT_ROOT/logs/persistent_worker.log"
+    fi
+    disposition="$({ python - "$OUTPUT_ROOT" "$process_retry_limit" <<'PY'
 import json
 import sys
 from pathlib import Path

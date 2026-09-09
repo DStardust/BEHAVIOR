@@ -37,7 +37,14 @@ from deltasg_visual_effects import (
     SMOKE_FLOW_RENDER_WARMUP_FRAMES,
     SMOKE_FLOW_WARMUP_STEPS,
     SMOKE_ONLY_ON_FIRE_MODE,
+    USDZ_FLAME_MODE,
+    USDZ_FLAME_SMOKE_MODE,
+    USDZ_FLAME_RENDER_WARMUP_FRAMES,
     configure_on_fire_smoke_only,
+    create_usdz_flame,
+    create_usdz_flame_smoke,
+    remove_usdz_flame,
+    set_covered_particles,
 )
 from visualize_env_a import corner_camera, float_list, official_camera_pose, room_corners, yaw_pitch_quat
 
@@ -101,6 +108,7 @@ def enrich_final_poses(run):
 
 
 def cleanup_online_objects(env):
+    remove_usdz_flame()
     for obj in list(get_all_scene_objects(env.scene)):
         name = getattr(obj, "name", "")
         if name.startswith("online_env_"):
@@ -120,6 +128,7 @@ def cleanup_online_objects(env):
 
 def hide_online_objects(env):
     """Hide prior visual reconstructions without invalidating Replicator mappings."""
+    remove_usdz_flame()
     for obj in list(env.scene.objects):
         if getattr(obj, "name", "").startswith("online_env_"):
             try:
@@ -750,6 +759,7 @@ def save_additional_bbox_views(run, stem, output_dir, viewer, diagnostics, draw_
 def apply_state_changes(env, run):
     te = run.get("task_environment", {}) or {}
     smoke_effect_count = 0
+    usdz_flame_count = 0
     for item in te.get("state_changed_objects", []):
         name = item.get("object_id") or item.get("object_name")
         if not name:
@@ -758,6 +768,18 @@ def apply_state_changes(env, run):
         if obj is None:
             continue
         states = item.get("states") or {}
+        covered = states.get("covered")
+        if covered:
+            specification = covered if isinstance(covered, dict) else {}
+            system_name = specification.get("system") or "stain"
+            configured = set_covered_particles(
+                obj, system_name, bool(specification.get("value", covered)),
+                particle_snapshot=specification.get("particle_snapshot"),
+            )
+            if not configured.get("ok"):
+                raise RuntimeError(
+                    f"failed to restore Covered({system_name}) for {name!r}: {configured}"
+                )
         if states.get("on_fire"):
             if object_states.OnFire not in obj.states:
                 raise RuntimeError(f"{name!r} does not expose official OnFire state")
@@ -769,7 +791,26 @@ def apply_state_changes(env, run):
                 if not configured.get("ok"):
                     raise RuntimeError(f"failed to restore smoke-only effect for {name!r}: {configured}")
                 smoke_effect_count += 1
-    return smoke_effect_count
+            elif visual_effect.get("mode") == USDZ_FLAME_SMOKE_MODE:
+                configured = create_usdz_flame_smoke(
+                    obj,
+                    effect_id=visual_effect.get("effect_id") or name,
+                    target_height=visual_effect.get("target_height"),
+                )
+                if not configured.get("ok"):
+                    raise RuntimeError(f"failed to restore flame and smoke for {name!r}: {configured}")
+                smoke_effect_count += 1
+                usdz_flame_count += 1
+            elif visual_effect.get("mode") == USDZ_FLAME_MODE:
+                configured = create_usdz_flame(
+                    obj,
+                    effect_id=visual_effect.get("effect_id") or name,
+                    target_height=visual_effect.get("target_height"),
+                )
+                if not configured.get("ok"):
+                    raise RuntimeError(f"failed to restore USDZ flame for {name!r}: {configured}")
+                usdz_flame_count += 1
+    return smoke_effect_count, usdz_flame_count
 
 
 def spawn_added_objects(env, run):
@@ -816,6 +857,10 @@ def spawn_added_objects(env, run):
             orientation=th.tensor(ori, dtype=th.float32),
         )
         spawned.append(obj)
+    if spawned:
+        # Dynamically added objects are queued by OmniGibson and their object
+        # states are initialized on the next simulator step, not by render().
+        og.sim.step()
     for _ in range(20):
         og.sim.render()
     return spawned
@@ -844,12 +889,15 @@ def visualize_one(
 
     spawn_added_objects(env, run)
     # Spawned fire carriers must exist before their OnFire state is restored.
-    smoke_effect_count = apply_state_changes(env, run)
+    smoke_effect_count, usdz_flame_count = apply_state_changes(env, run)
     if smoke_effect_count:
         # Flow density evolves with simulation time, not render-only frames.
         for _ in range(SMOKE_FLOW_WARMUP_STEPS):
             og.sim.step()
         for _ in range(SMOKE_FLOW_RENDER_WARMUP_FRAMES):
+            og.sim.render()
+    elif usdz_flame_count:
+        for _ in range(USDZ_FLAME_RENDER_WARMUP_FRAMES):
             og.sim.render()
     if optimize_camera and save_bboxes:
         cam_pos, cam_ori, method, camera_diagnostics = optimize_camera_for_visible_target_objects(

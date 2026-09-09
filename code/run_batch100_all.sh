@@ -24,6 +24,7 @@ MAX_MANIPULATION_HEIGHT="${MAX_MANIPULATION_HEIGHT:-1.55}"
 VISUALIZE_INCREMENTAL="${VISUALIZE_INCREMENTAL:-1}"
 SCENE_SCOPE="${SCENE_SCOPE:-interior}"
 LABELS="${LABELS:-all}"
+ENVB_TYPES="${ENVB_TYPES:-fire,dirty_dishes,dirty_clothes,broken_object}"
 STRICT_COVERAGE="${STRICT_COVERAGE:-1}"
 REQUIRE_ALL_ASSET_MODELS="${REQUIRE_ALL_ASSET_MODELS:-1}"
 REQUIRE_ALL_NATIVE_TARGETS="${REQUIRE_ALL_NATIVE_TARGETS:-1}"
@@ -283,8 +284,9 @@ if label_enabled "envA_appliance"; then
   run_gen_multiscene "envA_appliance" 3 \
     --env-type A --task-categories appliance --allow-repeat-tasks
 fi
-if label_enabled "envB_fire"; then
-  run_gen_multiscene "envB_fire" 4 --env-type B
+if label_enabled "envB_all"; then
+  run_gen_multiscene "envB_all" 4 \
+    --env-type B --env-b-types "$ENVB_TYPES" --allow-repeat-tasks
 fi
 if label_enabled "envC_retrieval_delivery"; then
   run_gen_multiscene "envC_retrieval_delivery" 5 \
@@ -304,7 +306,7 @@ fi
 
 if [[ "$VISUALIZE_INCREMENTAL" != "1" ]]; then
   for label in \
-    envA_retrieval_delivery envA_open_close envA_appliance envB_fire \
+    envA_retrieval_delivery envA_open_close envA_appliance envB_all \
     envC_retrieval_delivery envC_open_close envC_appliance envC_fire_disambiguation; do
     if label_enabled "$label"; then
       run_vis_multiscene "$label"
@@ -334,7 +336,7 @@ fi
 
 COVERAGE_LABELS=()
 for label in \
-  envA_retrieval_delivery envA_open_close envA_appliance envB_fire \
+  envA_retrieval_delivery envA_open_close envA_appliance envB_all \
   envC_retrieval_delivery envC_open_close envC_appliance envC_fire_disambiguation; do
   if label_enabled "$label"; then
     COVERAGE_LABELS+=("$label")

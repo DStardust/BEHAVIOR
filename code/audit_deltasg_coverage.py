@@ -11,6 +11,7 @@ from pathlib import Path
 from audit_deltasg_outputs import EXPECTED_LABELS, check_run, infer_label, iter_run_files, load_json
 from deltasg_expert import (
     SUPPORTED_APPLIANCE_TASKS,
+    SUPPORTED_ENV_B_ANOMALY_TASKS,
     SUPPORTED_OPEN_CLOSE_TASKS,
     SUPPORTED_RETRIEVAL_DELIVERY_TASKS,
 )
@@ -20,12 +21,19 @@ KNOWN_TASKS = {
     "retrieval_delivery": set(SUPPORTED_RETRIEVAL_DELIVERY_TASKS),
     "open_close": set(SUPPORTED_OPEN_CLOSE_TASKS),
     "appliance": set(SUPPORTED_APPLIANCE_TASKS),
+    "env_b_fire": {"respond_to_fire_emergency"},
+    "env_b_all": {
+        "respond_to_fire_emergency",
+        *SUPPORTED_ENV_B_ANOMALY_TASKS,
+    },
 }
 
 LABEL_TASK_GROUP = {
     "envA_retrieval_delivery": "retrieval_delivery",
     "envA_open_close": "open_close",
     "envA_appliance": "appliance",
+    "envB_fire": "env_b_fire",
+    "envB_all": "env_b_all",
     "envC_retrieval_delivery": "retrieval_delivery",
     "envC_open_close": "open_close",
     "envC_appliance": "appliance",
@@ -35,9 +43,13 @@ LABEL_ASSET_GROUPS = {
     "envA_retrieval_delivery": ("retrieval_delivery",),
     "envC_retrieval_delivery": ("retrieval_delivery",),
     "envB_fire": ("fire_common",),
+    "envB_all": ("fire_common", "env_b_anomaly"),
     "envC_fire_disambiguation": ("fire_common", "fire_env_c"),
 }
-FORMAL_LABELS = tuple(label for label in EXPECTED_LABELS if label != "envC_all")
+FORMAL_LABELS = tuple(
+    label for label in EXPECTED_LABELS
+    if label not in {"envB_fire", "envC_all"}
+)
 NATIVE_TARGET_RULES = {
     "envA_open_close": ("Open", ("door", "window", "fridge", "refrigerator", "cabinet")),
     "envC_open_close": ("Open", ("door", "window", "fridge", "refrigerator", "cabinet")),

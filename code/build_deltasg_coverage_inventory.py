@@ -27,6 +27,24 @@ TASK_ASSET_GROUPS = {
     "fire_env_c": [
         "bucket",
     ],
+    "env_b_anomaly": [
+        "plate",
+        "bowl",
+        "mug",
+        "t_shirt",
+        "sock",
+        "sweatshirt",
+        "dress",
+        "broken_glass",
+        "broken_light_bulb",
+        "sponge",
+        "bottle_of_dish_soap",
+        "hamper",
+        "wicker_basket",
+        "trash_can",
+        "broom",
+        "dustpan",
+    ],
 }
 
 

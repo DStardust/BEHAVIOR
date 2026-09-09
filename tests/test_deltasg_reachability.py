@@ -246,7 +246,122 @@ def test_portable_floor_placement_accepts_nonblocking_floor_coverings():
         source.index("if is_floor:", source.index("def add_task_asset")):
         source.index("# Apply relation (OnTop/Inside)", source.index("def add_task_asset"))
     ]
-    assert "ignore_floor_coverings=generated_support_fixture or manipulated_object" in placement
+    assert "or self._category_allows_floor(category)" in placement
+
+
+def test_env_b_infrastructure_task_conditions_robot_spawn_on_fixture():
+    engine = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    runner = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    prepare = engine[
+        engine.index("def prepare_env_b_robot_spawn"):
+        engine.index("def _choose_env_b_resolution_path")
+    ]
+    assert "require_reachable=False" in prepare
+    assert 'anomaly_type != "dirty_dishes"' in prepare
+    assert 'bindings.get("dishwasher") or bindings.get("sink")' in prepare
+    assert "self._prepared_env_b_target_room = fixture_room" in prepare
+    assert 'self._prepared_env_b_path_name = recipe["path_name"]' in prepare
+    assert 'path={recipe[\'path_name\']}' in prepare
+    assert "engine.prepare_env_b_robot_spawn(" in runner
+    assert "preferred_target_name=preferred_target" in runner
+    assert "preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in runner
+
+
+def test_env_b_cleanup_bundle_marks_manipulated_tools_as_actions():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'actual_category in {"fire_extinguisher", "sponge", "broom", "dustpan"}' in generator
+    assert 'role = "candidate_solution"' in generator
+
+
+def test_env_b_visible_anomalies_only_use_open_support_surfaces():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'anomaly_type in {"dirty_dishes", "broken_object"}' in generator
+    assert 'anomaly_record["_open_surface_only"] = True' in generator
+    selection = source[
+        source.index("def _choose_support_node"):
+        source.index("def _validate_task_approach_position")
+    ]
+    assert selection.count('record.get("_open_surface_only")') >= 3
+    assert 'not receptacle.get("supports_on_top")' in selection
+    placement = source[
+        source.index("def add_task_asset"):
+        source.index("def _direct_floor_primary_view_error")
+    ]
+    assert 'not record.get("_open_surface_only")' in placement
+
+
+def test_env_b_prepared_resolution_path_is_consumed_by_generation():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert "prepared_path_name = self._prepared_env_b_path_name" in generator
+    assert 'path["path_name"] == prepared_path_name' in generator
+    assert "prepared=True" in generator
+
+
+def test_ontop_occupancy_uses_the_candidate_objects_vertical_slab():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    relation = source[
+        source.index("def _apply_relation"):
+        source.index("def _validate_on_top_pose")
+    ]
+    assert "placed_z_min = sup_z_top + 0.005" in relation
+    assert "placed_z_max = sup_z_top + obj_h + 0.02" in relation
+    assert "oz_min < placed_z_max" in relation
+    assert "oz_max > placed_z_min" in relation
+
+
+def test_env_b_anomaly_category_balances_failed_attempts_as_well_as_successes():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    selection = source[
+        source.index("def _choose_env_b_anomaly_category"):
+        source.index("def _serializable_env_b_recipe")
+    ]
+    assert 'self._env_b_attempt_counts[f"asset:{anomaly_type}:{category}"]' in selection
+    assert 'self._env_b_attempt_counts[f"asset:{anomaly_type}:{selected}"] += 1' in selection
+
+
+def test_env_b_default_room_uses_the_expert_clearance_component():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    selection = source[
+        source.index("def _choose_room_with_objects"):
+        source.index("def _choose_fire_source_room")
+    ]
+    assert "self._nav_clear_reachable_room_pixels()" in selection
+    assert "self._robot_reachable_room_pixels()" in selection
+    assert selection.index("self._nav_clear_reachable_room_pixels()") < selection.index(
+        "self._robot_reachable_room_pixels()"
+    )
+
+
+def test_env_b_destinations_use_the_same_operation_reachability_gate():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generation = source[
+        source.index("for requested_category in sorted(recipe"):
+        source.index("all_created = [anomaly, *solution_objects]")
+    ]
+    assert "self._floor_compatible_models(actual_category)" in generation
+    assert 'record["_preferred_models"] = preferred_models' in generation
+
+    placement = source[
+        source.index("def add_task_asset"):
+        source.index("def _direct_floor_primary_view_error")
+    ]
+    assert '"task_destination",' in placement
+
+    audit = (CODE_DIR / "audit_deltasg_outputs.py").read_text(encoding="utf-8")
+    assert '"envB_task_destination_unreachable"' in audit
+    assert '"envB_task_destination_height_invalid"' in audit
 
 
 def test_structural_floors_are_not_sampled_as_ontop_supports():
@@ -259,20 +374,91 @@ def test_structural_floors_are_not_sampled_as_ontop_supports():
     assert "continue" in block[block.index('if support_tokens & {"floor", "floors"}:'):]
 
 
-def test_env_b_fire_extinguisher_prefers_a_stable_manipulable_support():
+def test_env_b_fire_extinguisher_is_upright_and_separated_on_floor():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     fire = source[
         source.index("def generate_env_b_fire"):
         source.index("def generate_env_c_fire_disambiguation")
     ]
-    assert 'extinguisher_record["_prefer_support_first"] = True' in fire
-    assert 'extinguisher_record["_placement_orientation_xyzw"]' not in fire
-    assert 'extinguisher_record["_prefer_floor_first"]' not in fire
+    assert 'extinguisher_record["_force_floor_only"] = True' in fire
+    assert '"min_target_gap": 1.5' in fire
+    assert 'avoid_position=fire_position' in fire
+    assert 'preferred_position=fire_position' not in fire
+    assert 'extinguisher_record["_placement_orientation_xyzw"]' in fire
+    assert "-math.sqrt(0.5)" in fire
+    assert 'extinguisher_record["_prefer_floor_first"] = True' in fire
+    assert "self._fire_extinguisher_room_candidates(target_room)" in fire
+    assert "for extinguisher_room in extinguisher_rooms" in fire
+    assert "target_room=extinguisher_room" in fire
     placement = source[
         source.index("def add_task_asset"):
         source.index("def _build_fire_task_instance")
     ]
     assert 'and not record.get("_prefer_support_first")' in placement
+
+
+def test_support_first_fire_tool_keeps_validated_floor_fallbacks_before_alt_supports():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    placement = source[
+        source.index("# Build candidate placement list"):
+        source.index("# Relation placement is comparatively expensive")
+    ]
+    support_first = placement.index('record.get("_prefer_support_first")')
+    floor_fallback = placement.index("candidates.extend(floor_candidates)", support_first)
+    alternate_supports = placement.index("for alt_support in", support_first)
+    assert support_first < floor_fallback < alternate_supports
+
+
+def test_env_b_fire_does_not_invent_furniture_to_store_extinguisher():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    fire = source[
+        source.index("def generate_env_b_fire"):
+        source.index("def generate_env_c_fire_disambiguation")
+    ]
+    assert "self._spawn_retrieval_source_support(" not in fire
+    assert 'extinguisher["placement"]["household_layout"] = checked' in fire
+    assert '"solution_support": solution_support' in fire
+    assert "for item in (solution_support, extinguisher)" in fire
+
+
+def test_env_b_fire_only_tries_expert_navigable_rooms_for_extinguisher():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    helper = source[
+        source.index("def _fire_extinguisher_room_candidates"):
+        source.index("def _choose_fire_target")
+    ]
+    assert "self._nav_clear_reachable_room_pixels()" in helper
+    assert "self._robot_reachable_room_pixels()" in helper
+    assert "preferred + [fire_room]" in helper
+    assert "skipped_topology_only" in helper
+    assert "preferred + topology_only" not in helper
+
+
+def test_floor_placement_runs_the_same_expert_navigation_preflight():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    placement = source[
+        source.index("def add_task_asset"):
+        source.index("def _build_fire_task_instance")
+    ]
+    floor_branch = placement[
+        placement.index("if is_floor:"):
+        placement.index("# Apply relation (OnTop/Inside)")
+    ]
+    assert "def validate_expert_navigation" in placement
+    assert "if not validate_expert_navigation(placement_attempt, obj):" in floor_branch
+    assert placement.count("if not validate_expert_navigation(placement_attempt, obj):") == 2
+
+
+def test_env_b_fire_validates_both_native_and_spawned_fire_target_approaches():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    selection = source[
+        source.index("def _choose_fire_target"):
+        source.index("def _set_boolean_state")
+    ]
+    assert "self._validate_task_approach_position(" in selection
+    assert 'target_object_id=node["id"]' in selection
+    assert "self._validate_task_object_approach(target_obj, target_room=target_room)" in selection
+    assert 'spawned["robot_approach"] = approach' in selection
 
 
 def test_generation_settling_includes_the_warmup_window():
@@ -303,7 +489,7 @@ def test_env_b_and_env_c_fire_have_stable_task_identities():
         source.index("def _build_fire_task_instance"):
         source.index("def _choose_room_with_objects")
     ]
-    assert '"primary_behavior_task": "respond_to_smoke_warning"' in fire_task
+    assert '"primary_behavior_task": "respond_to_fire_emergency"' in fire_task
     env_c = source[
         source.index("def generate_env_c_fire_disambiguation"):
         source.index("def generate_env_c(")
@@ -363,7 +549,7 @@ def test_task_object_ontop_grid_prefers_real_robot_operation_side():
 def test_placement_loop_has_independent_task_floor_height_guard():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     assert '"error": f"{semantic_role}_floor_height_out_of_range"' in source
-    assert 'manipulated_object = semantic_role in {"task_object", "interaction_tool"}' in source
+    assert '"task_destination",' in source
     assert 'semantic_role == "task_object"' in source
     assert "_validate_floor_manipulation_height" in source
     assert 'target_placement_mode == "floor"' in source
@@ -517,13 +703,45 @@ def test_expert_batch_and_physical_representatives_reuse_generation_robot():
 
 
 def test_generated_support_models_are_not_reported_as_task_target_models():
+    import ast
+
     source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
-    start = source.index("def sample_diversity_record")
-    end = source.index("def load_existing_fingerprints", start)
-    block = source[start:end]
-    assert '"task_object" in set(item.get("semantic_roles") or [])' in block
-    assert "for item in task_objects:" in block
-    assert "set(item.get(\"room_id\") for item in task_objects" in block
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "sample_diversity_record")
+    namespace = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(CODE_DIR), "exec"), namespace)
+    objects = [
+        {"semantic_roles": [role], "category": category, "model": model,
+         "room_id": room, "pose": {"position": [1, 2, 0]}}
+        for role, category, model, room in [
+            ("task_support", "table", "support_model", "dining_room_0"),
+            ("task_object", "plate", "plate_model", "kitchen_0"),
+            ("anomaly_carrier", "toaster", "toaster_model", "kitchen_0"),
+        ]
+    ]
+    record = namespace["sample_diversity_record"]({"task_environment": {"added_objects": objects}})
+    assert record["target_categories"] == ["plate", "toaster"]
+    assert record["target_models"] == [
+        {"category": "plate", "model": "plate_model"},
+        {"category": "toaster", "model": "toaster_model"},
+    ]
+    assert record["source_rooms"] == ["kitchen_0"]
+
+
+def test_envb_inside_audit_requires_recorded_success_in_exported_validation():
+    run = _run()
+    te = run["task_environment"]
+    te["env_type"] = "Env-B"
+    te["task"]["primary_behavior_task"] = "clean_up_broken_object"
+    issue = "envB_missing_successful_inside_preflight"
+    assert issue in check_run(Path("sample.json"), run)
+    evidence = {"ok": True, "predicate": "Inside"}
+    run["validation"] = {"destination_preflight": evidence}
+    assert issue not in check_run(Path("sample.json"), run)
+    te.setdefault("validation", {})["destination_preflight"] = {"ok": False, "predicate": "Inside"}
+    assert issue in check_run(Path("sample.json"), run)
+    te["validation"]["destination_preflight"] = evidence
+    assert issue not in check_run(Path("sample.json"), run)
 
 
 def test_native_target_requires_matching_reachable_plan_object():
@@ -890,7 +1108,7 @@ def test_retrieval_source_support_retries_models_and_rooms_inside_one_task():
     assert '"source_support_attempts_exhausted"' in helper
     generation = source[
         source.index("def generate_env_a"):
-        source.index("def _build_fire_task_instance")
+        source.index("def generate_env_b_fire")
     ]
     assert generation.count("self._spawn_retrieval_source_support(") == 2
 
@@ -925,7 +1143,7 @@ def test_delivery_floor_source_is_limited_to_visible_height_eligible_models():
         source.index("def _build_floor_placement")
     ]
     assert 'self.config.solvability_profile == "oracle_symbolic"' in view_gate
-    assert "min_height=max(self.config.min_manipulation_height, 0.15)" in view_gate
+    assert "min_height=self.config.min_manipulation_height" in view_gate
     assert "return direct_floor_primary_view_error(relative_height)" in view_gate
     assert "floor primary view FAILED" in source
 
@@ -1247,7 +1465,7 @@ def test_retrieval_bootstraps_support_after_native_surface_failure():
     assert 'self._record_for_category("coffee_table")' in generation
     assert 'self._compact_support_models("coffee_table")' in generation
     assert 'preferred_support_id=generated_support_id' in generation
-    assert "ignore_floor_coverings=generated_support_fixture" in source
+    assert "or self._category_allows_floor(category)" in source
     assert 'other_tokens & {"carpet", "rug"}' in source
     relation = source[source.index("def _apply_relation"):source.index("def _state_by_name")]
     chooser = source[
@@ -1370,7 +1588,8 @@ def test_smoke_only_replay_enables_and_advances_official_flow():
     assert "obj.update_visuals()" in effects
     assert '"official_fire_emitter_not_enabled"' in effects
     assert 'settings.set_bool("/rtx/flow/compositeEnabled", True)' in effects
-    assert 'smoke.GetAttribute("fade").Set(0.5)' in effects
+    assert 'smoke_fade=0.5' in effects
+    assert 'smoke.GetAttribute("fade").Set(float(smoke_fade))' in effects
     assert 'ray_march.GetAttribute("attenuation").Set(5.0)' in effects
     assert "SMOKE_FLOW_MAX_EMITTER_RADIUS" in effects
     assert 'simulate.GetAttribute("densityCellSize").Set(radius * 0.2)' in effects
@@ -1378,6 +1597,38 @@ def test_smoke_only_replay_enables_and_advances_official_flow():
     assert "SMOKE_FLOW_RENDER_WARMUP_FRAMES" in replay
     assert "for _ in range(SMOKE_FLOW_WARMUP_STEPS):\n            og.sim.step()" in visualizer
     assert "for _ in range(SMOKE_FLOW_RENDER_WARMUP_FRAMES):\n            og.sim.render()" in visualizer
+
+
+def test_env_b_fire_uses_packaged_replayable_usdz_flame_and_smoke():
+    effects = (CODE_DIR / "deltasg_visual_effects.py").read_text(encoding="utf-8")
+    engine = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    visualizer = (CODE_DIR / "visualize_deltasg_batch.py").read_text(encoding="utf-8")
+    assert (CODE_DIR / "assets" / "Flame_Animation.usdz").is_file()
+    assert 'USDZ_FLAME_ASSET = "code/assets/Flame_Animation.usdz"' in effects
+    assert "prim.GetReferences().AddReference(str(asset_path))" in effects
+    assert "_disable_official_fire_visual(obj)" in effects
+    assert 'getattr(og.sim, "update_handles", None)' in effects
+    assert "flame_effect = create_usdz_flame_smoke(" in engine
+    assert "self._step(SMOKE_FLOW_WARMUP_STEPS)" in engine
+    fire_spawn = engine[engine.index("def _spawn_fire_target"):engine.index("def _record_for_category")]
+    assert 'record["_open_surface_only"] = True' in fire_spawn
+    assert 'record["_force_floor_only"] = True' in fire_spawn
+    assert "og.sim.batch_remove_objects(spawned_objects)" in engine
+    assert "configured = create_usdz_flame_smoke(" in expert
+    assert "remove_usdz_flame(target.name)" in expert
+    assert "configured = create_usdz_flame_smoke(" in visualizer
+    spawn = visualizer[
+        visualizer.index("def spawn_added_objects"):
+        visualizer.index("def visualize_one")
+    ]
+    assert "if spawned:\n        # Dynamically added objects" in spawn
+    assert "og.sim.step()" in spawn
+
+
+def test_env_b_multiscene_runner_allows_balanced_task_reuse():
+    source = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
+    assert '--env-b-types "$ENVB_TYPES" --allow-repeat-tasks' in source
 
 
 def test_replay_sink_gate_uses_generation_final_geometry_not_unsynced_reset_aabb():
@@ -1447,7 +1698,8 @@ def test_generated_retrieval_source_support_reserves_a_book_sized_surface():
         source.index("def _spawn_retrieval_source_support"):
         source.index("def _spawn_delivery_destination_support")
     ]
-    assert '"coffee_table", min_surface_span=0.48' in spawn
+    assert "min_surface_span=0.48" in spawn
+    assert '"coffee_table", min_surface_span=min_surface_span' in spawn
     assert 'if model not in compact_models' in spawn
 
 
@@ -1674,6 +1926,21 @@ def test_oracle_visibility_recovery_does_not_move_the_base():
     assert '"camera_joint_positions": _jsonable(camera_joint_positions)' in capture
 
 
+def test_symbolic_navigation_excludes_its_target_from_route_blockers():
+    source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    symbolic = source[
+        source.index("class DeltaSGOraclePrimitives"):
+        source.index("class DeltaSGPhysicalPrimitives")
+    ]
+    navigation = symbolic[
+        symbolic.index("def _navigate_to_obj"):
+        symbolic.index("def _navigate_to_pose")
+    ]
+    assert "require_route=True" in navigation
+    assert "route_target=obj" in navigation
+    assert "target=obj" in navigation
+
+
 def test_expert_observation_pose_rejects_occupied_centres_without_blanket_aabb_clearance():
     source = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
     navigation = source[
@@ -1742,6 +2009,17 @@ def test_generation_approach_uses_robot_eroded_map_without_duplicate_aabb_filter
     ]
     assert "if not reachable_rooms:" in room_selector
     assert "return None" in room_selector
+
+
+def test_generation_navigation_mask_applies_the_expert_clearance_erosion():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    navigation = source[
+        source.index("def _nav_clearance_reachable_mask"):
+        source.index("def _collision_free_approach_candidate")
+    ]
+    assert "extra_clearance = float(self.config.expert_base_clearance_margin)" in navigation
+    assert "clearance_pixels = int(" in navigation
+    assert "cv2.erode(" in navigation
 
 
 def test_expert_integrity_prefers_rendered_geometry_center_over_entity_root():
@@ -2279,7 +2557,7 @@ def test_oracle_native_support_uses_official_symbolic_place_flow():
     # retry budget, with the strict 1.15 m AABB-edge gate unchanged.
     assert "from omnigibson.utils.object_state_utils import m as object_state_macros" in place
     assert "object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2" in place
-    assert "object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2" in place
+    assert "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate is object_states.Inside else 2" in place
     assert "deadline = time.monotonic() + PLACE_NATIVE_MAX_WALL_SECONDS" in place
     assert "if time.monotonic() > deadline:" in place
     assert "for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):" in place

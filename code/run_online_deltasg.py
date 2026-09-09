@@ -10,7 +10,6 @@ conda run -n behavior python code/run_online_deltasg.py --scene Rs_int --robot f
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -33,55 +32,8 @@ import omnigibson.lazy as lazy
 
 from api import RobotSpawnError, create_env, ensure_dir, stabilize_robot_spawn
 from deltasg_expert import DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE, SUPPORTED_ENV_A_TASKS
-from online_deltasg import OnlineDeltaSGConfig, OnlineDeltaSGEngine
-
-
-def _round_pose(position):
-    if not isinstance(position, (list, tuple)):
-        return None
-    return [round(float(value), 3) for value in position[:3]]
-
-
-def sample_fingerprint(run):
-    """Stable identity excluding generated run IDs, but retaining placement."""
-    te = run.get("task_environment") or {}
-    task = te.get("task") or run.get("task") or {}
-    objects = []
-    for item in te.get("added_objects") or []:
-        placement = item.get("placement") or {}
-        pose = item.get("pose") or placement.get("pose") or {}
-        objects.append({
-            "category": item.get("category"),
-            "model": item.get("model"),
-            "roles": sorted(item.get("semantic_roles") or []),
-            "room": item.get("room_id"),
-            "mode": placement.get("mode"),
-            "support": placement.get("support_object_id"),
-            "position": _round_pose(pose.get("position")),
-        })
-    plan_objects = [
-        {
-            "id": item.get("object_id"), "category": item.get("category"),
-            "roles": sorted(item.get("semantic_roles") or [item.get("semantic_role")]),
-            "room": item.get("room") or item.get("room_id"),
-        }
-        for item in task.get("plan_objects") or []
-    ]
-    payload = {
-        "scene": ((te.get("base_scene") or {}).get("scene_model")),
-        "env_type": te.get("env_type"),
-        "primary_task": task.get("primary_behavior_task"),
-        "task_type": task.get("task_type"),
-        "target_room": task.get("target_room"),
-        "objects": sorted(objects, key=lambda item: json.dumps(item, sort_keys=True)),
-        "plan_objects": sorted(plan_objects, key=lambda item: json.dumps(item, sort_keys=True)),
-        "state_changes": sorted(
-            (item.get("object_id"), sorted((item.get("states") or {}).items()))
-            for item in te.get("state_changed_objects") or []
-        ),
-    }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), payload
+from online_deltasg import ENV_B_TASK_NAMES, ENV_B_TYPES, OnlineDeltaSGConfig, OnlineDeltaSGEngine
+from deltasg_sample_identity import sample_fingerprint
 
 
 def sample_diversity_record(run):
@@ -90,9 +42,10 @@ def sample_diversity_record(run):
     task = te.get("task") or {}
     objects = te.get("added_objects") or []
     plan_objects = task.get("plan_objects") or []
+    semantic_reasoning = te.get("semantic_reasoning") or task.get("semantic_reasoning") or {}
     task_objects = [
         item for item in objects
-        if "task_object" in set(item.get("semantic_roles") or [])
+        if {"task_object", "anomaly_carrier"} & set(item.get("semantic_roles") or [])
     ]
     categories = [item.get("category") for item in task_objects if item.get("category")]
     if not categories:
@@ -120,6 +73,8 @@ def sample_diversity_record(run):
         "env_type": te.get("env_type"),
         "task_family": task.get("task_type"),
         "primary_task": task.get("primary_behavior_task"),
+        "anomaly_type": semantic_reasoning.get("anomaly_type"),
+        "solution_path": semantic_reasoning.get("solution_path"),
         "target_room": task.get("target_room"),
         "source_rooms": source_rooms,
         "target_categories": sorted(set(categories)),
@@ -235,9 +190,9 @@ def enforce_run_quality(run):
 
 
 def enforce_expert_plan_quality(run):
-    """Require a deterministic expert-plan compilation for successful Env-A samples."""
+    """Require deterministic expert-plan compilation for executable samples."""
     te = run.get("task_environment") or {}
-    if not run.get("ok") or te.get("env_type") != "Env-A":
+    if not run.get("ok") or te.get("env_type") not in {"Env-A", "Env-B"}:
         return None
     from deltasg_expert import ExpertPlanError, compile_expert_plan
 
@@ -349,7 +304,7 @@ def main():
         "--env-type",
         choices=["A", "B", "C"],
         default="A",
-        help="DeltaSG environment type: A=basic task, B=fire anomaly, C=constraint semantic tasks.",
+        help="DeltaSG environment type: A=basic task, B=home-care anomalies, C=constraint semantic tasks.",
     )
     parser.add_argument("--task", default=None, help="Optional BEHAVIOR task name for Env-A, e.g. cook_eggplant-0")
     parser.add_argument(
@@ -372,6 +327,11 @@ def main():
         default=None,
         help="Comma-separated task categories to use. Default: all. "
              "Options: retrieval_delivery, open_close, appliance",
+    )
+    parser.add_argument(
+        "--env-b-types",
+        default=None,
+        help="Comma-separated Env-B anomalies. Default: fire,dirty_dishes,dirty_clothes,broken_object.",
     )
     parser.add_argument(
         "--env-c-types",
@@ -554,6 +514,14 @@ def main():
             parser.error(f"invalid --task-sequence tasks: {invalid_tasks or task_sequence}")
         args.num_envs = len(task_sequence)
 
+    env_b_types = None
+    if args.env_b_types:
+        if args.env_type != "B":
+            parser.error("--env-b-types is only supported for Env-B")
+        env_b_types = [item.strip() for item in args.env_b_types.split(",") if item.strip()]
+        invalid_env_b_types = sorted(set(env_b_types) - set(ENV_B_TYPES))
+        if not env_b_types or invalid_env_b_types:
+            parser.error(f"invalid --env-b-types values: {invalid_env_b_types or env_b_types}")
     if args.min_manipulation_height < 0 or args.max_manipulation_height <= args.min_manipulation_height:
         parser.error("manipulation height bounds must satisfy 0 <= min < max")
     if args.max_camera_pose_attempts < 1 or args.camera_pose_render_steps < 1:
@@ -574,6 +542,7 @@ def main():
     try:
         with gm.unlocked():
             gm.ENABLE_TRANSITION_RULES = args.enable_transition_rules
+            gm.USE_GPU_DYNAMICS = args.allow_cloth
         # Creating multiple Replicator annotators during Environment startup
         # can segfault in Isaac Sim 5.1. Start with RGB, stabilize the scene,
         # then attach instance segmentation to the primary camera only.
@@ -650,6 +619,7 @@ def main():
             "robot": robot_model,
             "num_envs": args.num_envs,
             "runs": [],
+            "attempt_errors": [],
         }
         runs = []
         existing_run_count = 0
@@ -695,6 +665,11 @@ def main():
             run_skip_tasks = set(skip_tasks)
 
             while True:
+                if args.env_type == "B" and all(
+                    ENV_B_TASK_NAMES[name] in run_skip_tasks for name in (env_b_types or ENV_B_TYPES)
+                ):
+                    print("[retry-control] all requested Env-B tasks exhausted this slot", flush=True)
+                    break
                 # Check per-run generation time budget
                 elapsed_run = time.time() - run_start_time
                 if elapsed_run > config.max_total_generation_time_sec:
@@ -798,6 +773,41 @@ def main():
                             spawn_failed = True
                         if not spawn_failed:
                             engine.invalidate_robot_reachability()
+                elif args.env_type in {"B", "C"}:
+                    # Env-B/C also run many samples in one simulator process.
+                    # Clean the previous anomaly before re-uprighting Tiago so
+                    # placement/render stepping cannot accumulate a fall across
+                    # samples. The generator consumes this prepared boundary
+                    # and therefore does not clean away the validated pose.
+                    engine.begin_env_bc_attempt()
+                    preferred_target = (
+                        engine.prepare_env_b_robot_spawn(
+                            env_b_types=env_b_types,
+                            target_room=args.target_room,
+                            skip_tasks=run_skip_tasks,
+                        )
+                        if args.env_type == "B"
+                        else None
+                    )
+                    try:
+                        stabilize_robot_spawn(
+                            env,
+                            seed=(args.seed or 0) + idx + 1 + attempt,
+                            warmup_steps=max(args.warmup_steps, 10),
+                            preferred_target_name=preferred_target,
+                            preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                            settle_scene=False,
+                        )
+                    except RobotSpawnError as exc:
+                        print(
+                            f"[robot-spawn] Env-{args.env_type} re-stabilize exhausted "
+                            f"attempt={attempt + 1} "
+                            f"reason={getattr(exc, 'reason', repr(exc))}",
+                            flush=True,
+                        )
+                        spawn_failed = True
+                    if not spawn_failed:
+                        engine.invalidate_robot_reachability()
                 if spawn_failed:
                     attempt += 1
                     limit = args.max_retries
@@ -815,23 +825,57 @@ def main():
                     )
                     continue
 
-                if args.env_type == "A":
-                    run = engine.generate_env_a(
-                        task=current_task,
-                        target_room=args.target_room,
-                        skip_tasks=run_skip_tasks,
+                try:
+                    if args.env_type == "A":
+                        run = engine.generate_env_a(
+                            task=current_task,
+                            target_room=args.target_room,
+                            skip_tasks=run_skip_tasks,
+                        )
+                    elif args.env_type == "B":
+                        run = engine.generate_env_b(
+                            target_room=args.target_room,
+                            env_b_types=env_b_types,
+                            skip_tasks=run_skip_tasks,
+                        )
+                    else:
+                        env_c_types = None
+                        if args.env_c_types:
+                            env_c_types = [item.strip() for item in args.env_c_types.split(",") if item.strip()]
+                        run = engine.generate_env_c(
+                            target_room=args.target_room,
+                            env_c_types=env_c_types,
+                            skip_tasks=run_skip_tasks,
+                        )
+                except Exception as exc:
+                    failure = {
+                        "slot": idx + 1,
+                        "attempt": attempt + 1,
+                        "error_type": type(exc).__name__,
+                        "error": repr(exc),
+                    }
+                    summary["attempt_errors"].append(failure)
+                    if args.env_type == "B" and engine._env_b_last_task:
+                        failed_task = engine._env_b_last_task
+                        task_retry_count[failed_task] = task_retry_count.get(failed_task, 0) + 1
+                        if task_retry_count[failed_task] > config.max_retries_per_task:
+                            run_skip_tasks.add(failed_task)
+                    print(
+                        f"[generation-error] slot={idx + 1} attempt={attempt + 1} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
                     )
-                elif args.env_type == "B":
-                    run = engine.generate_env_b_fire(target_room=args.target_room)
-                else:
-                    env_c_types = None
-                    if args.env_c_types:
-                        env_c_types = [item.strip() for item in args.env_c_types.split(",") if item.strip()]
-                    run = engine.generate_env_c(
-                        target_room=args.target_room,
-                        env_c_types=env_c_types,
-                        skip_tasks=run_skip_tasks,
-                    )
+                    print(traceback.format_exc(), flush=True)
+                    if args.single_attempt:
+                        break
+                    attempt += 1
+                    if args.max_retries > 0 and attempt > args.max_retries:
+                        print(
+                            f"[generation-error] max retries ({args.max_retries}) reached",
+                            flush=True,
+                        )
+                        break
+                    continue
 
                 integrity = enforce_run_quality(run)
                 if not integrity["ok"]:

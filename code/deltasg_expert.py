@@ -21,6 +21,9 @@ SUPPORTED_EXPERT_PRIMITIVES = {
     "TOGGLE_ON",
     "TOGGLE_OFF",
     "EXTINGUISH",
+    "WIPE",
+    "SWEEP_INTO",
+    "EMPTY_INTO",
     "WAIT",
 }
 MANIPULATION_PRIMITIVES = {
@@ -31,9 +34,24 @@ MANIPULATION_PRIMITIVES = {
     "CLOSE",
     "TOGGLE_ON",
     "TOGGLE_OFF",
+    "WIPE",
+    "SWEEP_INTO",
+    "EMPTY_INTO",
 }
-FINE_MANIPULATION_PRIMITIVES = {"GRASP", "PLACE_ON_TOP", "PLACE_INSIDE"}
+FINE_MANIPULATION_PRIMITIVES = {
+    "GRASP", "PLACE_ON_TOP", "PLACE_INSIDE", "WIPE", "SWEEP_INTO", "EMPTY_INTO"
+}
 DEFAULT_MIN_MANIPULATION_HEIGHT = 0.10
+INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS = 10
+
+
+def task_grasp_minimum(task_name, category, configured_minimum):
+    """Laundry may be collected near the floor; other grasp gates stay unchanged."""
+    if task_name == "collect_dirty_clothes" and category in {"t_shirt", "sock", "sweatshirt", "dress"}:
+        return min(configured_minimum, 0.04)
+    return configured_minimum
+
+
 DEFAULT_MAX_MANIPULATION_HEIGHT = 1.55
 DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT = 0.65
 DEFAULT_MIN_DIRECT_FLOOR_PRIMARY_VIEW_HEIGHT = 0.18
@@ -182,8 +200,14 @@ SUPPORTED_APPLIANCE_TASKS = frozenset({
     "turn_on_stove", "turn_off_stove",
 })
 SUPPORTED_FIRE_TASKS = frozenset({
+    "respond_to_fire_emergency",
     "respond_to_smoke_warning",
     "select_fire_suppression_tool",
+})
+SUPPORTED_ENV_B_ANOMALY_TASKS = frozenset({
+    "clean_dirty_dishes",
+    "collect_dirty_clothes",
+    "clean_up_broken_object",
 })
 SUPPORTED_ENV_A_TASKS = (
     SUPPORTED_RETRIEVAL_DELIVERY_TASKS
@@ -265,6 +289,9 @@ class ExpertStep:
     target_object: str | None = None
     target_room: str | None = None
     carried_object: str | None = None
+    tool_object: str | None = None
+    destination_object: str | None = None
+    payload_object: str | None = None
     inventory_before: tuple[str, ...] = ()
     inventory_after: tuple[str, ...] = ()
     useful_objects: tuple[str, ...] = ()
@@ -339,6 +366,8 @@ def infer_task_family(task_name: str) -> str:
         return "appliance"
     if task_name in SUPPORTED_FIRE_TASKS or "fire" in task_name:
         return "fire"
+    if task_name in SUPPORTED_ENV_B_ANOMALY_TASKS:
+        return "anomaly"
     return "other"
 
 
@@ -359,6 +388,12 @@ def _interaction_primitive(task_name: str, nl: str) -> str | None:
         token in text for token in ("extinguish", "suppress", "smoke warning")
     ):
         return "EXTINGUISH"
+    if any(token in text for token in ("wipe", "hand wash", "clean with the sponge")):
+        return "WIPE"
+    if task_name == "clean_up_broken_object" and "sweep" in text:
+        return "SWEEP_INTO"
+    if task_name == "clean_up_broken_object" and any(token in text for token in ("empty", "dump")):
+        return "EMPTY_INTO"
     if task_name.startswith("open_") or " open " in f" {text} ":
         return "OPEN"
     if task_name.startswith("close_") or " close " in f" {text} ":
@@ -383,7 +418,13 @@ def _place_primitive(step: dict[str, Any], target: dict[str, Any]) -> str:
     return "PLACE_ON_TOP"
 
 
-def _expected(primitive: str, target: str | None, carried: str | None) -> dict[str, Any]:
+def _expected(
+    primitive: str,
+    target: str | None,
+    carried: str | None,
+    destination: str | None = None,
+    payload: str | None = None,
+) -> dict[str, Any]:
     if primitive == "GRASP":
         return {"inventory_contains": target}
     if primitive == "PLACE_ON_TOP":
@@ -400,6 +441,18 @@ def _expected(primitive: str, target: str | None, carried: str | None) -> dict[s
         return {"state": "ToggledOn", "object": target, "value": False}
     if primitive == "EXTINGUISH":
         return {"state": "OnFire", "object": target, "value": False}
+    if primitive == "WIPE":
+        return {"state": "Covered", "object": target, "value": False}
+    if primitive == "SWEEP_INTO":
+        return {
+            "relation": "OnTop", "subject": target, "object": destination,
+            "tool": carried, "inventory_empty": True,
+        }
+    if primitive == "EMPTY_INTO":
+        return {
+            "relation": "Inside", "subject": payload, "object": target,
+            "tool": carried,
+        }
     return {}
 
 
@@ -500,6 +553,12 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
             raise ExpertPlanError(f"step {raw_index}: step_id must be an integer") from exc
         target = raw.get("target_object")
         target = str(target) if target else None
+        tool = raw.get("tool_object")
+        tool = str(tool) if tool else None
+        destination = raw.get("destination_object")
+        destination = str(destination) if destination else None
+        payload = raw.get("payload_object")
+        payload = str(payload) if payload else None
         room = raw.get("target_room")
         room = str(room) if room else None
         nl = str(raw.get("nl") or "")
@@ -536,6 +595,13 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
                 raise ExpertPlanError(f"step {source_step_id}: {primitive} target is missing")
             if target not in objects:
                 raise ExpertPlanError(f"step {source_step_id}: unknown target object {target!r}")
+        for role, object_id in (
+            ("tool", tool), ("destination", destination), ("payload", payload)
+        ):
+            if object_id is not None and object_id not in objects:
+                raise ExpertPlanError(
+                    f"step {source_step_id}: unknown {role} object {object_id!r}"
+                )
 
         before = tuple(inventory)
         carried = inventory[0] if inventory else None
@@ -547,6 +613,27 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
         elif primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}:
             carried = inventory[0]
             inventory = []
+        elif primitive == "SWEEP_INTO":
+            if not inventory or tool != inventory[0]:
+                raise ExpertPlanError(
+                    f"step {source_step_id}: SWEEP_INTO requires the broom in inventory"
+                )
+            if destination is None:
+                raise ExpertPlanError(
+                    f"step {source_step_id}: SWEEP_INTO destination is missing"
+                )
+            carried = inventory[0]
+            inventory = []
+        elif primitive == "EMPTY_INTO":
+            if not inventory or tool != inventory[0]:
+                raise ExpertPlanError(
+                    f"step {source_step_id}: EMPTY_INTO requires the dustpan in inventory"
+                )
+            if payload is None:
+                raise ExpertPlanError(
+                    f"step {source_step_id}: EMPTY_INTO payload is missing"
+                )
+            carried = inventory[0]
         after = tuple(inventory)
         provisional.append(
             {
@@ -554,6 +641,9 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
                 "target": target,
                 "room": room or (objects.get(target or "", {}).get("room") or objects.get(target or "", {}).get("room_id")),
                 "carried": carried,
+                "tool": tool,
+                "destination": destination,
+                "payload": payload,
                 "before": before,
                 "after": after,
                 "source_step_id": source_step_id,
@@ -567,6 +657,27 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
         item["primitive"] in {"PLACE_ON_TOP", "PLACE_INSIDE"} for item in provisional
     ):
         raise ExpertPlanError("delivery plan has no PLACE")
+    if task_name == "clean_up_broken_object":
+        if any(
+            item["primitive"] == "GRASP"
+            and str(objects.get(item["target"] or "", {}).get("category") or "").startswith("broken_")
+            for item in provisional
+        ):
+            raise ExpertPlanError("broken-object cleanup must not grasp broken pieces by hand")
+        sweeps = [item for item in provisional if item["primitive"] == "SWEEP_INTO"]
+        empties = [item for item in provisional if item["primitive"] == "EMPTY_INTO"]
+        if len(sweeps) != 1 or len(empties) != 1:
+            raise ExpertPlanError(
+                "broken-object cleanup requires exactly one SWEEP_INTO and one EMPTY_INTO"
+            )
+        if str(objects.get(sweeps[0]["tool"] or "", {}).get("category") or "") != "broom":
+            raise ExpertPlanError("SWEEP_INTO tool must be a broom")
+        if str(objects.get(sweeps[0]["destination"] or "", {}).get("category") or "") != "dustpan":
+            raise ExpertPlanError("SWEEP_INTO destination must be a dustpan")
+        if str(objects.get(empties[0]["tool"] or "", {}).get("category") or "") != "dustpan":
+            raise ExpertPlanError("EMPTY_INTO tool must be a dustpan")
+        if empties[0]["payload"] != sweeps[0]["target"]:
+            raise ExpertPlanError("EMPTY_INTO payload must be the swept broken object")
 
     # An inside receptacle with an Open state must be opened with an empty hand.
     # Some LLM plans omit this entirely; add the uniquely implied state change
@@ -648,9 +759,13 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
     steps: list[ExpertStep] = []
     for index, item in enumerate(provisional, 1):
         future = {
-            candidate["target"]
+            object_id
             for candidate in provisional[index - 1 :]
-            if candidate["target"]
+            for object_id in (
+                candidate["target"], candidate.get("tool"),
+                candidate.get("destination"), candidate.get("payload"),
+            )
+            if object_id
         }
         useful = tuple(sorted(future - set(item["before"])))
         steps.append(
@@ -660,12 +775,18 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
                 target_object=item["target"],
                 target_room=item["room"],
                 carried_object=item["carried"],
+                tool_object=item.get("tool"),
+                destination_object=item.get("destination"),
+                payload_object=item.get("payload"),
                 inventory_before=item["before"],
                 inventory_after=item["after"],
                 useful_objects=useful,
                 source_step_ids=(item["source_step_id"],),
                 nl=item["nl"],
-                expected=_expected(item["primitive"], item["target"], item["carried"]),
+                expected=_expected(
+                    item["primitive"], item["target"], item["carried"],
+                    item.get("destination"), item.get("payload"),
+                ),
             )
         )
     if not steps:

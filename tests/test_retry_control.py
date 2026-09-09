@@ -178,6 +178,15 @@ def test_generation_runner_supports_an_ordered_single_process_task_sequence():
     source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
     assert '"--task-sequence"' in source
     assert "args.num_envs = len(task_sequence)" in source
+
+
+def test_generation_exceptions_are_isolated_to_one_sample_slot():
+    source = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    loop = source[source.index("for idx in range(args.num_envs)"):source.index("# A requested sample slot")]
+    assert "except Exception as exc:" in loop
+    assert 'summary["attempt_errors"].append(failure)' in loop
+    assert '"[generation-error]' in loop
+    assert "continue" in loop
     assert "current_task = task_sequence[idx] if task_sequence else args.task" in source
     assert "task=current_task" in source
     assert "engine.prepare_native_task_robot_spawn(current_task)" in source
@@ -190,6 +199,34 @@ def test_generation_runner_supports_an_ordered_single_process_task_sequence():
     assert "engine.bind_prepared_native_task_spawn(current_task)" in source
     assert 'engine.reject_native_target(' in source
     assert 'preferred_target, "robot_spawn_binding"' in source
+
+
+def test_env_bc_restarts_each_attempt_from_a_stable_robot_pose():
+    runner = (CODE_DIR / "run_online_deltasg.py").read_text(encoding="utf-8")
+    engine = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    assert 'elif args.env_type in {"B", "C"}:' in runner
+    assert "engine.begin_env_bc_attempt()" in runner
+    assert "engine.prepare_env_b_robot_spawn(" in runner
+    assert "preferred_target_name=preferred_target" in runner
+    assert runner.index("engine.begin_env_bc_attempt()") < runner.index(
+        'f"[robot-spawn] Env-{args.env_type} re-stabilize exhausted "'
+    )
+    assert "def begin_env_bc_attempt" in engine
+    fire = engine[
+        engine.index("def generate_env_b_fire"):
+        engine.index("def generate_env_c_fire_disambiguation")
+    ]
+    assert "if self._env_bc_attempt_prepared:" in fire
+
+
+def test_persistent_expert_has_a_hard_per_sample_timeout():
+    worker = (CODE_DIR / "run_deltasg_expert_persistent.py").read_text(encoding="utf-8")
+    batch = (CODE_DIR / "run_deltasg_expert_batch.sh").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--sample-timeout", type=int, default=180)' in worker
+    assert "signal.alarm(args.sample_timeout)" in worker
+    assert "signal.alarm(0)" in worker
+    assert '--sample-timeout "$PERSISTENT_SAMPLE_TIMEOUT"' in batch
+    assert 'if [[ "$worker_status" -eq 142 ]]' in batch
 
 
 def test_target_conditioned_spawn_candidates_cover_an_operation_ring():
@@ -240,6 +277,11 @@ def test_zero_generated_samples_fail_the_process_contract():
     assert "len(runs) - existing_run_count != args.num_envs" in finalization
     assert 'summary["ok"] = False' in finalization
     assert 'summary["num_generated"] = len(runs)' in finalization
+
+
+def test_envbc_runner_preserves_per_task_retries_for_requested_anomaly():
+    source = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
+    assert "--max-retries 4 --max-retries-per-task 4" in source
 
 
 def test_placement_cache_logic():
@@ -584,6 +626,14 @@ def test_object_support_affinity():
     print("=== All affinity scoring tests passed ===")
 
 
+def test_envbc_batch_only_skips_successful_phases():
+    script = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
+    assert "phase_succeeded()" in script
+    assert "! phase_succeeded \"$scene_root/logs/envb.exit\"" in script
+    assert "! phase_succeeded \"$scene_root/logs/expert.exit\"" in script
+    assert "! -f \"$scene_root/logs/envb.exit\"" not in script
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Running retry control, fail-fast, and checkpoint tests")
@@ -600,6 +650,7 @@ if __name__ == "__main__":
     test_scene_furniture_dict()
     test_pre_validate_instruction()
     test_object_support_affinity()
+    test_envbc_batch_only_skips_successful_phases()
 
     print()
     print("=" * 60)

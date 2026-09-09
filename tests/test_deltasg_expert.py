@@ -25,6 +25,7 @@ from deltasg_expert import (  # noqa: E402
     PLACE_SUPPORT_REFERENCE_XY_RADIUS,
     SUPPORTED_APPLIANCE_TASKS,
     SUPPORTED_ENV_A_TASKS,
+    SUPPORTED_ENV_B_ANOMALY_TASKS,
     SUPPORTED_FIRE_TASKS,
     SUPPORTED_OPEN_CLOSE_TASKS,
     SUPPORTED_RETRIEVAL_DELIVERY_TASKS,
@@ -125,6 +126,107 @@ def test_fire_tasks_compile_to_official_extinguish_state_transition(task_name):
     assert compiled.steps[-1].expected == {
         "state": "OnFire", "object": "carpet_0", "value": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("task_name", "plan", "objects", "expected"),
+    [
+        (
+            "clean_dirty_dishes",
+            [
+                {"primitive": "PICK", "target_object": "sponge_0"},
+                {"primitive": "INTERACT", "target_object": "plate_0", "nl": "Wipe the dirty dish"},
+            ],
+            [
+                {"object_id": "sponge_0", "category": "sponge"},
+                {"object_id": "plate_0", "category": "plate"},
+            ],
+            {"GRASP", "WIPE"},
+        ),
+        (
+            "collect_dirty_clothes",
+            [
+                {"primitive": "PICK", "target_object": "shirt_0"},
+                {"primitive": "PLACE", "target_object": "hamper_0", "placement_mode": "inside"},
+            ],
+            [
+                {"object_id": "shirt_0", "category": "t_shirt"},
+                {"object_id": "hamper_0", "category": "hamper"},
+            ],
+            {"GRASP", "PLACE_INSIDE"},
+        ),
+        (
+            "clean_up_broken_object",
+            [
+                {"primitive": "PICK", "target_object": "broom_0"},
+                {
+                    "primitive": "INTERACT",
+                    "nl": "Sweep the broken pieces into the dustpan",
+                    "target_object": "broken_glass_0",
+                    "tool_object": "broom_0",
+                    "destination_object": "dustpan_0",
+                },
+                {"primitive": "PICK", "target_object": "dustpan_0"},
+                {
+                    "primitive": "INTERACT",
+                    "nl": "Empty the dustpan into the trash can",
+                    "target_object": "trash_can_0",
+                    "tool_object": "dustpan_0",
+                    "payload_object": "broken_glass_0",
+                },
+            ],
+            [
+                {"object_id": "broken_glass_0", "category": "broken_glass"},
+                {"object_id": "broom_0", "category": "broom"},
+                {"object_id": "dustpan_0", "category": "dustpan"},
+                {"object_id": "trash_can_0", "category": "trash_can"},
+            ],
+            {"GRASP", "SWEEP_INTO", "EMPTY_INTO"},
+        ),
+    ],
+)
+def test_env_b_anomaly_tasks_compile_to_executable_plans(task_name, plan, objects, expected):
+    assert task_name in SUPPORTED_ENV_B_ANOMALY_TASKS
+    compiled = compile_expert_plan(sample(task_name, plan, objects))
+    assert compiled.task_family == "anomaly"
+    assert expected <= {step.primitive for step in compiled.steps}
+
+
+def test_broken_object_plan_rejects_direct_hand_pick():
+    run = sample(
+        "clean_up_broken_object",
+        [
+            {"primitive": "PICK", "target_object": "broken_glass_0"},
+            {"primitive": "PLACE", "target_object": "trash_can_0", "placement_mode": "inside"},
+        ],
+        [
+            {"object_id": "broken_glass_0", "category": "broken_glass"},
+            {"object_id": "trash_can_0", "category": "trash_can"},
+        ],
+    )
+    with pytest.raises(ExpertPlanError, match="must not grasp broken pieces by hand"):
+        compile_expert_plan(run)
+
+
+def test_swept_payload_is_carried_by_dustpan_until_emptying():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    assert "controller.register_swept_payload(target, destination)" in source
+    assert "controller.release_carried_payload(payload)" in source
+    assert '"mode": "oracle_symbolic_dustpan_payload"' in source
+
+
+def test_wipe_uses_the_same_official_covered_transition_for_all_backends():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    wipe_block = source[source.index('elif step.primitive == "WIPE"'):]
+    wipe_block = wipe_block[:wipe_block.index('elif step.primitive == "SWEEP_INTO"')]
+    assert "args.backend" not in wipe_block
+    assert "object_states.Covered" in wipe_block
+    assert '"omnigibson_official_covered_transition"' in wipe_block
+    assert wipe_block.index("state.set_value(system, False)") < wipe_block.index("state.clear_cache()")
 
 
 def test_compiles_delivery_inventory_and_inside_relation():
@@ -812,7 +914,7 @@ def test_symbolic_inventory_follows_navigation_without_claiming_physical_grasp()
         "changed = bool(state.set_value(obj, True))"
     )
     assert "DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2" in oracle
-    assert "DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2" in oracle
+    assert "INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate is object_states.Inside else 2" in oracle
     execute = source[source.index("def execute("):source.index("def main()")]
     assert '"type": "oracle_head_only_look_at"' in execute
     assert '"base_motion_commanded": False' in execute
@@ -852,6 +954,24 @@ def test_symbolic_navigation_and_placement_stay_in_manipulation_range():
     assert "time.monotonic() > deadline" in oracle
     assert "placed_object_distance = _horizontal_target_aabb_distance(" in oracle
     assert "placed_object_distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in oracle
+
+
+def test_symbolic_navigation_recovers_the_saved_transition_start_after_bbox_fallback():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    oracle = source[
+        source.index("class DeltaSGOraclePrimitives"):
+        source.index("class DeltaSGPhysicalPrimitives")
+    ]
+    assert "def _saved_navigation_transitions(run):" in source
+    assert 'preflight.get("next_target")' in source
+    assert 'getattr(self, "_deltasg_navigation_transitions", {}).get(obj.name)' in oracle
+    assert "route_start_distance <= 0.5" in oracle
+    assert 'candidate_pose = th.tensor(saved_transition["goal_pose"]' in oracle
+    assert "yield from self._navigate_to_pose(recovery_pose)" in oracle
+    assert "held_object=self._get_obj_in_hand()" in oracle
+    assert 'record["navigation_route_start_recovery"]' in source
 
 
 def test_symbolic_replay_isolates_preloaded_objects_without_kinematic_task_objects():

@@ -21,16 +21,17 @@ from pathlib import Path
 os.environ.setdefault("OMNIGIBSON_HEADLESS", "1")
 
 from omnigibson.macros import gm
+import omnigibson as og
 
-gm.ENABLE_OBJECT_STATES = True
-gm.ENABLE_TRANSITION_RULES = False
-gm.HEADLESS = True
-gm.RENDER_VIEWER_CAMERA = True
-gm.GUI_VIEWPORT_ONLY = True
+if og.sim is None:
+    gm.ENABLE_OBJECT_STATES = True
+    gm.ENABLE_TRANSITION_RULES = False
+    gm.HEADLESS = True
+    gm.RENDER_VIEWER_CAMERA = True
+    gm.GUI_VIEWPORT_ONLY = True
 
 import numpy as np
 import cv2
-import omnigibson as og
 import omnigibson.lazy as lazy
 import torch as th
 from PIL import Image
@@ -59,9 +60,18 @@ from deltasg_visual_effects import (
     SMOKE_FLOW_RENDER_WARMUP_FRAMES,
     SMOKE_FLOW_WARMUP_STEPS,
     SMOKE_ONLY_ON_FIRE_MODE,
+    USDZ_FLAME_MODE,
+    USDZ_FLAME_SMOKE_MODE,
+    USDZ_FLAME_RENDER_WARMUP_FRAMES,
+    set_covered_particles,
     configure_on_fire_smoke_only,
+    create_usdz_flame,
+    create_usdz_flame_smoke,
+    remove_usdz_flame,
 )
 from deltasg_expert import (
+    INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS,
+    task_grasp_minimum,
     DEFAULT_MAX_MANIPULATION_HEIGHT,
     DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
     DEFAULT_MIN_MANIPULATION_HEIGHT,
@@ -105,6 +115,7 @@ SYMBOLIC_PRIMITIVE_MAP = {
         "CLOSE",
         "TOGGLE_ON",
         "TOGGLE_OFF",
+        "WIPE",
     )
 }
 PHYSICAL_PRIMITIVE_MAP = {
@@ -279,10 +290,15 @@ def _connected_observation_pose(
     route_clearance_margin=0.20,
     route_target=None,
     max_target_aabb_distance=None,
+    start_pose=None,
+    held_object=None,
 ):
     """Choose a traversable pose in the robot's current connected component."""
     target_position, _ = obj.get_position_orientation()
     robot_position, _ = robot.get_position_orientation()
+    if start_pose is not None:
+        robot_position = robot_position.clone()
+        robot_position[:2] = start_pose[:2]
     trav_map = env.scene.trav_map
     floor = min(
         range(trav_map.n_floors),
@@ -382,6 +398,8 @@ def _connected_observation_pose(
         else None
     )
     blockers = _navigation_blocker_aabbs(env, robot, obj)
+    if held_object is not None:
+        blockers = [block for block in blockers if block[0] != held_object.name]
     collision_geometry = _robot_collision_geometry(robot)
     candidate_yaw = None
     framing_fallbacks = []
@@ -421,6 +439,8 @@ def _connected_observation_pose(
                 ),
                 clearance_margin=route_clearance_margin,
                 target=route_target,
+                start_pose=start_pose,
+                held_object=held_object,
             )
         except ActionPrimitiveError:
             return False
@@ -619,7 +639,7 @@ def _horizontal_target_aabb_distance(robot, obj):
     return float(np.linalg.norm(robot_xy - nearest_xy))
 
 
-def _manipulation_height_gate(env, step, target, args):
+def _manipulation_height_gate(env, step, target, args, task_name=None):
     if step.primitive not in MANIPULATION_PRIMITIVES:
         return None
     if target is None:
@@ -635,6 +655,8 @@ def _manipulation_height_gate(env, step, target, args):
         if args.backend == "physical_control" and step.primitive == "GRASP"
         else args.min_manipulation_height
     )
+    if step.primitive == "GRASP":
+        min_height = task_grasp_minimum(task_name, target.category, min_height)
     result = evaluate_manipulation_height(
         step.primitive,
         float(aabb_min[2]),
@@ -648,10 +670,16 @@ def _manipulation_height_gate(env, step, target, args):
 
 
 def _connected_navigation_waypoints(
-    env, robot, goal_pose, clearance_margin=0.20, spacing=0.10, target=None
+    env, robot, goal_pose, clearance_margin=0.20, spacing=0.10, target=None, start_pose=None,
+    held_object=None,
 ):
     """Build collision-clear map waypoints for CuRobo's local base plans."""
     robot_position, robot_orientation = robot.get_position_orientation()
+    if start_pose is not None:
+        robot_position = robot_position.clone()
+        robot_position[:2] = start_pose[:2]
+        yaw = float(start_pose[2])
+        robot_orientation = th.tensor([0., 0., math.sin(yaw / 2), math.cos(yaw / 2)])
     trav_map = env.scene.trav_map
     floor = min(
         range(trav_map.n_floors),
@@ -674,7 +702,9 @@ def _connected_navigation_waypoints(
     robot_top = robot_z + float(np.max(local_points[:, 2]))
     robot_bottom = robot_z + float(np.min(local_points[:, 2]))
     boundary_horizontal_reach = np.linalg.norm(local_points[:, :2], axis=1)
-    for _, lower, upper in _navigation_blocker_aabbs(env, robot, target):
+    for name, lower, upper in _navigation_blocker_aabbs(env, robot, target):
+        if held_object is not None and name == held_object.name:
+            continue
         if upper[2] < robot_bottom + 0.02 or lower[2] > robot_top - 0.02:
             continue
         # Z-aware inflation: a blocker can only be touched by boundary points
@@ -869,6 +899,8 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
     def __init__(self, *args, **kwargs):
         self._deltasg_inventory_object = None
         self._deltasg_inventory_gravity_disabled = False
+        self._deltasg_payload_by_carrier = {}
+        self._deltasg_inventory_payload = None
         self.last_navigation_prerequisites = []
         super().__init__(*args, **kwargs)
 
@@ -881,9 +913,11 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             return
         for link in held.links.values():
             if enabled:
-                link.enable_gravity()
+                if hasattr(link, "enable_gravity"):
+                    link.enable_gravity()
             else:
-                link.disable_gravity()
+                if hasattr(link, "disable_gravity"):
+                    link.disable_gravity()
         self._deltasg_inventory_gravity_disabled = not enabled
 
     def _set_inventory_collisions(self, enabled):
@@ -892,9 +926,11 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             return
         for link in held.links.values():
             if enabled:
-                link.enable_collisions()
+                if hasattr(link, "enable_collisions"):
+                    link.enable_collisions()
             else:
-                link.disable_collisions()
+                if hasattr(link, "disable_collisions"):
+                    link.disable_collisions()
 
     def _sync_inventory_to_eef(self):
         held = self._get_obj_in_hand()
@@ -902,6 +938,35 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             return
         held.set_position_orientation(position=self.robot.get_eef_position(self.arm))
         held.keep_still()
+        payload = self._deltasg_inventory_payload
+        if payload is not None:
+            carrier_low, carrier_high = held.aabb
+            payload_position = (carrier_low + carrier_high) * 0.5
+            payload_position[2] = carrier_high[2] + payload.aabb_extent[2] * 0.5 + 0.005
+            payload.set_position_orientation(position=payload_position)
+            payload.keep_still()
+
+    @staticmethod
+    def _set_payload_physics(payload, enabled):
+        for link in payload.links.values():
+            if enabled:
+                if hasattr(link, "enable_collisions"):
+                    link.enable_collisions()
+                if hasattr(link, "enable_gravity"):
+                    link.enable_gravity()
+            else:
+                if hasattr(link, "disable_collisions"):
+                    link.disable_collisions()
+                if hasattr(link, "disable_gravity"):
+                    link.disable_gravity()
+
+    def register_swept_payload(self, payload, carrier):
+        self._deltasg_payload_by_carrier[carrier.name] = payload
+
+    def release_carried_payload(self, payload):
+        if self._deltasg_inventory_payload is payload:
+            self._set_payload_physics(payload, True)
+            self._deltasg_inventory_payload = None
 
     def _grasp(self, obj):
         held = self._get_obj_in_hand()
@@ -924,6 +989,11 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         self._deltasg_inventory_object = obj
         self._set_inventory_gravity(False)
         self._set_inventory_collisions(False)
+        payload = self._deltasg_payload_by_carrier.get(obj.name)
+        if payload is not None:
+            self._deltasg_inventory_payload = payload
+            self._set_payload_physics(payload, False)
+            self._sync_inventory_to_eef()
         if False:
             yield None
 
@@ -992,6 +1062,18 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 f"Held object does not expose {predicate.__name__}",
                 {"held object": held.name, "target object": obj.name},
             )
+        if predicate is object_states.Inside:
+            container_links = [
+                name for name, link in obj.links.items()
+                if link.is_meta_link and link.meta_link_type in {"fillable", "openfillable"}
+            ]
+            print(f"[expert] Inside container={obj.name} volumes={container_links}", flush=True)
+            if not container_links:
+                raise ActionPrimitiveError(
+                    ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                    "Inside target has no official container volume",
+                    {"target object": obj.name, "model": getattr(obj, "model", None)},
+                )
         # Unified wall-bounded official placement. Both native and generated
         # supports use OmniGibson's official OnTop/Inside setter, which runs its
         # own kinematic sample + settle + state verification. The previous
@@ -1017,7 +1099,9 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         try:
             with object_state_macros.unlocked():
                 object_state_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2
-                object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = 2
+                object_state_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = (
+                    INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate is object_states.Inside else 2
+                )
             for _ in range(PLACE_NATIVE_MAX_ATTEMPTS):
                 if time.monotonic() > deadline:
                     break
@@ -1025,6 +1109,7 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                 self._set_inventory_collisions(True)
                 self._set_inventory_gravity(True)
                 changed = bool(state.set_value(obj, True))
+                state.clear_cache()
                 reached = bool(state.get_value(obj))
                 if changed and reached:
                     placed_object_distance = _horizontal_target_aabb_distance(
@@ -1110,16 +1195,39 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         else:
             # Generated task objects must be revalidated against the live map
             # and official post-navigation segmentation on every replay.
-            candidate_pose = _connected_observation_pose(
+            saved_transition = getattr(self, "_deltasg_navigation_transitions", {}).get(obj.name)
+            current_position, _ = self.robot.get_position_orientation()
+            candidate_pose = None
+            if saved_transition is not None and self._get_obj_in_hand() is not None:
+                route_start = saved_transition["start_pose"]
+                route_start_distance = float(
+                    th.linalg.norm(current_position[:2].cpu() - th.tensor(route_start[:2]))
+                )
+                if route_start_distance <= 0.5:
+                    recovery_pose = th.tensor(route_start, dtype=th.float32)
+                    yield from self._navigate_to_pose(recovery_pose)
+                    self.last_navigation_route_start_recovery = recovery_pose.tolist()
+                    candidate_pose = th.tensor(saved_transition["goal_pose"], dtype=th.float32)
+            if candidate_pose is None:
+                candidate_pose = _connected_observation_pose(
+                    self.env,
+                    self.robot,
+                    obj,
+                    preferred_distance=_target_framing_distance(obj, robot=self.robot),
+                    fallback_rank=int(getattr(self, "_deltasg_navigation_fallback_rank", 0)),
+                    require_route=True,
+                    route_clearance_margin=0.0,
+                    route_target=obj,
+                    max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                )
+            route = _connected_navigation_waypoints(
                 self.env,
                 self.robot,
-                obj,
-                preferred_distance=_target_framing_distance(obj, robot=self.robot),
-                fallback_rank=int(getattr(self, "_deltasg_navigation_fallback_rank", 0)),
-                max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
-            )
-            route = _connected_navigation_waypoints(
-                self.env, self.robot, candidate_pose, clearance_margin=0.0, spacing=0.10
+                candidate_pose,
+                clearance_margin=0.0,
+                spacing=0.10,
+                target=obj,
+                held_object=self._get_obj_in_hand(),
             )
         self.last_navigation_prerequisites = []
         for prerequisite in _closed_doors_on_route(
@@ -3616,8 +3724,13 @@ def cleanup_persistent_camera_streams(camera_streams):
 
 def prepare_persistent_scene_reset(env):
     """Refresh PhysX views before hard-reset removes the previous Delta objects."""
+    # Clearing a visual particle system removes its template object and
+    # invalidates PhysX views. Do it before the rebuild, not inside restore().
     if og.sim.is_playing():
         og.sim.stop()
+    initial_systems = set(env.scene._initial_file["state"]["registry"]["system_registry"])
+    for name in set(env.scene.active_systems) - initial_systems:
+        env.scene.clear_system(name)
     og.sim.play()
     for _ in range(3):
         og.sim.step()
@@ -3643,9 +3756,11 @@ def configure_preloaded_delta_objects(env, run, preloaded_names):
         obj.visible = active
         for link in obj.links.values():
             if active:
-                link.enable_collisions()
+                if hasattr(link, "enable_collisions"):
+                    link.enable_collisions()
             else:
-                link.disable_collisions()
+                if hasattr(link, "disable_collisions"):
+                    link.disable_collisions()
         if active:
             obj.enable_gravity()
         else:
@@ -3670,19 +3785,24 @@ def _physical_added_object_configs(run, backend="physical_control"):
         if not name or not record.get("category") or not pose.get("position"):
             raise RuntimeError(f"cannot configure added object {name!r}")
         task_support = "task_support" in set(record.get("semantic_roles") or [])
-        anchored_for_replay = task_support
+        is_cloth = record.get("object_type") == "cloth"
+        anchored_for_replay = task_support and not is_cloth
         config = {
             "type": "DatasetObject",
             "name": name,
             "category": record["category"],
             "position": pose["position"],
             "orientation": pose.get("orientation_xyzw") or [0, 0, 0, 1],
+            "prim_type": PrimType.CLOTH if is_cloth else PrimType.RIGID,
             # Delta supports are furniture, not task-actuated objects. Anchor
             # them in the reconstructed environment so a robot contact cannot
             # turn an otherwise valid manipulation episode into scene drift.
             "fixed_base": anchored_for_replay,
             "kinematic_only": anchored_for_replay,
         }
+        if is_cloth:
+            config["abilities"] = {"cloth": {}}
+            config["load_config"] = {"default_point_configuration": "crumpled"}
         if record.get("room_id"):
             config["in_rooms"] = record["room_id"]
         if record.get("model"):
@@ -3716,6 +3836,27 @@ def _saved_robot_approaches(run):
                 approaches[object_id] = [float(xy[0]), float(xy[1])]
                 approach_distances[object_id] = distance
     return approaches
+
+
+def _saved_navigation_transitions(run):
+    transitions = {}
+    for record in (run.get("task_environment") or {}).get("added_objects") or []:
+        preflight = (record.get("placement") or {}).get("expert_navigation_preflight") or {}
+        target = preflight.get("next_target")
+        start_pose = preflight.get("pose")
+        goal_pose = preflight.get("next_pose")
+        if (
+            target
+            and isinstance(start_pose, list)
+            and len(start_pose) == 3
+            and isinstance(goal_pose, list)
+            and len(goal_pose) == 3
+        ):
+            transitions[target] = {
+                "start_pose": [float(value) for value in start_pose],
+                "goal_pose": [float(value) for value in goal_pose],
+            }
+    return transitions
 
 
 def _spawn_added_objects(env, run):
@@ -3764,7 +3905,8 @@ def _hold_symbolic_grasp_targets(env, grasp_target_ids):
             continue
         obj.disable_gravity()
         for link in obj.links.values():
-            link.disable_collisions()
+            if hasattr(link, "disable_collisions"):
+                link.disable_collisions()
         obj.keep_still()
         held.append(object_id)
     if held:
@@ -3782,6 +3924,7 @@ def _apply_saved_initial_states(env, run):
     objects = _scene_objects(env)
     applied = []
     smoke_effect_count = 0
+    usdz_flame_count = 0
     te = run.get("task_environment") or {}
     for record in te.get("state_changed_objects") or []:
         object_id = _name(record)
@@ -3789,6 +3932,28 @@ def _apply_saved_initial_states(env, run):
         if obj is None:
             raise RuntimeError(f"state target {object_id!r} is missing during replay")
         for state_key, desired in (record.get("states") or {}).items():
+            if str(state_key).lower() == "covered":
+                specification = desired if isinstance(desired, dict) else {}
+                system_name = specification.get("system") or "stain"
+                desired_value = bool(specification.get("value", desired))
+                configured = set_covered_particles(
+                    obj, system_name, desired_value,
+                    particle_snapshot=specification.get("particle_snapshot"),
+                )
+                if not configured.get("ok"):
+                    raise RuntimeError(
+                        f"failed to replay Covered({system_name})={desired_value} "
+                        f"for {object_id!r}: {configured}"
+                    )
+                applied.append(
+                    {
+                        "object_id": object_id,
+                        "state": "covered",
+                        "system": system_name,
+                        "value": desired_value,
+                    }
+                )
+                continue
             state_cls = state_types.get(str(state_key).lower())
             if state_cls is None:
                 continue
@@ -3818,6 +3983,29 @@ def _apply_saved_initial_states(env, run):
                     f"failed to replay smoke-only OnFire effect for {object_id!r}: {configured}"
                 )
             smoke_effect_count += 1
+        elif visual_effect.get("mode") == USDZ_FLAME_SMOKE_MODE:
+            configured = create_usdz_flame_smoke(
+                obj,
+                effect_id=visual_effect.get("effect_id") or object_id,
+                target_height=visual_effect.get("target_height"),
+            )
+            if not configured.get("ok"):
+                raise RuntimeError(
+                    f"failed to replay USDZ flame and smoke for {object_id!r}: {configured}"
+                )
+            smoke_effect_count += 1
+            usdz_flame_count += 1
+        elif visual_effect.get("mode") == USDZ_FLAME_MODE:
+            configured = create_usdz_flame(
+                obj,
+                effect_id=visual_effect.get("effect_id") or object_id,
+                target_height=visual_effect.get("target_height"),
+            )
+            if not configured.get("ok"):
+                raise RuntimeError(
+                    f"failed to replay USDZ flame for {object_id!r}: {configured}"
+                )
+            usdz_flame_count += 1
     if applied:
         settle_steps = SMOKE_FLOW_WARMUP_STEPS if smoke_effect_count else 5
         for _ in range(settle_steps):
@@ -3830,6 +4018,10 @@ def _apply_saved_initial_states(env, run):
                 f"{smoke_effect_count} steps={settle_steps} "
                 f"render_frames={SMOKE_FLOW_RENDER_WARMUP_FRAMES}"
             )
+        elif usdz_flame_count:
+            for _ in range(USDZ_FLAME_RENDER_WARMUP_FRAMES):
+                og.sim.render()
+            print(f"[expert] restored USDZ flame effects={usdz_flame_count}", flush=True)
     return applied
 
 
@@ -4696,7 +4888,9 @@ def _physical_look_at(env, controller, obj):
     return actions
 
 
-def _check_postcondition(primitive, target, carried, controller):
+def _check_postcondition(
+    primitive, target, carried, controller, destination=None, payload=None
+):
     if primitive == "GRASP":
         actual = controller._get_obj_in_hand()
         return actual is target, {"object_in_hand": getattr(actual, "name", None)}
@@ -4719,12 +4913,47 @@ def _check_postcondition(primitive, target, carried, controller):
             else None
         )
         return actual is False, {"state": "OnFire", "expected": False, "actual": actual}
+    if primitive == "WIPE":
+        state = target.states.get(object_states.Covered) if target is not None else None
+        covered_systems = []
+        if state is not None:
+            for system in target.scene.system_registry.objects:
+                try:
+                    if state.get_value(system):
+                        covered_systems.append(system.name)
+                except Exception:
+                    pass
+        return not covered_systems, {
+            "state": "Covered",
+            "expected": False,
+            "actual_systems": sorted(covered_systems),
+        }
+    if primitive == "SWEEP_INTO":
+        state = target.states.get(object_states.OnTop) if target is not None else None
+        reached = bool(state.get_value(destination)) if state is not None and destination is not None else False
+        held = controller._get_obj_in_hand()
+        return reached and held is None, {
+            "relation": "OnTop",
+            "subject": getattr(target, "name", None),
+            "object": getattr(destination, "name", None),
+            "tool_released": held is None,
+        }
+    if primitive == "EMPTY_INTO":
+        state = payload.states.get(object_states.Inside) if payload is not None else None
+        reached = bool(state.get_value(target)) if state is not None and target is not None else False
+        held = controller._get_obj_in_hand()
+        return reached and held is carried, {
+            "relation": "Inside",
+            "subject": getattr(payload, "name", None),
+            "object": getattr(target, "name", None),
+            "tool_in_hand": getattr(held, "name", None),
+        }
     return True, {}
 
 
 def execute(run, input_path, output_dir, args, env=None, persistent=False):
     plan = compile_expert_plan(run)
-    if plan.task_family not in {"retrieval_delivery", "open_close", "appliance", "fire"}:
+    if plan.task_family not in {"retrieval_delivery", "open_close", "appliance", "fire", "anomaly"}:
         raise ExpertPlanError(f"expert v1 does not execute task family {plan.task_family!r}")
     te = run.get("task_environment") or {}
     generation_profile = (te.get("generation") or {}).get("solvability_profile")
@@ -4786,8 +5015,6 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             print("[expert-persistent] delta objects loaded", flush=True)
         else:
             configure_preloaded_delta_objects(env, run, preloaded_names)
-    if args.backend == "oracle_symbolic":
-        _hold_symbolic_grasp_targets(env, symbolic_grasp_targets)
     _sink_diag_trace(env, "post_load")
     if args.backend == "oracle_symbolic":
         _set_robot_pose(env.robots[0], robot_pose, env=env, diag_env=env)
@@ -4809,6 +5036,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         reset_aabb_tops=reset_aabb_tops,
     )
     initial_states = _apply_saved_initial_states(env, run)
+    if args.backend == "oracle_symbolic":
+        _hold_symbolic_grasp_targets(env, symbolic_grasp_targets)
     print("[expert] delta objects replayed", flush=True)
     initial_robot_stability = validate_robot_stability(env)
     accepted = replay_integrity["ok"] and initial_robot_stability["ok"]
@@ -4889,6 +5118,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         for step in plan.steps
         if step.primitive == "GRASP" and step.target_object
     )
+    intentionally_moved_delta_ids.update(
+        step.payload_object
+        for step in plan.steps
+        if step.payload_object
+    )
     stationary_delta_ids = {
         _name(record)
         for record in ((run.get("task_environment") or {}).get("added_objects") or [])
@@ -4914,8 +5148,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     approach_diagnostics = {}
     assisted_interactions = []
     saved_robot_approaches = _saved_robot_approaches(run)
+    saved_navigation_transitions = _saved_navigation_transitions(run)
     if controller is not None:
         controller._deltasg_saved_robot_approaches = saved_robot_approaches
+        controller._deltasg_navigation_transitions = saved_navigation_transitions
 
     for step_index, step in enumerate(plan.steps if accepted else []):
         print(
@@ -4925,7 +5161,9 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         )
         target = objects.get(step.target_object) if step.target_object else None
         carried = objects.get(step.carried_object) if step.carried_object else None
-        height_gate = _manipulation_height_gate(env, step, target, args)
+        destination = objects.get(step.destination_object) if step.destination_object else None
+        payload = objects.get(step.payload_object) if step.payload_object else None
+        height_gate = _manipulation_height_gate(env, step, target, args, plan.task_name)
         # No simulator step occurs between one primitive's postcondition and
         # the next primitive. Reuse that exact observation instead of asking
         # Replicator to render the same state twice; repeated back-to-back
@@ -4984,6 +5222,7 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                     curobo_obstacle_predicate=obstacle_predicate,
                 )
                 controller._deltasg_saved_robot_approaches = saved_robot_approaches
+                controller._deltasg_navigation_transitions = saved_navigation_transitions
                 controller._deltasg_reference_bboxes = reference_scene_bboxes
                 physical_controller_key = controller_key
         recovery = None
@@ -5197,10 +5436,133 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         "Official OnFire transition did not extinguish the target",
                         interaction,
                     )
+                remove_usdz_flame(target.name)
+                for _ in range(SMOKE_FLOW_WARMUP_STEPS // 2):
+                    og.sim.step()
+            elif step.primitive == "WIPE":
+                state = target.states.get(object_states.Covered) if target is not None else None
+                if state is None:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "Target has no Covered state",
+                        {"target object": getattr(target, "name", None)},
+                    )
+                removed_systems = []
+                for system in target.scene.system_registry.objects:
+                    if state.get_value(system) and state.set_value(system, False):
+                        removed_systems.append(system.name)
+                # Covered._set_value reads the old value before removing
+                # particles, populating its same-step cache again.
+                state.clear_cache()
+                interaction = {
+                    "step_id": step.step_id,
+                    "primitive": step.primitive,
+                    "target_object": target.name,
+                    "removed_systems": sorted(removed_systems),
+                    "mode": "omnigibson_official_covered_transition",
+                }
+                record["assisted_interaction"] = interaction
+                assisted_interactions.append(interaction)
+                if not removed_systems:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                        "Official Covered transition removed no particles",
+                        interaction,
+                    )
+            elif step.primitive == "SWEEP_INTO":
+                if args.backend != "oracle_symbolic":
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "SWEEP_INTO currently requires the oracle_symbolic backend",
+                    )
+                held = controller._get_obj_in_hand()
+                if held is not carried or destination is None:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "SWEEP_INTO requires the selected broom and dustpan",
+                        {
+                            "held": getattr(held, "name", None),
+                            "broom": getattr(carried, "name", None),
+                            "dustpan": getattr(destination, "name", None),
+                        },
+                    )
+                state = target.states.get(object_states.OnTop) if target is not None else None
+                changed = bool(state.set_value(destination, True)) if state is not None else False
+                if state is not None:
+                    state.clear_cache()
+                reached = bool(state.get_value(destination)) if state is not None else False
+                if not changed or not reached:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                        "Official OnTop transition did not sweep the broken pieces onto the dustpan",
+                        {"state_set_succeeded": changed, "state_reached": reached},
+                    )
+                controller.register_swept_payload(target, destination)
+                for action in controller._release():
+                    _step_control_without_observation(env, action)
+                    action_rows.append(_to_numpy(action))
+                    record["actions_executed"] += 1
+                interaction = {
+                    "step_id": step.step_id,
+                    "primitive": step.primitive,
+                    "target_object": target.name,
+                    "tool_object": carried.name,
+                    "destination_object": destination.name,
+                    "relation": "OnTop",
+                    "state_set_succeeded": changed,
+                    "state_reached": reached,
+                    "mode": "omnigibson_official_on_top_sweep_transition",
+                }
+                record["assisted_interaction"] = interaction
+                assisted_interactions.append(interaction)
+            elif step.primitive == "EMPTY_INTO":
+                if args.backend != "oracle_symbolic":
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "EMPTY_INTO currently requires the oracle_symbolic backend",
+                    )
+                held = controller._get_obj_in_hand()
+                if held is not carried or payload is None:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.PRE_CONDITION_ERROR,
+                        "EMPTY_INTO requires the selected dustpan and broken-object payload",
+                        {
+                            "held": getattr(held, "name", None),
+                            "dustpan": getattr(carried, "name", None),
+                            "payload": getattr(payload, "name", None),
+                        },
+                    )
+                controller.release_carried_payload(payload)
+                state = payload.states.get(object_states.Inside)
+                changed = bool(state.set_value(target, True)) if state is not None else False
+                if state is not None:
+                    state.clear_cache()
+                reached = bool(state.get_value(target)) if state is not None else False
+                interaction = {
+                    "step_id": step.step_id,
+                    "primitive": step.primitive,
+                    "target_object": target.name,
+                    "tool_object": carried.name,
+                    "payload_object": payload.name,
+                    "relation": "Inside",
+                    "state_set_succeeded": changed,
+                    "state_reached": reached,
+                    "payload_transport_mode": "oracle_symbolic_dustpan_payload",
+                    "mode": "omnigibson_official_inside_empty_transition",
+                }
+                record["assisted_interaction"] = interaction
+                assisted_interactions.append(interaction)
+                if not changed or not reached:
+                    raise ActionPrimitiveError(
+                        ActionPrimitiveError.Reason.POST_CONDITION_ERROR,
+                        "Official Inside transition did not empty the broken pieces into the trash can",
+                        interaction,
+                    )
             else:
                 if args.backend == "oracle_symbolic" and step.primitive == "GRASP":
                     for link in target.links.values():
-                        link.enable_collisions()
+                        if hasattr(link, "enable_collisions"):
+                            link.enable_collisions()
                     target.enable_gravity()
                     target.keep_still()
                 for action in controller.apply_ref(primitive_map[step.primitive], target, attempts=args.primitive_attempts):
@@ -5223,8 +5585,20 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                             camera_streams,
                         )
                         events.append(event)
+                if args.backend == "oracle_symbolic" and step.primitive == "GRASP":
+                    transported_payload = controller._deltasg_inventory_payload
+                    if transported_payload is not None:
+                        record["assisted_payload_transport"] = {
+                            "carrier_object": target.name,
+                            "payload_object": transported_payload.name,
+                            "mode": "oracle_symbolic_dustpan_payload",
+                        }
             _nav_diag_checkpoint(env, env.robots[0], f"step{step.step_id}_post:{step.primitive}")
             if step.primitive == "NAVIGATE_TO":
+                record["navigation_route_start_recovery"] = getattr(
+                    controller, "last_navigation_route_start_recovery", None
+                )
+                controller.last_navigation_route_start_recovery = None
                 prerequisites = list(
                     getattr(controller, "last_navigation_prerequisites", [])
                 )
@@ -5236,7 +5610,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                         # Opening this articulated route door is intentional;
                         # keep integrity checks anchored to its verified open pose.
                         baseline[door_id] = _integrity_pose_record(objects[door_id])
-            post_ok, postcondition = _check_postcondition(step.primitive, target, carried, controller)
+            post_ok, postcondition = _check_postcondition(
+                step.primitive, target, carried, controller,
+                destination=destination, payload=payload,
+            )
             if step.primitive == "NAVIGATE_TO" and target is not None:
                 navigation_approach_distance = _horizontal_target_aabb_distance(
                     env.robots[0], target
@@ -5375,7 +5752,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             # The visual supervision is valid only if the same official
             # postcondition still holds in the state represented by that frame.
             stable_post_ok, stable_postcondition = _check_postcondition(
-                step.primitive, target, carried, controller
+                step.primitive, target, carried, controller,
+                destination=destination, payload=payload,
             )
             if step.primitive == "NAVIGATE_TO" and target is not None:
                 stable_navigation_approach_distance = _horizontal_target_aabb_distance(
@@ -5650,6 +6028,12 @@ def main():
     env = None
     try:
         run = json.loads(input_path.read_text(encoding="utf-8"))
+        if any(
+            record.get("object_type") == "cloth"
+            for record in ((run.get("task_environment") or {}).get("added_objects") or [])
+        ):
+            with gm.unlocked():
+                gm.USE_GPU_DYNAMICS = True
         if args.robot is None:
             generated_robot = str((run.get("robot") or {}).get("model") or "")
             args.robot = {

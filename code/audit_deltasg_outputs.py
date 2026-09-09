@@ -17,6 +17,7 @@ EXPECTED_LABELS = {
     "envA_open_close": {"env_type": "Env-A", "category": "open_close"},
     "envA_appliance": {"env_type": "Env-A", "category": "appliance"},
     "envB_fire": {"env_type": "Env-B", "category": "anomaly_response"},
+    "envB_all": {"env_type": "Env-B", "category": "anomaly_response"},
     "envC_fire_disambiguation": {"env_type": "Env-C", "category": "semantic_disambiguation"},
     "envC_retrieval_delivery": {"env_type": "Env-C", "category": "retrieval_delivery"},
     "envC_open_close": {"env_type": "Env-C", "category": "open_close"},
@@ -25,21 +26,36 @@ EXPECTED_LABELS = {
 }
 
 SMOKE_ONLY_ON_FIRE_MODE = "omnigibson_on_fire_smoke_only"
+USDZ_FLAME_SMOKE_MODE = "deltasg_usdz_flame_smoke_column_v1"
 
 
-def smoke_warning_issue(state_changed):
+def fire_visual_issue(state_changed):
     fire_records = [obj for obj in state_changed if (obj.get("states") or {}).get("on_fire") is True]
     if not fire_records:
         return "missing_on_fire_state"
     for record in fire_records:
         effect = record.get("visual_effect") or {}
-        if (
-            record.get("anomaly_phase") != "smoke_warning"
-            or effect.get("mode") != SMOKE_ONLY_ON_FIRE_MODE
-            or effect.get("smoke_visible") is not True
-            or effect.get("flame_visible") is not False
-        ):
-            return "on_fire_not_smoke_only"
+        mode = effect.get("mode")
+        legacy_smoke = (
+            record.get("anomaly_phase") == "smoke_warning"
+            and mode == SMOKE_ONLY_ON_FIRE_MODE
+            and effect.get("smoke_visible") is True
+            and effect.get("flame_visible") is False
+        )
+        packaged_flame_and_smoke = (
+            record.get("anomaly_phase") == "visible_flame"
+            and mode == USDZ_FLAME_SMOKE_MODE
+            and effect.get("asset") == "code/assets/Flame_Animation.usdz"
+            and effect.get("flame_visible") is True
+            and effect.get("smoke_visible") is True
+            and effect.get("smoke_profile") == "vertical_column_v1"
+            and effect.get("smoke_emitter_radius") == 0.18
+            and effect.get("smoke_upward_velocity") == 1.5
+            and effect.get("smoke_fade") == 0.12
+            and effect.get("replaces_official_flow_visual") is False
+        )
+        if not (legacy_smoke or packaged_flame_and_smoke):
+            return "on_fire_visual_contract_invalid"
     return None
 
 def load_json(path: Path):
@@ -341,22 +357,104 @@ def check_run(path: Path, run: dict):
 
     elif env_type == "Env-B":
         state_changed = te.get("state_changed_objects") or []
-        smoke_issue = smoke_warning_issue(state_changed)
-        if smoke_issue:
-            issues.append(f"envB_{smoke_issue}")
+        primary = task.get("primary_behavior_task") or ""
         added = te.get("added_objects") or []
         task_objects = te.get("task_objects") or []
+        for item in added:
+            if "task_destination" not in set(item.get("semantic_roles") or []):
+                continue
+            placement = item.get("placement") or {}
+            approach = placement.get("robot_approach") or {}
+            height = placement.get("manipulation_height") or {}
+            if approach.get("ok") is not True:
+                issues.append("envB_task_destination_unreachable")
+            if height.get("eligible") is not True:
+                issues.append("envB_task_destination_height_invalid")
         tool_text = " ".join(
             str(obj.get("category") or obj.get("object_name") or obj.get("object_id") or "")
             for obj in [*added, *task_objects]
         )
-        if "fire_extinguisher" not in tool_text:
-            issues.append("envB_missing_extinguisher")
+        reasoning = te.get("semantic_reasoning") or task.get("semantic_reasoning") or {}
+        recipe = reasoning.get("resolution_recipe") or {}
+        if primary in {"collect_dirty_clothes", "clean_up_broken_object"} or (
+            primary == "clean_dirty_dishes" and recipe.get("path_name") == "machine_wash"
+        ):
+            preflight = (te.get("validation") or {}).get("destination_preflight")
+            if preflight is None:
+                # Early anomaly.v1 exports kept this evidence at the run root.
+                preflight = (run.get("validation") or {}).get("destination_preflight")
+            preflight = preflight or {}
+            expected_predicate = (
+                "OnTop"
+                if primary == "collect_dirty_clothes"
+                and recipe.get("path_name") == "put_on_cloth_basket"
+                else "Inside"
+            )
+            if (
+                preflight.get("ok") is not True
+                or preflight.get("predicate") != expected_predicate
+            ):
+                issues.append("envB_missing_successful_inside_preflight")
+        if not reasoning.get("solution_path"):
+            issues.append("envB_missing_solution_path")
+        if primary in {"respond_to_fire_emergency", "respond_to_smoke_warning"}:
+            fire_issue = fire_visual_issue(state_changed)
+            if fire_issue:
+                issues.append(f"envB_{fire_issue}")
+            if "fire_extinguisher" not in tool_text:
+                issues.append("envB_missing_extinguisher")
+            extinguishers = [obj for obj in added if obj.get("category") == "fire_extinguisher"]
+            layout = ((extinguishers[0].get("placement") or {}).get("household_layout") or {}) if extinguishers else {}
+            if (
+                layout.get("ok") is not True
+                or float(layout.get("target_horizontal_gap") or 0.0) < 1.5
+            ):
+                issues.append("envB_extinguisher_too_close_to_fire")
+        elif primary == "clean_dirty_dishes":
+            covered = [
+                item for item in state_changed
+                if isinstance((item.get("states") or {}).get("covered"), dict)
+                and (item["states"]["covered"]).get("system") == "stain"
+            ]
+            if not covered:
+                issues.append("envB_dirty_dishes_missing_official_stain")
+            if recipe.get("path_name") == "hand_wash" and not all(
+                category in tool_text for category in ("sponge", "bottle_of_dish_soap")
+            ):
+                issues.append("envB_dirty_dishes_incomplete_hand_wash_bundle")
+        elif primary == "collect_dirty_clothes":
+            covered = [
+                item for item in state_changed
+                if isinstance((item.get("states") or {}).get("covered"), dict)
+                and (item["states"]["covered"]).get("system") == "dirt"
+            ]
+            if not covered:
+                issues.append("envB_dirty_clothes_missing_official_dirt")
+            if not any(category in tool_text for category in ("washer", "hamper", "wicker_basket")):
+                issues.append("envB_dirty_clothes_missing_receptacle")
+        elif primary == "clean_up_broken_object":
+            if not any(
+                (item.get("states") or {}).get("broken") is True
+                for item in state_changed
+            ):
+                issues.append("envB_broken_object_missing_visible_broken_asset")
+            if not all(category in tool_text for category in ("broom", "dustpan", "trash_can")):
+                issues.append("envB_broken_object_incomplete_cleanup_bundle")
+            sweep_preflight = (te.get("validation") or {}).get("sweep_preflight") or {}
+            if sweep_preflight.get("ok") is not True or sweep_preflight.get("predicate") != "OnTop":
+                issues.append("envB_broken_object_missing_successful_sweep_preflight")
+        else:
+            issues.append(f"envB_unknown_task:{primary}")
         interaction_tools = [
             obj for obj in added
             if "interaction_tool" in set(obj.get("semantic_roles") or [])
         ]
-        if not interaction_tools:
+        needs_interaction_tool = primary in {
+            "respond_to_fire_emergency", "respond_to_smoke_warning", "clean_up_broken_object"
+        } or (
+            primary == "clean_dirty_dishes" and recipe.get("path_name") == "hand_wash"
+        )
+        if needs_interaction_tool and not interaction_tools:
             issues.append("envB_missing_interaction_tool")
         for tool in interaction_tools:
             placement = tool.get("placement") or {}
@@ -367,8 +465,34 @@ def check_run(path: Path, run: dict):
                 issues.append("envB_interaction_tool_height_invalid")
                 break
         plan_text = " ".join(step.get("primitive", "") for step in te.get("solution_plan") or [])
-        if "INTERACT" not in plan_text:
+        if primary in {"respond_to_fire_emergency", "respond_to_smoke_warning"} and "INTERACT" not in plan_text:
             issues.append("envB_plan_missing_interact")
+        if primary == "collect_dirty_clothes" and not all(
+            primitive in plan_text for primitive in ("PICK", "PLACE")
+        ):
+            issues.append("envB_plan_missing_pick_place")
+        if primary == "clean_up_broken_object":
+            plan = te.get("solution_plan") or []
+            interactions = [
+                step for step in plan if str(step.get("primitive") or "").upper() == "INTERACT"
+            ]
+            tools = {step.get("tool_object") for step in interactions}
+            if len(interactions) != 2 or not any("sweep" in str(step.get("nl") or "").lower() for step in interactions):
+                issues.append("envB_broken_object_missing_sweep_action")
+            if not any("empty" in str(step.get("nl") or "").lower() for step in interactions):
+                issues.append("envB_broken_object_missing_empty_action")
+            if len(tools - {None}) != 2:
+                issues.append("envB_broken_object_missing_tool_grounding")
+            if any(
+                str(step.get("primitive") or "").upper() == "PICK"
+                and step.get("target_object") in {
+                    item.get("object_id")
+                    for item in state_changed
+                    if (item.get("states") or {}).get("broken") is True
+                }
+                for step in plan
+            ):
+                issues.append("envB_broken_object_direct_hand_pick_forbidden")
 
     elif env_type == "Env-C":
         reasoning = te.get("semantic_reasoning") or task.get("semantic_reasoning") or run.get("task_instance", {}).get("semantic_reasoning")
@@ -397,9 +521,9 @@ def check_run(path: Path, run: dict):
         primary = task.get("primary_behavior_task") or ""
         is_fire = "fire" in primary or "fire" in (label or "")
         if is_fire:
-            smoke_issue = smoke_warning_issue(state_changed)
-            if smoke_issue:
-                issues.append(f"envC_{smoke_issue}")
+            fire_issue = fire_visual_issue(state_changed)
+            if fire_issue:
+                issues.append(f"envC_{fire_issue}")
 
     return issues
 
@@ -539,13 +663,12 @@ def main():
         if issues and len(examples) < 20:
             examples.append({"path": str(path), "issues": issues})
 
+    from deltasg_sample_identity import sample_fingerprint
+
     fingerprints = defaultdict(list)
     for path in files:
         run = load_json(path)
-        validation = run.get("validation") or {}
-        fingerprint = validation.get("sample_fingerprint")
-        if fingerprint:
-            fingerprints[fingerprint].append(str(path))
+        fingerprints[sample_fingerprint(run)[0]].append(str(path))
     duplicate_groups = [paths for paths in fingerprints.values() if len(paths) > 1]
     if duplicate_groups:
         issue_counts["duplicate_fingerprint"] += sum(len(group) for group in duplicate_groups)

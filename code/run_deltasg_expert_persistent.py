@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 import traceback
@@ -209,6 +210,7 @@ def main():
     parser.add_argument("--max-task-object-displacement", type=float, default=0.05)
     parser.add_argument("--min-manipulation-height", type=float, default=0.10)
     parser.add_argument("--max-manipulation-height", type=float, default=1.55)
+    parser.add_argument("--sample-timeout", type=int, default=180)
     args = parser.parse_args()
     if (args.input_json or args.input_root) and not args.output_root:
         parser.error("--output-root is required with --input-json or --input-root")
@@ -219,6 +221,13 @@ def main():
         scene, robot = _sample_identity(run, args.backend)
         rows.append((scene, robot, input_path, output_dir, run))
     rows.sort(key=lambda row: (row[0], row[1], str(row[2])))
+    if any(
+        record.get("object_type") == "cloth"
+        for _, _, _, _, run in rows
+        for record in ((run.get("task_environment") or {}).get("added_objects") or [])
+    ):
+        with expert.gm.unlocked():
+            expert.gm.USE_GPU_DYNAMICS = True
     preload_cohorts = _compatible_preload_cohorts(rows, args.backend)
 
     env = None
@@ -267,14 +276,20 @@ def main():
             execute_args.robot = robot
             execute_args.preloaded_delta_names = preloaded_names
             output_dir.mkdir(parents=True, exist_ok=True)
-            env, result = expert.execute(
-                run,
-                input_path,
-                output_dir,
-                execute_args,
-                env=env,
-                persistent=True,
-            )
+            if args.sample_timeout > 0:
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                signal.alarm(args.sample_timeout)
+            try:
+                env, result = expert.execute(
+                    run,
+                    input_path,
+                    output_dir,
+                    execute_args,
+                    env=env,
+                    persistent=True,
+                )
+            finally:
+                signal.alarm(0)
             environment_key = key
         except Exception as exc:
             try:

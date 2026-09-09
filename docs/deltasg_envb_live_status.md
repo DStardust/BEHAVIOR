@@ -1,0 +1,237 @@
+# Env-B Repair and Runtime Evidence
+
+Updated: 2026-09-08. Workspace: `BEHAVIOR_envbc_release`.
+
+## Acceptance
+
+### 2026-09-08 14:05 CST checkpoint
+
+- `envb_30min_20260908`: generation finished 3/4 slots. Independent expert
+  `envb_30min_expert_20260908`: 2/3 accepted (dishes, broken object), fire failed
+  navigation to the fire source. This is 2/4 requested slots end-to-end, not full
+  Env-B completion. One expert environment load; 452.6 seconds for three inputs.
+- Fire extinguisher separated floor selection is runtime verified: 442/729
+  candidates survived filtering, accepted target/tool AABB gap 1.60055 m.
+  Added exact expert-navigation preflight for spawned fire sources after this
+  failure; this additional fix is NOT yet runtime verified.
+- `envb_navfit2_20260908` uses container-size pairing and navigation preflight.
+  Official Inside still rejects some sock/hamper and shard/bin pairs. Outer size
+  compatibility alone is insufficient; no predicate substitution is allowed.
+- User authorized laundry-only low grasp. Generator and expert now share a
+  0.04 m AABB-centre minimum for collect_dirty_clothes clothing categories.
+  Other objects/tasks retain their configured minima. Visibility, navigation,
+  collision and official Inside checks remain required. Tests: 336 passed.
+  `envb_laundry4cm_20260908` tmux on single GPU1 is validating this change;
+  runtime completion is pending, not VERIFIED. LLM qwen3.8-max remains enabled.
+- Report: `code/outputs/envb_report_latest_20260908/index.html`, two new accepted
+  examples plus one explicitly legacy fire example. README distinguishes the
+  old close-placement fire from current layout policy. Raw pre/post RGB only;
+  these are symbolic state-supervision examples, not physical VLA trajectories.
+
+Generation acceptance is not expert acceptance. Count an expert sample only
+when its result has `accepted=true`, official final predicates pass, and the
+observation / scene-integrity audit passes. These runs use `oracle_symbolic`,
+not continuous physically controlled manipulation.
+
+## Completed Runtime Checks
+
+- `code/outputs/envb_replay_fix_20260908`: 5 expert attempts, 1 accepted
+  (fire). Broken-object and dirty-clothes failed official `Inside`; dishes
+  failed initial stain replay / particle-system reset. Not a successful batch.
+- `code/outputs/envb_dishes_fix_20260908`: 2 attempts, 0 accepted.
+  Both failed `Covered(stain)=True` initial replay. No manipulation was reached.
+  This disproves collision-hold reordering alone as a complete fix.
+
+## Current Changes
+
+- Activate collisions before reconstructing official initial anomaly states;
+  only then hold symbolic grasp targets.
+- Clear noninitial particle systems while the simulator is stopped, before
+  rebuilding physics views. The previous playing-mode cleanup invalidated views.
+- Check the official destination volume and exercise official `Inside` during
+  generation; restore the entire simulation state afterwards. Audit rejects
+  new container tasks without successful preflight evidence. Old accepted JSON
+  files must not be relabeled with fabricated preflight results.
+- Save official rigid-object stain/dirt particle local poses, scales and link
+  attachments. Expert and visualization restore this snapshot instead of
+  randomly resampling it. Old JSON without a snapshot retains official sampling.
+  Snapshot restoration still requires the official `Covered` predicate.
+- Synchronize physics before ray-based Covered sampling after replay teleports.
+- Fingerprint generated objects by category/model/location, not run-specific
+  names. Ignore particle rendering details when detecting duplicate tasks.
+  Include anomaly carriers in diversity reports; exclude support furniture.
+- Fix Env-C family balancing; the multiscene runner optionally includes Env-A
+  through `ENVA_NUM` and permits distinct repeated task types in Env-C.
+- Reject failed anomaly setup before camera rendering. Env-B preparation and
+  selection now honor per-task skip sets. These two changes were made after
+  the current generation process started and require a fresh generation run.
+- Preserve destination-preflight evidence in standardized task validation.
+  The auditor also reads the root validation in early anomaly.v1 exports;
+  a failed task-level preflight cannot be overridden by a successful root one.
+
+Static regression: 329 tests passed; `git diff --check` passed.
+
+## In Progress
+
+`tmux`: `envb_snapshot_20260908`
+
+Output: `code/outputs/envb_snapshot_20260908`
+
+Single GPU 1, Ihlen_1_int, 4 requested Env-B samples, all four anomaly families,
+expert replay enabled. LLM explicitly `qwen3.8-max`. Official camera placement,
+2-3 global cameras; no markers. Child proxy variables are unset by the GPU
+wrapper, not in the parent agent environment.
+
+Generation finished: 3/4 requested slots accepted, 10 raw attempts. Generation
+audit: 3/3 clean, no duplicate fingerprints. Dirty-clothes exhausted retries;
+failures include official Inside preflight and floor navigation reachability.
+Accepted targets: mug ehnmxj (20 saved stain particles), beeswax_candle ouzkdj,
+broken_light_bulb cugtye with trash_can wklill (official Inside preflight true).
+The earlier trash_can candidate had a fillable meta link but failed actual
+sampling; therefore absent annotations are not the general failure mechanism.
+
+Expert replay finished: 1/3 accepted (fire), 25% of requested generation slots.
+Broken object failed navigation at step 1: no stand-off satisfied the route,
+clearance, visibility and 1.15 m gates. Dishes restored the snapshot successfully
+and reached WIPE at step 4, but its immediate Covered postcondition was stale:
+the official setter reads the old value internally before removing particles,
+repopulating the same-step cache. Added explicit state.clear_cache after WIPE.
+Replay of all three inputs now runs in `envb_expert_cachefix_20260908`, output
+`code/outputs/envb_expert_cachefix_20260908`. This does not repair broken-object
+navigation or dirty-clothes generation. These changes are not yet fully
+end-to-end runtime VERIFIED. In particular, a destination
+preflight rejection is honest filtering, not proof that container placement has
+been repaired. Inspect actual container meta links before changing placement.
+
+Cache-fix replay finished: 2/3 expert accepted (dishes and fire), broken object
+still rejected at navigation step 1. One environment load, 362.5 seconds total.
+This is 50% end-to-end against the original four requested slots, not a broad
+success-rate estimate. The exact previously failing dish now completes all four
+steps. Robot RGB was inspected at pre-WIPE and post-WIPE; the cup remains stable,
+but dirt contrast is weak in the robot image. Official state success must not be
+treated as proof of visually obvious dirt. Improve particle visibility and add
+visual evidence checks before claiming the visible-anomaly requirement complete.
+
+Remaining: dirty-clothes container / floor-route compatibility; broken-object
+generation-vs-expert navigation consistency; strong pre/post dirt visibility;
+machine-wash recipe runtime coverage; multiscene and multi-seed regression.
+
+## Release Gate - 2026-09-09
+
+`code/outputs/envb_fire3_release_20260909` generated three Ihlen_1 fire samples.
+Generation and camera audit passed 3/3 with no issues. Fire-source diversity was
+`rice_cooker`, `beeswax_candle`, and `space_heater`; two extinguisher models were
+used. The generator now tries only live navigation-component rooms plus the fire
+room. Topology-only rooms remain diagnostic evidence instead of consuming about
+90 seconds each in an official floor-placement attempt that cannot route.
+
+The original expert batch accepted 2/3. The remaining sample reached and grasped
+the extinguisher, then rejected the route to the fire. Generation had preflighted
+that exact transition while excluding the carried extinguisher from obstacle
+inflation, but replay omitted `held_object` from the final waypoint call. The
+extinguisher therefore blocked its own route after grasp. Replay now uses the
+same carried-object exclusion and the saved, already-preflighted transition when
+the post-grasp observation stance differs by at most 0.5 m. Live route planning,
+the 1.15 m operation envelope, visibility, scene-integrity, robot-stability, and
+official `OnFire=False` postconditions remain required.
+
+Targeted replay of that previously rejected sample is verified at
+`code/outputs/runtime_checks/envb_fire_route_recovery_v3_20260909`: all four
+steps accepted, `qa_eligible=true`, scene integrity passed, expert audit 1/1,
+and process exit code 0. Step 3 records the recovered preflight start pose
+`[0.2, -0.6, 0.56092]`. This is two original batch passes plus one targeted
+repair verification, not a fresh whole-batch 3/3 replay.
+
+The multiscene E2E script now treats a phase as complete only when its `.exit`
+file contains zero. Failed generation, audit, or expert phases rerun on resume;
+successful phases remain skipped. The exact tmux invocation and monitor command
+are documented in `docs/deltasg_usage.md`.
+
+Static release gate before upstream integration: 356 tests passed; Python
+compilation, shell syntax, and `git diff --check` passed. Next runtime priority
+is the broken-object official `OnTop` sweep transition; broom and dustpan task
+semantics must remain intact.
+
+## Presentation Export and Follow-up
+
+`code/outputs/envb_report_20260908/index.html` contains the two accepted examples
+(fire and hand-wash), all four steps' pre/post observations, robot RGB and both
+global camera RGB streams, plus generation and expert JSON. Images are copied
+unaltered at 640x480. `code/outputs/envb_report_20260908.tar.gz` is the portable
+package. The HTML explicitly identifies symbolic supervision and weak stain
+contrast, not continuous physical trajectories. All local image/data links
+were checked; fire global RGB and dish robot RGB were visually inspected.
+
+Follow-up tmux: `envb_remaining_20260908`, output
+`code/outputs/envb_remaining_20260908`. GPU 1, Ihlen_1_int, four requested samples
+limited to dirty_clothes and broken_object, then automatic expert replay.
+This run includes the skip-set and early-rejection fixes plus container/subject
+extent diagnostics. It is still running, not VERIFIED.
+
+## Household Layout Correction
+
+User review rejected the close sponge/dish and extinguisher/fire arrangement.
+The existing report is now explicitly labeled as legacy layout examples.
+Do not present those samples as validated realistic household storage.
+
+Generator now anchors hand-wash sponge/soap at the bound sink instead of the
+dirty dish. Policy: horizontal AABB-edge gap to dish >=0.4m and gap to sink
+<=1.0m, on an open support. Fire extinguisher is upright on a reachable floor,
+>=1.5m horizontal edge gap from fire; no improvised furniture fallback. These
+are dataset layout heuristics, not safety-code compliance claims. Constraints
+are evaluated at candidate selection, actual placement, and after warmup;
+operation reach remains 1.15m and navigation must connect the separate locations.
+
+333 static tests passed before the last small reused-tool check. Fresh runtime
+queued on GPU 1 in tmux `envb_layout_20260908`, output
+`code/outputs/envb_layout_20260908` (Ihlen_1_int, four requests, dishes/fire,
+then expert replay). Runtime outcome remains pending; the earlier remaining-task
+batch uses the old source loaded at its launch.
+
+## Next Acceptance Steps
+
+1. Finish this generation and expert run; record counts separately.
+2. Inspect every failure, especially official container-volume availability and
+   particle snapshot reconstruction. Check pre/post RGB and segmentation for
+   accepted samples. Do not weaken official predicates to increase counts.
+3. Repeat all Env-B recipe paths, then multiple seeds and scenes. Four task
+   families do not by themselves cover all alternative recipes or objects.
+4. Run Env-A/B/C diversity batches using the same validated source; report
+   unique task/model/location counts and expert acceptance, not only output files.
+
+## Verified Fire and Env-A Stability - 2026-09-08
+
+The fire visual is now the packaged `code/assets/Flame_Animation.usdz` flame
+combined with the official OmniGibson Flow emitter configured as a visible
+vertical smoke column. Generation and expert replay both record mode
+`deltasg_usdz_flame_smoke_column_v1`; audit requires the flame asset, visible
+flame and smoke, radius 0.18 m, upward velocity 1.5, and fade 0.12.
+
+Fire-extinguisher placement is floor-only, upright, and at least 1.5 m from the
+fire by horizontal AABB-edge distance. Reachable rooms other than the fire room
+are tried first; the fire room is the last fallback. A floor-placement control
+flow bug skipped the expert navigation preflight before breaking out of the
+candidate loop. Floor and support placements now use the same preflight,
+including the route from the extinguisher stance to the fire stance while the
+tool is held. `run_envbc_multiscene_e2e.sh` also sets the per-task retry limit to
+4, matching its existing per-sample limit, so a single anomaly family is not
+discarded after two strict placement rejections.
+
+Runtime evidence:
+
+- `code/outputs/enva_stability6_final_20260908`: Beechwood_0_int generated 6/6
+  representative Env-A tasks with zero rejected tasks. The independent audit
+  reports 6 runs, no issues, six distinct task names, and 2-3 global cameras.
+- `code/outputs/envb_fire_strict_final2_20260908`: Ihlen_1_int generated one
+  audited fire sample after two rejected attempts in the same process. The
+  accepted extinguisher-to-fire gap is 1.68 m and the serialized floor
+  navigation preflight contains both valid stances. Generation audit is 1/1.
+- The final expert replay is 1/1 accepted and QA-eligible. All four steps pass:
+  navigate to extinguisher, grasp it, navigate to fire, and extinguish. The
+  official `OnFire` postcondition is false; robot stability and scene integrity
+  pass with no moved native or stationary DeltaSG object. The expert audit has
+  no artifact or QA-gate violations.
+
+Static verification: 354 tests passed; Python compilation, shell syntax, and
+`git diff --check` passed. This is focused runtime evidence, not yet a broad
+multi-scene Env-B rate estimate.

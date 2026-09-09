@@ -45,8 +45,18 @@ from llm_client import create_llm_client
 import llm_client as llm_prompts
 from api import validate_robot_stability
 from deltasg_room_topology import nearby_door_rooms, traversable_room_pairs
-from deltasg_visual_effects import configure_on_fire_smoke_only, smoke_only_on_fire_record
+from deltasg_layout import evaluate_tool_layout, rigid_bbox_fits
+from deltasg_visual_effects import (
+    SMOKE_FLOW_WARMUP_STEPS,
+    covered_particle_record,
+    create_usdz_flame_smoke,
+    remove_usdz_flame,
+    set_covered_particles,
+    usdz_flame_smoke_record,
+)
 from deltasg_expert import (
+    INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS,
+    task_grasp_minimum,
     DEFAULT_MAX_MANIPULATION_HEIGHT,
     DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
     DEFAULT_MIN_MANIPULATION_HEIGHT,
@@ -188,6 +198,78 @@ PLANNED_RETRIEVAL_TASKS: set[str] = {
 # Flattened set of all task names for quick lookup
 ALL_VALID_TASK_NAMES: set[str] = {t for tasks in VALID_TASKS.values() for t in tasks}
 ENV_C_TYPES: tuple[str, ...] = ("retrieval_delivery", "open_close", "appliance", "fire")
+ENV_B_TYPES: tuple[str, ...] = ("fire", "dirty_dishes", "dirty_clothes", "broken_object")
+
+FIRE_SOURCE_CATEGORIES = frozenset({
+    "stove", "oven", "microwave", "toaster", "toaster_oven", "deep_fryer",
+    "electric_kettle", "rice_cooker", "instant_pot", "pressure_cooker", "crock_pot",
+    "coffee_maker", "espresso_machine", "waffle_maker", "flat_top_grill",
+    "gas_fireplace", "wood_fireplace", "space_heater", "sauna_heater", "radiator",
+    "charcoal_grill", "smoker", "lighter", "match", "match_box", "beeswax_candle",
+    "dip_candle", "pillar_candle", "spirit_lamp", "sparkler", "cigar", "cigarette",
+    "tobacco_pipe", "power_strip", "wall_socket", "clothes_dryer", "iron",
+    "hair_dryer", "desktop_computer", "laptop", "bottle_of_lighter_fluid", "fuel_can",
+    "spray_paint_can", "spray_can", "bottle_of_solvent", "bottle_of_paint_remover",
+})
+
+# Compact source assets that can be added to scenes which have no reachable
+# native fire source. Every entry is part of FIRE_SOURCE_CATEGORIES.
+SPAWNABLE_FIRE_SOURCE_CATEGORIES = (
+    "rice_cooker",
+    "space_heater",
+    "match_box",
+    "beeswax_candle",
+)
+
+ANOMALY_RESOLUTION_MAP = {
+    "fire": (
+        {"path_name": "use_extinguisher", "required_infrastructure": (),
+         "spawnable_tools": ("fire_extinguisher",)},
+    ),
+    "dirty_dishes": (
+        {"path_name": "machine_wash", "required_infrastructure": ("dishwasher",),
+         "spawnable_tools": ()},
+        {"path_name": "hand_wash", "required_infrastructure": ("sink", "faucet"),
+         "spawnable_tools": ("sponge", "bottle_of_dish_soap")},
+    ),
+    "dirty_clothes": (
+        {"path_name": "machine_wash_clothes", "required_infrastructure": ("washer",),
+         "spawnable_tools": ()},
+        {"path_name": "put_in_hamper", "required_infrastructure": (),
+         "spawnable_tools": ("hamper",)},
+        {"path_name": "put_on_cloth_basket", "required_infrastructure": (),
+         "spawnable_tools": ("cloth_basket",)},
+    ),
+    "broken_object": (
+        {"path_name": "sweep_up", "required_infrastructure": (),
+         "spawnable_tools": ("broom", "dustpan", "trash_can")},
+    ),
+}
+
+ENV_B_ANOMALY_ASSETS = {
+    "dirty_dishes": ("plate", "bowl", "mug"),
+    "dirty_clothes": ("t_shirt", "sock", "sweatshirt", "dress"),
+    "broken_object": ("broken_glass", "broken_light_bulb"),
+}
+
+ENV_B_TASK_NAMES = {
+    "fire": "respond_to_fire_emergency",
+    "dirty_dishes": "clean_dirty_dishes",
+    "dirty_clothes": "collect_dirty_clothes",
+    "broken_object": "clean_up_broken_object",
+}
+
+ENV_B_TOOL_ASSET_ALIASES = {
+    # BEHAVIOR has no category named cloth_basket. This is an explicit,
+    # metadata-visible substitution with a real fillable basket asset.
+    "cloth_basket": "wicker_basket",
+}
+
+ENV_B_INFRASTRUCTURE_ALIASES = {
+    "dishwasher": {"dishwasher"},
+    "sink": {"sink", "commercial_kitchen_sink", "furniture_sink"},
+    "washer": {"washer"},
+}
 
 # Retrieval tasks are intentionally limited to small, well-supported assets.
 # The LLM still selects and validates the task, but it must not substitute a
@@ -444,6 +526,12 @@ class OnlineDeltaSGEngine:
         self._prepared_native_target_id: str | None = None
         self._prepared_native_target: dict | None = None
         self._env_a_attempt_prepared = False
+        self._env_bc_attempt_prepared = False
+        self._env_b_attempt_counts: Counter[str] = Counter()
+        self._env_b_last_task = None
+        self._prepared_env_b_type: str | None = None
+        self._prepared_env_b_target_room: str | None = None
+        self._prepared_env_b_path_name: str | None = None
         self._enabled_categories: set[str] | None = None  # None = all categories
         self._llm_client = create_llm_client(
             api_key=self.config.llm_api_key,
@@ -1336,6 +1424,409 @@ class OnlineDeltaSGEngine:
             },
         }
 
+    def generate_env_b(self, target_room=None, env_b_types=None, skip_tasks=None):
+        """Generate one balanced, solvable Env-B anomaly sample."""
+        requested = tuple(env_b_types or ENV_B_TYPES)
+        invalid = sorted(set(requested) - set(ENV_B_TYPES))
+        if not requested or invalid:
+            raise ValueError(f"invalid Env-B types: {invalid or requested}")
+        requested = tuple(name for name in requested
+                          if ENV_B_TASK_NAMES[name] not in (skip_tasks or set()))
+
+        graph = self.snapshot()
+        feasible = []
+        for anomaly_type in requested:
+            if anomaly_type != "dirty_dishes" or self._available_env_b_resolution_paths(
+                anomaly_type, graph, target_room
+            ):
+                feasible.append(anomaly_type)
+        if not feasible:
+            raise RuntimeError(f"No requested Env-B anomaly has a valid solution in {self._scene_model()}")
+
+        successful = Counter(
+            sample.get("task")
+            for sample in self._checkpoint.get("successful_samples", [])
+        )
+        score = lambda name: (
+            successful.get(ENV_B_TASK_NAMES[name], 0),
+            self._env_b_attempt_counts[name],
+        )
+        prepared_type = self._prepared_env_b_type
+        prepared_room = self._prepared_env_b_target_room
+        self._prepared_env_b_type = None
+        self._prepared_env_b_target_room = None
+        if prepared_type in feasible:
+            anomaly_type = prepared_type
+            target_room = target_room or prepared_room
+        else:
+            self._prepared_env_b_path_name = None
+            best_score = min(score(name) for name in feasible)
+            candidates = [name for name in feasible if score(name) == best_score]
+            anomaly_type = self.rng.choice(sorted(candidates))
+        self._env_b_attempt_counts[anomaly_type] += 1
+        self._env_b_last_task = ENV_B_TASK_NAMES[anomaly_type]
+        print(f"[env-b] selected anomaly={anomaly_type} feasible={sorted(feasible)}", flush=True)
+        if anomaly_type == "fire":
+            return self.generate_env_b_fire(target_room=target_room)
+        return self.generate_env_b_anomaly(anomaly_type, target_room=target_room)
+
+    def generate_env_b_anomaly(self, anomaly_type, target_room=None):
+        """Generate a non-fire Env-B anomaly and its complete solution recipe."""
+        if anomaly_type not in ENV_B_ANOMALY_ASSETS:
+            raise ValueError(f"unsupported Env-B anomaly type: {anomaly_type!r}")
+        self._placed_on_support = {}
+        self._placement_support_map = {}
+        self._floor_placed_objects = set()
+        if self._env_bc_attempt_prepared:
+            self._env_bc_attempt_prepared = False
+        else:
+            self._cleanup_spawned_objects(prefer_reset=True)
+        self._pre_run_state = og.sim.dump_state(serialized=False)
+        before_graph = self.snapshot()
+        target_room = target_room or self._choose_room_with_objects(before_graph)
+        if not target_room:
+            raise RuntimeError("Env-B anomaly generation found no reachable target room")
+
+        paths = self._available_env_b_resolution_paths(anomaly_type, before_graph, target_room)
+        if not paths:
+            raise RuntimeError(
+                f"No solution recipe for {anomaly_type!r} in scene {self._scene_model()}"
+            )
+        prepared_path_name = self._prepared_env_b_path_name
+        self._prepared_env_b_path_name = None
+        prepared_paths = [
+            path for path in paths if path["path_name"] == prepared_path_name
+        ]
+        if prepared_paths:
+            recipe = copy.deepcopy(prepared_paths[0])
+            self._env_b_attempt_counts[
+                f"{anomaly_type}:{recipe['path_name']}"
+            ] += 1
+            print(
+                f"[env-b] resolution path={recipe['path_name']} "
+                f"available={[path['path_name'] for path in paths]} prepared=True",
+                flush=True,
+            )
+        else:
+            recipe = self._choose_env_b_resolution_path(anomaly_type, paths)
+        run_id = f"online_env_b_{anomaly_type}_{self._run_counter:04d}"
+        self._run_counter += 1
+
+        anomaly_category = self._choose_env_b_anomaly_category(anomaly_type)
+        anomaly_record = self._record_for_category(anomaly_category)
+        if anomaly_type == "dirty_clothes" and recipe["path_name"] != "machine_wash_clothes":
+            if anomaly_record.get("object_type") != "cloth":
+                container_category = "hamper" if recipe["path_name"] == "put_in_hamper" else "wicker_basket"
+                containers = self._env_b_model_sizes(container_category)
+                compatible = {}
+                for category in ENV_B_ANOMALY_ASSETS[anomaly_type]:
+                    models = [model for model, size in self._env_b_model_sizes(category).items()
+                              if any(rigid_bbox_fits(size, outer) for outer in containers.values())]
+                    if models:
+                        compatible[category] = models
+                if not compatible:
+                    raise RuntimeError(
+                        f"No installed rigid clothing fits {container_category}; use --allow-cloth"
+                    )
+                if anomaly_category not in compatible:
+                    anomaly_category = self.rng.choice(sorted(compatible))
+                    anomaly_record = self._record_for_category(anomaly_category)
+                anomaly_record["_preferred_models"] = compatible[anomaly_category]
+        anomaly_record["_expert_navigation_preflight"] = True
+        if anomaly_type == "dirty_clothes":
+            anomaly_record["_prefer_support_first"] = True
+            anomaly_record["_grasp_task_name"] = "collect_dirty_clothes"
+            if anomaly_record.get("object_type") == "cloth":
+                anomaly_record["_cloth_configuration"] = "crumpled"
+        if anomaly_type in {"dirty_dishes", "broken_object"}:
+            anomaly_record["_open_surface_only"] = True
+        anomaly = self.add_task_asset(
+            record=anomaly_record,
+            object_name=f"{run_id}_anomaly",
+            target_room=target_room,
+            semantic_role="task_object",
+            cached_graph=before_graph,
+        )
+        if not anomaly.get("ok"):
+            raise RuntimeError(f"Could not place {anomaly_type} carrier: {anomaly.get('errors')}")
+        anomaly_obj = self.env.scene.object_registry("name", anomaly["object_name"], None)
+        if anomaly_type in {"dirty_dishes", "dirty_clothes"}:
+            particle_system = "stain" if anomaly_type == "dirty_dishes" else "dirt"
+            abnormal_state = set_covered_particles(anomaly_obj, particle_system, True)
+            visual_effect = covered_particle_record(particle_system)
+            state_payload = {
+                "covered": {"system": particle_system, "value": True,
+                            "particle_snapshot": abnormal_state.get("particle_snapshot")}
+            }
+        else:
+            abnormal_state = {
+                "ok": anomaly.get("category") in {"broken_glass", "broken_light_bulb"},
+                "state": "broken",
+                "value": True,
+                "source": "native_broken_asset",
+            }
+            visual_effect = {
+                "mode": "native_broken_asset_v1",
+                "source": anomaly.get("category"),
+                "broken_visible": True,
+            }
+            state_payload = {"broken": True}
+
+        preferred_position = (
+            (anomaly.get("final_pose_before_warmup") or {}).get("position")
+            or (anomaly.get("pose") or {}).get("position")
+        )
+        solution_objects = []
+        # Validate collection containers before importing the rest of the tool bundle.
+        for requested_category in sorted(recipe["spawnable_tools"], key=lambda name: name != "trash_can"):
+            actual_category = ENV_B_TOOL_ASSET_ALIASES.get(requested_category, requested_category)
+            record = self._record_for_category(actual_category)
+            if actual_category in {"sponge", "hamper", "wicker_basket", "trash_can", "broom", "dustpan"}:
+                record["_expert_navigation_preflight"] = True
+            if actual_category in {"broom", "dustpan"}:
+                record["_prefer_support_first"] = True
+                record["_open_surface_only"] = True
+            tool_position = None
+            if recipe["path_name"] == "hand_wash":
+                sink_id = recipe["infrastructure_bindings"]["sink"]["id"]
+                sink = self.env.scene.object_registry("name", sink_id)
+                tool_position = sink.get_position_orientation()[0].tolist()
+                record["_open_surface_only"] = True
+                record["_household_layout"] = {
+                    "name": "cleaning_station_v1", "target": anomaly_obj.name,
+                    "min_target_gap": 0.4, "anchor": sink_id, "max_anchor_gap": 1.0,
+                }
+            if actual_category in {"fire_extinguisher", "sponge", "broom", "dustpan"}:
+                role = "interaction_tool"
+            elif actual_category in {"hamper", "wicker_basket", "trash_can"}:
+                role = "task_destination"
+                record["_force_floor_only"] = True
+                record["_prefer_floor_first"] = True
+                preferred_models = self._floor_compatible_models(actual_category)
+                if anomaly_type == "dirty_clothes":
+                    subject_size = sorted(anomaly_obj.aabb_extent.tolist())
+                    sizes = self._env_b_model_sizes(actual_category)
+                    preferred_models = [model for model in preferred_models if model in sizes
+                                        and rigid_bbox_fits(subject_size, sizes[model])]
+                    if not preferred_models:
+                        raise RuntimeError(f"No floor-graspable {actual_category} fits clothing {anomaly_obj.model}")
+                if preferred_models:
+                    record["_preferred_models"] = preferred_models
+            else:
+                role = "candidate_solution"
+            container_models = list(record.get("_preferred_models") or [])
+            inside_key = f"inside:{anomaly_obj.category}:{anomaly_obj.model}:{actual_category}:"
+            container_trials = min(3, len(container_models)) if role == "task_destination" else 1
+            if not container_trials:
+                raise RuntimeError(f"No eligible collection container model: {actual_category}")
+            for container_attempt in range(container_trials):
+                if role == "task_destination":
+                    minimum_failures = min(self._env_b_attempt_counts[inside_key + model]
+                                           for model in container_models)
+                    record["_preferred_models"] = [model for model in container_models
+                                                   if self._env_b_attempt_counts[inside_key + model] == minimum_failures]
+                solution = self.add_task_asset(
+                    record=record,
+                    object_name=f"{run_id}_{actual_category}",
+                    target_room=target_room,
+                    semantic_role=role,
+                    cached_graph=self.snapshot(),
+                    preferred_position=tool_position,
+                    avoid_position=(preferred_position if role == "task_destination" else None),
+                )
+                if role != "task_destination" or not solution.get("ok"):
+                    break
+                live = self.env.scene.object_registry("name", solution["object_name"])
+                destination_predicate = (
+                    "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
+                )
+                inside_check = self._preflight_env_b_inside(
+                    anomaly_obj, live, predicate=destination_predicate
+                )
+                solution["destination_preflight"] = inside_check
+                if inside_check["ok"]:
+                    break
+                self._env_b_attempt_counts[inside_key + live.model] += 1
+                solution["ok"] = False
+                if solution.get("reused"):
+                    break
+                container_models = [model for model in container_models if model != live.model]
+                self._forget_generated_placement(solution)
+                self._remove_object_safe_by_name(solution["object_name"])
+                if not container_models:
+                    break
+            if role == "task_destination" and not solution.get("ok"):
+                raise RuntimeError(f"Collection container exhausted: {solution}")
+            if solution.get("ok") and record.get("_household_layout"):
+                live = self.env.scene.object_registry("name", solution["object_name"])
+                checked = self._validate_household_tool_layout(live, record["_household_layout"])
+                solution.setdefault("placement", {})["household_layout"] = checked
+                solution["ok"] = checked["ok"]
+            solution["requested_category"] = requested_category
+            solution["asset_substitution"] = (
+                {"requested": requested_category, "actual": actual_category}
+                if requested_category != actual_category
+                else None
+            )
+            solution_objects.append(solution)
+
+        all_created = [anomaly, *solution_objects]
+        settling_names = [
+            item["object_name"]
+            for item in all_created
+            if item.get("ok") and not item.get("reused")
+        ]
+        settling_start = {name: self._object_position(name) for name in settling_names}
+        self._step(self.config.warmup_steps)
+        settling = self._collect_settling_report(
+            settling_names, start_positions=settling_start
+        )
+        required_tools_ok = all(item.get("ok") for item in solution_objects)
+        for item in solution_objects:
+            saved_layout = (item.get("placement") or {}).get("household_layout")
+            if item.get("ok") and saved_layout:
+                live = self.env.scene.object_registry("name", item["object_name"])
+                checked = self._validate_household_tool_layout(live, saved_layout["policy"])
+                item["placement"]["household_layout"] = checked
+                required_tools_ok = required_tools_ok and checked["ok"]
+        destination_preflight = {"ok": True, "required": False}
+        sweep_preflight = {"ok": True, "required": False}
+        if required_tools_ok and recipe["path_name"] != "hand_wash":
+            destination_name = next(
+                (item["object_name"] for item in solution_objects
+                 if item.get("semantic_role") == "task_destination"),
+                None,
+            )
+            if destination_name is None:
+                bindings = recipe.get("infrastructure_bindings") or {}
+                destination_name = (bindings.get("dishwasher") or bindings.get("washer") or {}).get("id")
+            destination = self.env.scene.object_registry("name", destination_name, None)
+            destination_predicate = (
+                "OnTop" if recipe["path_name"] == "put_on_cloth_basket" else "Inside"
+            )
+            destination_preflight = self._preflight_env_b_inside(
+                anomaly_obj, destination, predicate=destination_predicate
+            )
+            if anomaly_type == "broken_object":
+                dustpan_name = next(
+                    item["object_name"] for item in solution_objects
+                    if item.get("requested_category") == "dustpan"
+                )
+                dustpan = self.env.scene.object_registry("name", dustpan_name, None)
+                sweep_preflight = self._preflight_env_b_inside(
+                    anomaly_obj, dustpan, predicate="OnTop"
+                )
+        ok = bool(
+            abnormal_state.get("ok")
+            and required_tools_ok
+            and destination_preflight["ok"]
+            and sweep_preflight["ok"]
+            and settling.get("all_within_threshold")
+        )
+        if not ok:
+            raise RuntimeError(
+                f"Env-B setup rejected anomaly={anomaly_type} "
+                f"abnormal_state_ok={abnormal_state.get('ok')} "
+                f"abnormal_state_errors={abnormal_state.get('errors', [])} "
+                f"required_tools_ok={required_tools_ok} "
+                f"destination_preflight={destination_preflight} "
+                f"sweep_preflight={sweep_preflight} "
+                f"settling_ok={settling.get('all_within_threshold')}"
+            )
+        after_graph = self.snapshot()
+        if recipe["path_name"] == "hand_wash":
+            source_name = next(item["object_name"] for item in solution_objects if item["category"] == "sponge")
+            route_targets = [source_name, anomaly_obj.name]
+        elif anomaly_type == "broken_object":
+            solutions_by_requested = {
+                item["requested_category"]: item for item in solution_objects
+            }
+            route_targets = [
+                solutions_by_requested["broom"]["object_name"],
+                anomaly_obj.name,
+                solutions_by_requested["dustpan"]["object_name"],
+                solutions_by_requested["trash_can"]["object_name"],
+            ]
+        else:
+            route_targets = [anomaly_obj.name, destination_name]
+        navigation_preflight = self._preflight_env_b_navigation_sequence(route_targets)
+        anomaly_node = copy.deepcopy(anomaly.get("delta_node") or {})
+        anomaly_node.update(
+            {
+                "id": anomaly["object_name"],
+                "type": "added_anomaly_object",
+                "semantic_roles": ["goal_target", "anomaly"],
+                "states": state_payload,
+                "visual_effect": visual_effect,
+            }
+        )
+        valid_solutions = [item for item in solution_objects if item.get("ok")]
+        delta_sg = {
+            "delta_id": run_id,
+            "operation": f"online_add_{anomaly_type}_anomaly",
+            "nodes": [
+                anomaly_node,
+                *(item.get("delta_node") for item in valid_solutions),
+            ],
+            "edges": [
+                *(anomaly.get("delta_edges") or []),
+                *(edge for item in valid_solutions for edge in item.get("delta_edges", [])),
+            ],
+            "resolution_recipe": self._serializable_env_b_recipe(recipe),
+        }
+        validation = {
+            "ok": ok,
+            "anomaly_type": anomaly_type,
+            "abnormal_state": abnormal_state,
+            "resolution_recipe": self._serializable_env_b_recipe(recipe),
+            "solution_objects": solution_objects,
+            "destination_preflight": destination_preflight,
+            "sweep_preflight": sweep_preflight,
+            "navigation_preflight": navigation_preflight,
+            "settling": settling,
+        }
+        task_instance = self._build_env_b_anomaly_task_instance(
+            run_id, anomaly_type, target_room, anomaly, recipe, solution_objects
+        )
+        state_changed = {
+            "object_id": anomaly["object_name"],
+            "category": anomaly.get("category"),
+            "room_id": target_room,
+            "states": state_payload,
+            "semantic_roles": ["goal_target", "anomaly"],
+            "visual_effect": visual_effect,
+        }
+        task_environment = self._build_task_environment_record(
+            env_id=run_id,
+            env_type="Env-B",
+            task_instance=task_instance,
+            target_room=target_room,
+            created_objects=all_created,
+            validation=validation,
+            delta_sg=delta_sg,
+            graph=after_graph,
+            state_changed_objects=[state_changed],
+        )
+        return {
+            "schema_version": "online_deltasg_env_b_anomaly.v1",
+            "run_id": run_id,
+            "ok": validation["ok"],
+            "task_environment": task_environment,
+            "base_scene": task_environment["base_scene"],
+            "task": task_environment["task"],
+            "robot": task_environment["robot"],
+            "camera": task_environment["camera"],
+            "added_objects": task_environment["added_objects"],
+            "task_objects": task_environment["task_objects"],
+            "solution_plan": task_environment["solution_plan"],
+            "before_graph": before_graph,
+            "delta_sg": delta_sg,
+            "validation": validation,
+            "after_graph": after_graph,
+            "task_instance": task_instance,
+            "debug": {"before_graph": before_graph, "after_graph": after_graph},
+        }
+
     def generate_env_b_fire(self, target_room=None):
         """
         Create an Env-B event scene online by setting a live object on fire and
@@ -1344,10 +1835,13 @@ class OnlineDeltaSGEngine:
         self._placed_on_support = {}
         self._placement_support_map = {}
         self._floor_placed_objects = set()
-        self._cleanup_spawned_objects(prefer_reset=True)
+        if self._env_bc_attempt_prepared:
+            self._env_bc_attempt_prepared = False
+        else:
+            self._cleanup_spawned_objects(prefer_reset=True)
         self._pre_run_state = og.sim.dump_state(serialized=False)
         before_graph = self.snapshot()
-        target_room = target_room or self._choose_room_with_objects(before_graph)
+        target_room = target_room or self._choose_fire_source_room(before_graph) or self._choose_room_with_objects(before_graph)
         fire_target = self._choose_fire_target(before_graph, target_room)
         if fire_target is None:
             fire_target = self._spawn_fire_target(target_room)
@@ -1355,33 +1849,80 @@ class OnlineDeltaSGEngine:
         run_id = f"online_env_b_fire_{self._run_counter:04d}"
         self._run_counter += 1
         fire_state = self._set_boolean_state(fire_target["name"], object_states.OnFire, True)
-        smoke_effect = configure_on_fire_smoke_only(
-            self.env.scene.object_registry("name", fire_target["name"], None)
+        flame_effect = create_usdz_flame_smoke(
+            self.env.scene.object_registry("name", fire_target["name"], None),
+            effect_id=fire_target["name"],
         )
+        if flame_effect.get("ok"):
+            self._step(SMOKE_FLOW_WARMUP_STEPS)
+        flame_record = usdz_flame_smoke_record(
+            effect_id=flame_effect.get("effect_id") or fire_target["name"],
+            target_height=flame_effect.get("target_height"),
+        )
+        extinguisher_rooms = self._fire_extinguisher_room_candidates(target_room)
         extinguisher_record = self._record_for_category("fire_extinguisher")
-        # The dataset models do not share one authored upright axis.  Forcing a
-        # single floor orientation made some models slide or topple during the
-        # warmup.  Prefer a validated scene support so the tool remains stable
-        # and inside the robot's manipulation-height band; floor remains a
-        # normal fallback when no support works.
-        extinguisher_record["_prefer_support_first"] = True
+        extinguisher_record["_expert_navigation_preflight"] = True
+        extinguisher_record["_next_navigation_target"] = fire_target["name"]
+        # Every fire-extinguisher model in the installed BEHAVIOR asset set is
+        # authored along local +X (the handle is at the positive end). Rotate
+        # +X onto world +Z so a floor fallback is upright and graspable instead
+        # of lying below the manipulation-height gate. Store it on a reachable
+        # floor position separated from the fire, not on the burning surface.
+        extinguisher_record["_force_floor_only"] = True
+        extinguisher_record["_prefer_floor_first"] = True
+        extinguisher_record["_household_layout"] = {
+            "name": "separate_fire_safety_tool_v1", "target": fire_target["name"],
+            "min_target_gap": 1.5,
+        }
+        extinguisher_record["_placement_orientation_xyzw"] = [
+            0.0,
+            -math.sqrt(0.5),
+            0.0,
+            math.sqrt(0.5),
+        ]
         fire_position = (
             (fire_target.get("final_pose_before_warmup") or {}).get("position")
             or (fire_target.get("pose") or {}).get("position")
         )
-        extinguisher = self.add_task_asset(
-            record=extinguisher_record,
-            object_name=f"{run_id}_extinguisher",
-            target_room=target_room,
-            semantic_role="interaction_tool",
-            preferred_position=fire_position,
-        )
-        settling_names = [extinguisher["object_name"]] if extinguisher.get("ok") and not extinguisher.get("reused") else []
+        extinguisher = None
+        room_failures = []
+        for extinguisher_room in extinguisher_rooms:
+            candidate = self.add_task_asset(
+                record=extinguisher_record,
+                object_name=f"{run_id}_extinguisher",
+                target_room=extinguisher_room,
+                semantic_role="interaction_tool",
+                avoid_position=fire_position,
+            )
+            if candidate.get("ok"):
+                extinguisher = candidate
+                break
+            room_failures.append({
+                "room": extinguisher_room,
+                "errors": candidate.get("errors") or [],
+            })
+        if extinguisher is None:
+            extinguisher = {"ok": False, "errors": room_failures}
+        if not extinguisher.get("ok"):
+            raise RuntimeError(f"Fire safety tool placement failed: {extinguisher.get('errors')}")
+        extinguisher["placement"]["room_candidates"] = extinguisher_rooms
+        extinguisher["placement"]["room_failures"] = room_failures
+        solution_support = None
+        settling_names = [
+            item["object_name"]
+            for item in (solution_support, extinguisher)
+            if item and item.get("ok") and not item.get("reused")
+        ]
         settling_start = {name: self._object_position(name) for name in settling_names}
         self._step(self.config.warmup_steps)
         settling = self._collect_settling_report(
             settling_names, start_positions=settling_start
         )
+        if extinguisher.get("ok"):
+            live = self.env.scene.object_registry("name", extinguisher["object_name"])
+            checked = self._validate_household_tool_layout(live, extinguisher_record["_household_layout"])
+            extinguisher["placement"]["household_layout"] = checked
+            extinguisher["ok"] = extinguisher["ok"] and checked["ok"]
         if not settling.get("all_within_threshold"):
             print(
                 f"[env-b-fire] extinguisher settling rejected: "
@@ -1391,10 +1932,15 @@ class OnlineDeltaSGEngine:
         after_graph = self.snapshot()
         ok = bool(
             fire_state.get("ok")
-            and smoke_effect.get("ok")
+            and flame_effect.get("ok")
             and extinguisher.get("ok")
             and settling.get("all_within_threshold")
         )
+        added_delta_records = [
+            item
+            for item in (solution_support, extinguisher)
+            if item and item.get("ok")
+        ]
         delta_sg = {
             "delta_id": run_id,
             "operation": "online_add_fire_anomaly",
@@ -1406,22 +1952,27 @@ class OnlineDeltaSGEngine:
                     "room_id": target_room,
                     "semantic_roles": ["goal_target", "anomaly"],
                     "states": {"on_fire": True},
-                    "anomaly_phase": "smoke_warning",
-                    "visual_effect": smoke_only_on_fire_record(),
+                    "anomaly_phase": "visible_flame",
+                    "visual_effect": flame_record,
                 },
-                extinguisher.get("delta_node"),
+                *(item.get("delta_node") for item in added_delta_records),
             ],
             "edges": [
                 {"source": f"room::{target_room}", "target": fire_target["name"], "relation": "contains"},
-                *extinguisher.get("delta_edges", []),
+                *(
+                    edge
+                    for item in added_delta_records
+                    for edge in item.get("delta_edges", [])
+                ),
             ],
         }
         validation = {
             "ok": ok,
             "fire_state": fire_state,
-            "smoke_effect": smoke_effect,
+            "flame_effect": flame_effect,
             "fire_target": fire_target,
             "solution_tool": extinguisher,
+            "solution_support": solution_support,
             "settling": settling,
         }
         task_instance = self._build_fire_task_instance(run_id, target_room, fire_target["name"], extinguisher)
@@ -1431,7 +1982,11 @@ class OnlineDeltaSGEngine:
             task_instance=task_instance,
             target_room=target_room,
             created_objects=[
-                item for item in (fire_target if fire_target.get("spawned") else None, extinguisher)
+                item for item in (
+                    fire_target if fire_target.get("spawned") else None,
+                    solution_support,
+                    extinguisher,
+                )
                 if item and item.get("ok")
             ],
             validation=validation,
@@ -1444,8 +1999,8 @@ class OnlineDeltaSGEngine:
                     "room_id": target_room,
                     "states": {"on_fire": True},
                     "semantic_roles": ["goal_target", "anomaly"],
-                    "anomaly_phase": "smoke_warning",
-                    "visual_effect": smoke_only_on_fire_record(),
+                    "anomaly_phase": "visible_flame",
+                    "visual_effect": flame_record,
                 }
             ],
         )
@@ -1523,11 +2078,10 @@ class OnlineDeltaSGEngine:
         env_b["task_instance"]["task_type"] = "Env-C"
         env_b["task_instance"]["primary_behavior_task"] = "select_fire_suppression_tool"
         env_b["task_instance"]["instruction"] = (
-            "Respond to the smoke warning using the most suitable tool before visible flames develop."
+            "Respond to the visible fire using the most suitable suppression tool."
         )
         env_b["task_instance"]["semantic_constraints"] = [
-            "early_fire_prevention",
-            "smoke_warning_grounding",
+            "visible_fire_grounding",
             "fire_suppression_affordance",
         ]
         env_b["task_instance"]["semantic_reasoning"] = {
@@ -1606,11 +2160,15 @@ class OnlineDeltaSGEngine:
         if not choices:
             choices = ["fire"]
 
-        used = Counter(
-            ((sample.get("task") or "").split("::", 1)[0])
-            for sample in self._checkpoint.get("successful_samples", [])
-            if sample.get("task")
-        )
+        used = Counter()
+        for sample in self._checkpoint.get("successful_samples", []):
+            task_name = sample.get("task") or ""
+            if task_name == "select_fire_suppression_tool":
+                used["fire"] += 1
+            else:
+                for family, tasks in VALID_TASKS.items():
+                    if task_name in tasks:
+                        used[family] += 1
         min_used = min(used.get(item, 0) for item in choices)
         type_name = self.rng.choice(sorted(item for item in choices if used.get(item, 0) == min_used))
         if type_name == "fire":
@@ -2039,16 +2597,24 @@ class OnlineDeltaSGEngine:
             cached_graph: Optional pre-computed graph from generate_env_a to avoid re-snapshotting.
         """
         category = self._choose_category(record)
+        minimum_height = task_grasp_minimum(
+            record.get("_grasp_task_name"), category, self.config.min_manipulation_height
+        )
         result = {
             "ok": False,
             "object_name": object_name,
             "category": category,
             "synset": record["synset"],
+            "object_type": record.get("object_type") or "rigid",
             "semantic_role": semantic_role,
             "placement": None,
             "errors": [],
         }
-        manipulated_object = semantic_role in {"task_object", "interaction_tool"}
+        manipulated_object = semantic_role in {
+            "task_object",
+            "interaction_tool",
+            "task_destination",
+        }
 
         # Pre-check: placement cache — skip known failing pairs
         try:
@@ -2101,6 +2667,11 @@ class OnlineDeltaSGEngine:
                 category=category,
                 model=model,
                 prim_type=prim_type,
+                load_config=(
+                    {"default_point_configuration": record["_cloth_configuration"]}
+                    if prim_type == PrimType.CLOTH and record.get("_cloth_configuration")
+                    else None
+                ),
                 in_rooms=target_room,
                 # NOTE: kinematic_only is intentionally NOT set here. It only takes
                 # effect with fixed_base=True (see compute_kinematic_only in
@@ -2199,14 +2770,21 @@ class OnlineDeltaSGEngine:
                     preferred_placement["support_candidates"] = fallback_nodes
                     placement = preferred_placement
             floor_candidates = []
+            placement_orientation = record.get("_placement_orientation_xyzw")
+            if placement_orientation is not None:
+                obj.set_position_orientation(orientation=th.tensor(placement_orientation, dtype=th.float32))
+                og.sim.render()
             generated_support_fixture = semantic_role == "task_support"
             # A task object may use floor as a last resort, but it is accepted
             # only after its live AABB proves that the grasp point is inside
             # the expert robot's manipulation-height band.
             task_floor_eligible = not manipulated_object or self._floor_fallback_allowed(record, category)
             if (
-                generated_support_fixture
-                or self._floor_fallback_allowed(record, category)
+                not record.get("_open_surface_only")
+                and (
+                    generated_support_fixture
+                    or self._floor_fallback_allowed(record, category)
+                )
             ) and task_floor_eligible:
                 for _ in range(3):
                     floor_placement = self._build_floor_placement(
@@ -2244,6 +2822,15 @@ class OnlineDeltaSGEngine:
                 candidates.append(placement)
             elif not primary_is_floor or task_floor_eligible:
                 candidates.append(placement)
+            if (
+                not generated_support_fixture
+                and record.get("_prefer_support_first")
+            ):
+                # Try the best scene support first, then move to independently
+                # validated floor poses. Previously floor-preferring tools such
+                # as fire extinguishers lost every floor candidate here, so a
+                # failed support left a nonexistent object for camera coverage.
+                candidates.extend(floor_candidates)
             for alt_support in (
                 [] if generated_support_fixture
                 else placement.get("support_candidates", [])[:self.config.max_fallback_supports]
@@ -2254,13 +2841,31 @@ class OnlineDeltaSGEngine:
                 alt_placement = self._build_placement_for_support(record, target_room, alt_support, graph=placement_graph)
                 if alt_placement:
                     candidates.append(alt_placement)
-            if not generated_support_fixture and not self._category_prefers_floor(category):
+            if (
+                not generated_support_fixture
+                and not self._category_prefers_floor(category)
+                and not record.get("_prefer_support_first")
+            ):
                 # Only allow floor placement for categories that reasonably go on the floor.
                 # Do not use floor as a universal last resort: plates, food, knives, cups, etc.
                 # should fail placement rather than becoming invalid task data.
                 candidates.extend(floor_candidates)
             if semantic_role == "task_object" and self.config.target_placement_mode == "floor":
                 candidates = floor_candidates
+            if record.get("_force_floor_only"):
+                candidates = floor_candidates
+
+            if record.get("_household_layout"):
+                policy = record["_household_layout"]
+                target = self.env.scene.object_registry("name", policy["target"])
+                anchor = self.env.scene.object_registry("name", policy["anchor"]) if policy.get("anchor") else None
+                position = obj.get_position_orientation()[0]
+                lower, upper = obj.aabb
+                candidates = [candidate for candidate in candidates if evaluate_tool_layout(
+                    (lower - position + th.tensor(candidate["pose"]["position"]),
+                     upper - position + th.tensor(candidate["pose"]["position"])),
+                    target.aabb, policy, anchor.aabb if anchor is not None else None,
+                )["ok"]]
 
             if manipulated_object:
                 for candidate in candidates:
@@ -2323,6 +2928,45 @@ class OnlineDeltaSGEngine:
             # the same process poison the physics view, so measure it here
             # instead of relying on the after-the-fact relation timeout log.
             official_fallback = {"calls": 0, "seconds": 0.0}
+
+            def validate_expert_navigation(placement_attempt, placed_object):
+                if not record.get("_expert_navigation_preflight"):
+                    return True
+                from run_deltasg_expert import (
+                    _connected_observation_pose,
+                    _target_framing_distance,
+                )
+                from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
+
+                try:
+                    robot = self.env.robots[0]
+                    pose = _connected_observation_pose(
+                        self.env, robot, placed_object,
+                        preferred_distance=_target_framing_distance(placed_object, robot=robot),
+                        require_route=True, route_clearance_margin=0.0,
+                        route_target=placed_object, max_target_aabb_distance=1.15,
+                    )
+                    preflight = {"ok": True, "pose": pose.tolist()}
+                    if record.get("_next_navigation_target"):
+                        next_target = self.env.scene.object_registry(
+                            "name", record["_next_navigation_target"]
+                        )
+                        next_pose = _connected_observation_pose(
+                            self.env, robot, next_target,
+                            preferred_distance=_target_framing_distance(next_target, robot=robot),
+                            require_route=True, route_clearance_margin=0.0,
+                            route_target=next_target, max_target_aabb_distance=1.15,
+                            start_pose=pose, held_object=placed_object,
+                        )
+                        preflight["next_target"] = next_target.name
+                        preflight["next_pose"] = next_pose.tolist()
+                    placement_attempt["expert_navigation_preflight"] = preflight
+                    return True
+                except ActionPrimitiveError as exc:
+                    result["errors"].append({
+                        "error": "expert_navigation_preflight", "detail": str(exc)
+                    })
+                    return False
 
             for attempt_idx, placement_attempt in enumerate(candidates):
                 if attempt_idx >= max_attempts:
@@ -2402,7 +3046,11 @@ class OnlineDeltaSGEngine:
                         exclude_names=None,
                         margin=0.02,
                         target_room=target_room,
-                        ignore_floor_coverings=generated_support_fixture or manipulated_object,
+                        ignore_floor_coverings=(
+                            generated_support_fixture
+                            or manipulated_object
+                            or self._category_allows_floor(category)
+                        ),
                     )
                     if not overlapping:
                         # Keep still to prevent floor impact
@@ -2454,7 +3102,7 @@ class OnlineDeltaSGEngine:
                             })
                             continue
                         manipulation_height = self._validate_floor_manipulation_height(
-                            obj, floor_height
+                            obj, floor_height, minimum_height
                         )
                         if manipulated_object and not manipulation_height["eligible"]:
                             print(
@@ -2471,7 +3119,7 @@ class OnlineDeltaSGEngine:
                             })
                             continue
                         primary_view_error = self._direct_floor_primary_view_error(
-                            manipulation_height["relative_height"]
+                            manipulation_height["relative_height"], minimum_height
                         )
                         if manipulated_object and primary_view_error:
                             print(
@@ -2487,6 +3135,8 @@ class OnlineDeltaSGEngine:
                                 "manipulation_height": manipulation_height,
                                 "support": "__floor__",
                             })
+                            continue
+                        if not validate_expert_navigation(placement_attempt, obj):
                             continue
                         placed = True
                         chosen_placement = copy.deepcopy(placement_attempt)
@@ -2569,6 +3219,13 @@ class OnlineDeltaSGEngine:
                         self._failed_placement_cache.add((category, support_id))
                         continue
 
+                if record.get("_household_layout"):
+                    layout = self._validate_household_tool_layout(obj, record["_household_layout"])
+                    placement_attempt["household_layout"] = layout
+                    if not layout["ok"]:
+                        result["errors"].append({"error": "household_tool_layout", "detail": layout})
+                        continue
+
                 if manipulated_object:
                     floor_height = self._floor_height_for_position(
                         obj.get_position_orientation()[0]
@@ -2578,6 +3235,9 @@ class OnlineDeltaSGEngine:
                         DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT
                         if self.config.solvability_profile == "physical_control"
                         else self.config.min_manipulation_height
+                    )
+                    min_portable_height = task_grasp_minimum(
+                        record.get("_grasp_task_name"), category, min_portable_height
                     )
                     portable_height = evaluate_manipulation_height(
                         "GRASP",
@@ -2619,7 +3279,7 @@ class OnlineDeltaSGEngine:
                         obj.get_position_orientation()[0]
                     )
                     manipulation_height = self._validate_floor_manipulation_height(
-                        obj, floor_height
+                        obj, floor_height, minimum_height
                     )
                     if not manipulation_height["eligible"]:
                         result["errors"].append({
@@ -2704,6 +3364,8 @@ class OnlineDeltaSGEngine:
                     continue
 
                 # All checks passed
+                if not validate_expert_navigation(placement_attempt, obj):
+                    continue
                 if attempt_idx > 0:
                     print(f"\n  attempt {attempt_idx+1}/{max_attempts} [{attempt_label}]: OK",
                           flush=True)
@@ -2773,14 +3435,495 @@ class OnlineDeltaSGEngine:
 
         return result
 
+    def _env_b_model_sizes(self, category):
+        root = Path(get_dataset_path("behavior-1k-assets")) / "objects" / category
+        sizes = {}
+        for model in get_all_object_category_models(category=category):
+            path = root / model / "misc" / "metadata.json"
+            if path.is_file():
+                size = json.loads(path.read_text())["bbox_size"]
+                if len(size) == 3 and all(math.isfinite(v) and v > 0 for v in size):
+                    sizes[model] = size
+        return sizes
+
+    def _validate_household_tool_layout(self, obj, policy):
+        target = self.env.scene.object_registry("name", policy["target"])
+        anchor = self.env.scene.object_registry("name", policy["anchor"]) if policy.get("anchor") else None
+        return evaluate_tool_layout(obj.aabb, target.aabb, policy, anchor.aabb if anchor is not None else None)
+
+    def _preflight_env_b_inside(self, obj, destination, predicate="Inside"):
+        """Test an official collection relation and restore the initial anomaly."""
+        from omnigibson.utils.object_state_utils import m as sampling_macros
+
+        state_cls = object_states.Inside if predicate == "Inside" else object_states.OnTop
+        result = {"ok": False, "required": True, "predicate": predicate,
+                  "subject": obj.name, "object": getattr(destination, "name", None)}
+        if destination is None:
+            return result
+        result["subject_model"] = getattr(obj, "model", None)
+        result["destination_model"] = getattr(destination, "model", None)
+        if predicate == "Inside":
+            result["container_links"] = [
+                name for name, link in destination.links.items()
+                if link.is_meta_link and link.meta_link_type in {"fillable", "openfillable"}
+            ]
+            if not result["container_links"]:
+                result["reason"] = "missing_official_container_volume"
+                return result
+            result["subject_extent"] = obj.aabb_extent.tolist()
+            result["container_extents"] = {}
+            for name in result["container_links"]:
+                points = destination.links[name].visual_boundary_points_world
+                result["container_extents"][name] = (
+                    (points.max(dim=0).values - points.min(dim=0).values).tolist()
+                    if len(points) else None
+                )
+        saved = og.sim.dump_state(serialized=False)
+        high = sampling_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS
+        low = sampling_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS
+        try:
+            with sampling_macros.unlocked():
+                sampling_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = 2
+                sampling_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = (
+                    INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate == "Inside" else 2
+                )
+            if object_states.Open in destination.states:
+                destination.states[object_states.Open].set_value(True, fully=True)
+            changed = bool(obj.states[state_cls].set_value(destination, True))
+            obj.states[state_cls].clear_cache()
+            reached = bool(obj.states[state_cls].get_value(destination))
+            result.update(setter_return=changed, predicate_after_set=reached,
+                          sampling_attempts={
+                              "high": 2,
+                              "low": INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate == "Inside" else 2,
+                          })
+            result["ok"] = changed and reached
+        finally:
+            with sampling_macros.unlocked():
+                sampling_macros.DEFAULT_HIGH_LEVEL_SAMPLING_ATTEMPTS = high
+                sampling_macros.DEFAULT_LOW_LEVEL_SAMPLING_ATTEMPTS = low
+            og.sim.load_state(saved, serialized=False)
+        print(f"[env-b] destination preflight={result}", flush=True)
+        return result
+
+    def _preflight_env_b_navigation_sequence(self, target_names):
+        """Plan the complete pickup/delivery route after every tool is present."""
+        from run_deltasg_expert import _connected_observation_pose, _target_framing_distance
+
+        robot = self.env.robots[0]
+        start_pose = None
+        held_object = None
+        approaches = []
+        for name in target_names:
+            target = self.env.scene.object_registry("name", name)
+            pose = _connected_observation_pose(
+                self.env, robot, target,
+                preferred_distance=_target_framing_distance(target, robot=robot),
+                require_route=True, route_clearance_margin=0.0,
+                route_target=target, max_target_aabb_distance=1.15,
+                start_pose=start_pose, held_object=held_object,
+            )
+            approaches.append({"target": name, "pose": pose.tolist()})
+            start_pose = pose
+            if held_object is None:
+                held_object = target
+        return {"ok": True, "approaches": approaches, "robot_moved": False}
+
+    def _infrastructure_candidates(
+        self, infrastructure, graph, target_room=None, require_reachable=True
+    ):
+        aliases = set(ENV_B_INFRASTRUCTURE_ALIASES.get(infrastructure, {infrastructure}))
+        candidates = []
+        for node in graph.get("nodes", []):
+            if node.get("type") != "object" or str(node.get("id", "")).startswith("online_env_"):
+                continue
+            category = str(node.get("category") or "").lower()
+            matches = category in aliases
+            if infrastructure == "faucet":
+                matches = "faucet" in category
+            if not matches:
+                continue
+            position = (node.get("pose") or {}).get("position")
+            bbox = node.get("bbox") or {}
+            lower, upper = bbox.get("min"), bbox.get("max")
+            rooms = set(node.get("rooms") or [])
+            if not position or not lower or not upper or not rooms:
+                continue
+            if require_reachable:
+                approach = self._validate_task_approach_position(
+                    position,
+                    rooms,
+                    target_aabb_xy=(lower[:2], upper[:2]),
+                    target_object_id=node.get("id"),
+                )
+                if not approach.get("ok"):
+                    continue
+            else:
+                approach = {"ok": None, "reason": "pending_target_conditioned_spawn"}
+            item = copy.deepcopy(node)
+            item["robot_approach"] = approach
+            candidates.append(item)
+        candidates.sort(
+            key=lambda node: (
+                0 if target_room in set(node.get("rooms") or []) else 1,
+                str(node.get("category") or ""),
+                str(node.get("id") or ""),
+            )
+        )
+        return candidates
+
+    def _available_env_b_resolution_paths(
+        self, anomaly_type, graph, target_room=None, require_reachable=True
+    ):
+        available = []
+        for recipe in ANOMALY_RESOLUTION_MAP.get(anomaly_type, ()):
+            bindings = {}
+            valid = True
+            for infrastructure in recipe["required_infrastructure"]:
+                if infrastructure == "faucet" and "sink" in bindings:
+                    sink = bindings["sink"]
+                    if "ToggledOn" in set(sink.get("available_states") or []):
+                        bindings["faucet"] = sink
+                        continue
+                candidates = self._infrastructure_candidates(
+                    infrastructure,
+                    graph,
+                    target_room=target_room,
+                    require_reachable=require_reachable,
+                )
+                if not candidates:
+                    valid = False
+                    break
+                bindings[infrastructure] = candidates[0]
+            if valid:
+                item = copy.deepcopy(recipe)
+                item["infrastructure_bindings"] = bindings
+                available.append(item)
+        return available
+
+    def prepare_env_b_robot_spawn(self, env_b_types=None, target_room=None, skip_tasks=None):
+        """Select an under-covered Env-B type before robot spawn.
+
+        Infrastructure-dependent anomalies must not be declared infeasible only
+        because an ordinary random spawn landed in another traversability
+        component. Select a real fixture first, then let stabilize_robot_spawn
+        establish the same-room 1.15 m operation pose used by validation.
+        """
+        requested = tuple(name for name in (env_b_types or ENV_B_TYPES)
+                          if ENV_B_TASK_NAMES.get(name) not in (skip_tasks or set()))
+        graph = self.snapshot()
+        successful = Counter(
+            sample.get("task")
+            for sample in self._checkpoint.get("successful_samples", [])
+        )
+
+        def score(name):
+            return (
+                successful.get(ENV_B_TASK_NAMES[name], 0),
+                self._env_b_attempt_counts[name],
+                0 if name == "dirty_dishes" else 1,
+                name,
+            )
+
+        self._prepared_env_b_type = None
+        self._prepared_env_b_target_room = None
+        self._prepared_env_b_path_name = None
+        for anomaly_type in sorted(requested, key=score):
+            if anomaly_type != "dirty_dishes":
+                self._prepared_env_b_type = anomaly_type
+                return None
+            paths = self._available_env_b_resolution_paths(
+                anomaly_type,
+                graph,
+                target_room=target_room,
+                require_reachable=False,
+            )
+            if not paths:
+                continue
+            prior = Counter(
+                (sample.get("diversity") or {}).get("solution_path")
+                for sample in self._checkpoint.get("successful_samples", [])
+            )
+            path_score = lambda path: (
+                prior.get(path["path_name"], 0),
+                self._env_b_attempt_counts[
+                    f"{anomaly_type}:{path['path_name']}"
+                ],
+                path["path_name"],
+            )
+            recipe = min(paths, key=path_score)
+            bindings = recipe.get("infrastructure_bindings") or {}
+            fixture = bindings.get("dishwasher") or bindings.get("sink")
+            if fixture is None:
+                continue
+            fixture_rooms = list(fixture.get("rooms") or [])
+            fixture_room = target_room or (fixture_rooms[0] if fixture_rooms else None)
+            self._prepared_env_b_type = anomaly_type
+            self._prepared_env_b_target_room = fixture_room
+            self._prepared_env_b_path_name = recipe["path_name"]
+            print(
+                f"[env-b] preparing anomaly={anomaly_type} "
+                f"path={recipe['path_name']} fixture={fixture.get('id')} "
+                f"room={fixture_room}",
+                flush=True,
+            )
+            return fixture.get("id")
+        return None
+
+    def _choose_env_b_resolution_path(self, anomaly_type, paths):
+        prior = Counter(
+            (sample.get("diversity") or {}).get("solution_path")
+            for sample in self._checkpoint.get("successful_samples", [])
+        )
+        def score(path):
+            key = f"{anomaly_type}:{path['path_name']}"
+            return prior.get(path["path_name"], 0), self._env_b_attempt_counts[key]
+        best = min(score(path) for path in paths)
+        choices = [path for path in paths if score(path) == best]
+        selected = copy.deepcopy(self.rng.choice(choices))
+        self._env_b_attempt_counts[f"{anomaly_type}:{selected['path_name']}"] += 1
+        print(
+            f"[env-b] resolution path={selected['path_name']} "
+            f"available={[path['path_name'] for path in paths]}",
+            flush=True,
+        )
+        return selected
+
+    def _choose_env_b_anomaly_category(self, anomaly_type):
+        categories = [
+            category for category in ENV_B_ANOMALY_ASSETS[anomaly_type]
+            if self._category_has_models(category)
+        ]
+        if not categories:
+            raise RuntimeError(f"No installed asset for Env-B anomaly {anomaly_type!r}")
+        used = Counter()
+        for sample in self._checkpoint.get("successful_samples", []):
+            for category in (sample.get("diversity") or {}).get("target_categories") or []:
+                used[category] += 1
+        score = lambda category: (
+            used[category],
+            self._env_b_attempt_counts[f"asset:{anomaly_type}:{category}"],
+        )
+        minimum = min(score(category) for category in categories)
+        choices = sorted(category for category in categories if score(category) == minimum)
+        selected = self.rng.choice(choices)
+        self._env_b_attempt_counts[f"asset:{anomaly_type}:{selected}"] += 1
+        return selected
+
+    @staticmethod
+    def _serializable_env_b_recipe(recipe):
+        return {
+            "path_name": recipe["path_name"],
+            "required_infrastructure": list(recipe["required_infrastructure"]),
+            "spawnable_tools": list(recipe["spawnable_tools"]),
+            "infrastructure_bindings": {
+                key: {
+                    "object_id": node.get("id"),
+                    "category": node.get("category"),
+                    "room_ids": list(node.get("rooms") or []),
+                }
+                for key, node in recipe.get("infrastructure_bindings", {}).items()
+            },
+        }
+
+    def _build_env_b_anomaly_task_instance(
+        self, run_id, anomaly_type, target_room, anomaly, recipe, solution_objects
+    ):
+        anomaly_id = anomaly["object_name"]
+        anomaly_room = (anomaly.get("placement") or {}).get("room_id") or target_room
+        bindings = recipe.get("infrastructure_bindings") or {}
+        solutions_by_requested = {
+            item.get("requested_category") or item.get("category"): item
+            for item in solution_objects
+            if item.get("ok")
+        }
+
+        plan_objects = [
+            {
+                "object_id": anomaly_id,
+                "category": anomaly.get("category"),
+                "room": anomaly_room,
+                "semantic_role": "anomaly",
+            }
+        ]
+        for item in solution_objects:
+            if not item.get("ok"):
+                continue
+            plan_objects.append(
+                {
+                    "object_id": item["object_name"],
+                    "category": item.get("category"),
+                    "room": (item.get("placement") or {}).get("room_id") or target_room,
+                    "semantic_role": item.get("semantic_role"),
+                    "reference_only": item.get("semantic_role") == "candidate_solution",
+                    "requested_category": item.get("requested_category"),
+                }
+            )
+        for infrastructure, node in bindings.items():
+            object_id = node.get("id")
+            if object_id and not any(item["object_id"] == object_id for item in plan_objects):
+                plan_objects.append(
+                    {
+                        "object_id": object_id,
+                        "category": node.get("category"),
+                        "room": (node.get("rooms") or [target_room])[0],
+                        "semantic_role": "required_infrastructure",
+                        "reused": True,
+                        "available_states": list(node.get("available_states") or []),
+                    }
+                )
+
+        missing_tools = [
+            category
+            for category in recipe["spawnable_tools"]
+            if category not in solutions_by_requested
+        ]
+        if missing_tools:
+            return {
+                "task_id": f"{run_id}_task",
+                "task_type": "Env-B",
+                "primary_behavior_task": ENV_B_TASK_NAMES[anomaly_type],
+                "instruction": f"Resolve the visible {anomaly_type.replace('_', ' ')} anomaly.",
+                "target_room": target_room,
+                "plan_objects": plan_objects,
+                "task_objects": [],
+                "solution_plan": [],
+                "semantic_reasoning": {
+                    "anomaly_type": anomaly_type,
+                    "solution_path": recipe["path_name"],
+                    "resolution_recipe": self._serializable_env_b_recipe(recipe),
+                    "missing_solution_tools": missing_tools,
+                },
+            }
+
+        plan = []
+        actionable = []
+        if anomaly_type == "dirty_dishes" and recipe["path_name"] == "machine_wash":
+            destination = bindings["dishwasher"]
+            destination_id = destination["id"]
+            destination_room = (destination.get("rooms") or [target_room])[0]
+            plan = [
+                {"step_id": 1, "primitive": "MOVE", "nl": "Move to the dishwasher", "target_object": destination_id},
+                {"step_id": 2, "primitive": "INTERACT", "nl": "Open the dishwasher", "target_object": destination_id},
+                {"step_id": 3, "primitive": "MOVE", "nl": "Move to the dirty dish", "target_object": anomaly_id},
+                {"step_id": 4, "primitive": "PICK", "nl": "Pick up the dirty dish", "target_object": anomaly_id},
+                {"step_id": 5, "primitive": "MOVE", "nl": "Return to the dishwasher", "target_object": destination_id, "inventory": [anomaly_id]},
+                {"step_id": 6, "primitive": "PLACE", "nl": "Place the dirty dish inside the dishwasher", "target_object": destination_id, "placement_mode": "inside", "inventory": [anomaly_id]},
+                {"step_id": 7, "primitive": "INTERACT", "nl": "Close the dishwasher", "target_object": destination_id},
+                {"step_id": 8, "primitive": "INTERACT", "nl": "Turn on the dishwasher", "target_object": destination_id},
+            ]
+            actionable = [anomaly_id, destination_id]
+            instruction = "Load the dirty dish into the dishwasher and start the wash cycle."
+        elif anomaly_type == "dirty_dishes":
+            sponge = solutions_by_requested["sponge"]
+            sponge_id = sponge["object_name"]
+            plan = [
+                {"step_id": 1, "primitive": "MOVE", "nl": "Move to the sponge", "target_object": sponge_id},
+                {"step_id": 2, "primitive": "PICK", "nl": "Pick up the sponge", "target_object": sponge_id},
+                {"step_id": 3, "primitive": "MOVE", "nl": "Move to the dirty dish", "target_object": anomaly_id, "inventory": [sponge_id]},
+                {"step_id": 4, "primitive": "INTERACT", "nl": "Wipe the dirty dish clean with the sponge and dish soap", "tool_object": sponge_id, "target_object": anomaly_id, "inventory": [sponge_id]},
+            ]
+            actionable = [anomaly_id, sponge_id]
+            instruction = "Use the sponge and dish soap to clean the visibly dirty dish."
+        elif anomaly_type == "dirty_clothes":
+            if recipe["path_name"] == "machine_wash_clothes":
+                destination = bindings["washer"]
+                destination_id = destination["id"]
+                machine = True
+            else:
+                requested = "hamper" if recipe["path_name"] == "put_in_hamper" else "cloth_basket"
+                destination_record = solutions_by_requested[requested]
+                destination_id = destination_record["object_name"]
+                machine = False
+            plan = []
+            step_id = 1
+            if machine:
+                plan.extend([
+                    {"step_id": step_id, "primitive": "MOVE", "nl": "Move to the washer", "target_object": destination_id},
+                    {"step_id": step_id + 1, "primitive": "INTERACT", "nl": "Open the washer", "target_object": destination_id},
+                ])
+                step_id += 2
+            plan.extend([
+                {"step_id": step_id, "primitive": "MOVE", "nl": "Move to the dirty clothing", "target_object": anomaly_id},
+                {"step_id": step_id + 1, "primitive": "PICK", "nl": "Pick up the dirty clothing", "target_object": anomaly_id},
+                {"step_id": step_id + 2, "primitive": "MOVE", "nl": "Move to the laundry receptacle", "target_object": destination_id, "inventory": [anomaly_id]},
+                {"step_id": step_id + 3, "primitive": "PLACE", "nl": "Place the dirty clothing in the laundry collection area", "target_object": destination_id, "placement_mode": ("on_top" if recipe["path_name"] == "put_on_cloth_basket" else "inside"), "inventory": [anomaly_id]},
+            ])
+            if machine:
+                plan.extend([
+                    {"step_id": step_id + 4, "primitive": "INTERACT", "nl": "Close the washer", "target_object": destination_id},
+                    {"step_id": step_id + 5, "primitive": "INTERACT", "nl": "Turn on the washer", "target_object": destination_id},
+                ])
+            actionable = [anomaly_id, destination_id]
+            instruction = (
+                "Load the dirty clothing into the washer and start it."
+                if machine else "Collect the visibly dirty clothing in the laundry receptacle."
+            )
+        else:
+            broom_id = solutions_by_requested["broom"]["object_name"]
+            dustpan_id = solutions_by_requested["dustpan"]["object_name"]
+            trash_can = solutions_by_requested["trash_can"]
+            trash_id = trash_can["object_name"]
+            plan = [
+                {"step_id": 1, "primitive": "MOVE", "nl": "Move to the broom", "target_object": broom_id},
+                {"step_id": 2, "primitive": "PICK", "nl": "Pick up the broom", "target_object": broom_id},
+                {"step_id": 3, "primitive": "MOVE", "nl": "Move to the broken object", "target_object": anomaly_id, "inventory": [broom_id]},
+                {"step_id": 4, "primitive": "INTERACT", "nl": "Sweep the broken pieces into the dustpan with the broom", "target_object": anomaly_id, "tool_object": broom_id, "destination_object": dustpan_id, "inventory": [broom_id]},
+                {"step_id": 5, "primitive": "MOVE", "nl": "Move to the dustpan", "target_object": dustpan_id},
+                {"step_id": 6, "primitive": "PICK", "nl": "Pick up the dustpan containing the broken pieces", "target_object": dustpan_id},
+                {"step_id": 7, "primitive": "MOVE", "nl": "Move to the trash can", "target_object": trash_id, "inventory": [dustpan_id]},
+                {"step_id": 8, "primitive": "INTERACT", "nl": "Empty the broken pieces from the dustpan into the trash can", "target_object": trash_id, "tool_object": dustpan_id, "payload_object": anomaly_id, "inventory": [dustpan_id]},
+            ]
+            actionable = [anomaly_id, broom_id, dustpan_id, trash_id]
+            instruction = "Use the broom and dustpan to sweep up the broken pieces, then empty them into the trash can."
+
+        task_objects = [
+            {
+                "object_id": item["object_id"],
+                "category": item.get("category"),
+                "role": "goal_target" if item["object_id"] == anomaly_id else "resolution_object",
+            }
+            for item in plan_objects
+            if item["object_id"] in set(actionable)
+        ]
+        return {
+            "task_id": f"{run_id}_task",
+            "task_type": "Env-B",
+            "primary_behavior_task": ENV_B_TASK_NAMES[anomaly_type],
+            "instruction": instruction,
+            "target_room": target_room,
+            "plan_objects": plan_objects,
+            "task_objects": task_objects,
+            "solution_plan": plan,
+            "semantic_reasoning": {
+                "anomaly_type": anomaly_type,
+                "solution_path": recipe["path_name"],
+                "resolution_recipe": self._serializable_env_b_recipe(recipe),
+            },
+        }
+
     def _build_fire_task_instance(self, run_id, target_room, fire_object, extinguisher):
         ext_id = extinguisher["object_name"]
         return {
             "task_id": f"{run_id}_task",
             "task_type": "Env-B",
-            "primary_behavior_task": "respond_to_smoke_warning",
-            "instruction": "Respond to the smoke warning with the extinguisher before visible flames develop.",
+            "primary_behavior_task": "respond_to_fire_emergency",
+            "instruction": "Use the fire extinguisher to put out the visible fire.",
             "target_room": target_room,
+            "plan_objects": [
+                {
+                    "object_id": ext_id,
+                    "category": extinguisher["category"],
+                    "room": (extinguisher.get("placement") or {}).get("room_id") or target_room,
+                    "semantic_role": "interaction_tool",
+                },
+                {
+                    "object_id": fire_object,
+                    "category": "fire_target",
+                    "room": target_room,
+                    "semantic_role": "anomaly",
+                },
+            ],
             "task_objects": [
                 {"object_id": ext_id, "category": extinguisher["category"], "role": "interaction_tool"},
                 {"object_id": fire_object, "category": "fire_target", "role": "goal_target"},
@@ -2798,16 +3941,26 @@ class OnlineDeltaSGEngine:
                 {
                     "step_id": 4,
                     "primitive": "INTERACT",
-                    "nl": "Suppress the smoking ignition source",
+                    "nl": "Extinguish the visible fire",
                     "tool_object": ext_id,
                     "target_object": fire_object,
                     "inventory": [ext_id],
                 },
             ],
+            "semantic_reasoning": {
+                "anomaly_type": "fire",
+                "solution_path": "use_extinguisher",
+            },
         }
 
     def _choose_room_with_objects(self, graph):
-        reachable_rooms = set(self._robot_reachable_room_pixels())
+        # Placement and expert MOVE both use the furniture-inflated clearance
+        # map.  Selecting with the looser robot-footprint component can choose
+        # a room that is topologically connected but has no safe operation
+        # route, wasting every placement retry on no_navigation_route.
+        reachable_rooms = set(self._nav_clear_reachable_room_pixels())
+        if not reachable_rooms:
+            reachable_rooms = set(self._robot_reachable_room_pixels())
         counts = Counter()
         for node in graph.get("nodes", []):
             if node.get("type") == "object":
@@ -2825,17 +3978,84 @@ class OnlineDeltaSGEngine:
         ]
         return self.rng.choice(rooms) if rooms else None
 
+    def _choose_fire_source_room(self, graph):
+        reachable_rooms = set(self._robot_reachable_room_pixels())
+        rooms = []
+        for node in graph.get("nodes", []):
+            if node.get("type") != "object":
+                continue
+            if str(node.get("category") or "").lower() not in FIRE_SOURCE_CATEGORIES:
+                continue
+            if "OnFire" not in set(node.get("available_states") or []):
+                continue
+            position = (node.get("pose") or {}).get("position")
+            bbox = node.get("bbox") or {}
+            lower, upper = bbox.get("min"), bbox.get("max")
+            node_rooms = set(node.get("rooms") or [])
+            if not position or not lower or not upper or not node_rooms:
+                continue
+            approach = self._validate_task_approach_position(
+                position,
+                node_rooms,
+                target_aabb_xy=(lower[:2], upper[:2]),
+                target_object_id=node.get("id"),
+            )
+            if not approach.get("ok"):
+                continue
+            rooms.extend(
+                room for room in node_rooms
+                if not reachable_rooms or room in reachable_rooms
+            )
+        return self.rng.choice(sorted(set(rooms))) if rooms else None
+
     def _choose_different_room(self, graph, room):
         rooms = [node["name"] for node in graph.get("nodes", []) if node.get("type") == "room" and node["name"] != room]
         return self.rng.choice(sorted(rooms)) if rooms else None
+
+    def _fire_extinguisher_room_candidates(self, fire_room):
+        nav_clear = self._nav_clear_reachable_room_pixels()
+        robot_reachable = self._robot_reachable_room_pixels()
+        preferred = sorted(room for room, pixels in nav_clear.items() if room != fire_room and pixels)
+        topology_only = sorted(
+            room for room, pixels in robot_reachable.items()
+            if room != fire_room and pixels and room not in preferred
+        )
+        self.rng.shuffle(preferred)
+        candidates = preferred + [fire_room]
+        print(
+            f"[env-b-fire] fire_room={fire_room} extinguisher_room_candidates={candidates} "
+            f"nav_clear_alternatives={preferred} skipped_topology_only={topology_only}",
+            flush=True,
+        )
+        return candidates
 
     def _choose_fire_target(self, graph, target_room):
         candidates = []
         for node in graph.get("nodes", []):
             if node.get("type") != "object" or target_room not in node.get("rooms", []):
                 continue
-            if "OnFire" in node.get("available_states", []):
-                candidates.append(node)
+            if "OnFire" not in node.get("available_states", []):
+                continue
+            position = (node.get("pose") or {}).get("position")
+            bbox = node.get("bbox") or {}
+            lower = bbox.get("min")
+            upper = bbox.get("max")
+            if not position or not lower or not upper:
+                continue
+            approach = self._validate_task_approach_position(
+                position,
+                {target_room},
+                target_aabb_xy=(lower[:2], upper[:2]),
+                target_object_id=node["id"],
+            )
+            if approach.get("ok"):
+                candidate = copy.deepcopy(node)
+                candidate["robot_approach"] = approach
+                candidates.append(candidate)
+        candidates = [
+            node for node in candidates
+            if str(node.get("category") or "").lower() in FIRE_SOURCE_CATEGORIES
+        ]
         if not candidates:
             return None
         candidates.sort(key=lambda node: (node.get("category") or "", node["id"]))
@@ -2854,7 +4074,27 @@ class OnlineDeltaSGEngine:
         return selected
 
     def _spawn_fire_target(self, target_room):
-        record = self._record_for_category("plywood", fallback_category="book")
+        categories = [
+            category for category in SPAWNABLE_FIRE_SOURCE_CATEGORIES
+            if self._category_has_models(category)
+        ]
+        if not categories:
+            raise RuntimeError("No installed spawnable fire-source asset")
+        used = Counter()
+        for sample in self._checkpoint.get("successful_samples", []):
+            for category in (sample.get("diversity") or {}).get("target_categories") or []:
+                used[category] += 1
+        minimum = min(used[category] for category in categories)
+        category = self.rng.choice(sorted(
+            category for category in categories if used[category] == minimum
+        ))
+        record = self._record_for_category(category)
+        record["_prefer_support_first"] = category != "space_heater"
+        if category == "space_heater":
+            record["_force_floor_only"] = True
+        else:
+            record["_open_surface_only"] = True
+        record["_expert_navigation_preflight"] = True
         spawned = self.add_task_asset(
             record=record,
             object_name=f"online_env_b_fire_{self._run_counter:04d}_fire_target",
@@ -2863,6 +4103,21 @@ class OnlineDeltaSGEngine:
         )
         if not spawned["ok"]:
             raise RuntimeError(f"Could not spawn a fire target: {spawned['errors']}")
+        target_obj = self.env.scene.object_registry(
+            "name", spawned["object_name"], None
+        )
+        approach = (
+            self._validate_task_object_approach(target_obj, target_room=target_room)
+            if target_obj is not None
+            else {"ok": False, "reason": "spawned_fire_target_missing"}
+        )
+        if not approach.get("ok"):
+            self._forget_generated_placement(spawned)
+            self._remove_object_safe_by_name(spawned["object_name"])
+            raise RuntimeError(
+                f"Spawned fire target is not expert-reachable: {approach}"
+            )
+        spawned["robot_approach"] = approach
         spawned["name"] = spawned["object_name"]
         spawned["spawned"] = True
         return spawned
@@ -3372,7 +4627,7 @@ class OnlineDeltaSGEngine:
     def _remove_object_safe(self, obj):
         """Remove an object from the scene, swallowing errors."""
         try:
-            self.env.scene.remove_object(obj)
+            og.sim.batch_remove_objects([obj])
         except Exception:
             pass
 
@@ -3381,7 +4636,7 @@ class OnlineDeltaSGEngine:
         try:
             obj = self.env.scene.object_registry("name", name, None)
             if obj is not None:
-                self.env.scene.remove_object(obj)
+                og.sim.batch_remove_objects([obj])
         except Exception:
             pass
 
@@ -3514,21 +4769,54 @@ class OnlineDeltaSGEngine:
         return copy.deepcopy(self._base_graph_cache)
 
     def _remove_spawned_objects_by_prefix(self, step_after=True):
-        removed = 0
-        for obj in list(self._scene_objects()):
-            name = getattr(obj, "name", "")
-            if name.startswith("online_env_"):
-                try:
-                    self.env.scene.remove_object(obj)
-                    removed += 1
-                except Exception:
-                    pass
+        scene_objects = list(self._scene_objects())
+        spawned_objects = [
+            obj
+            for obj in scene_objects
+            if getattr(obj, "name", "").startswith("online_env_")
+        ]
+
+        # Clear state-owned effect prims before deleting their parent objects.
+        # Deleting a burning object or one carrying a Covered attachment group
+        # directly invalidates Isaac's tensor views and poisons every later run
+        # in the same process.
+        state_changed = False
+        active_systems = list(getattr(self.env.scene, "active_systems", {}).values())
+        for obj in scene_objects:
             for state_cls in (object_states.OnFire, object_states.Burnt):
                 try:
                     if state_cls in obj.states and obj.states[state_cls].get_value():
-                        obj.states[state_cls].set_value(False)
+                        state_changed = bool(obj.states[state_cls].set_value(False)) or state_changed
                 except Exception:
                     pass
+            if obj not in spawned_objects:
+                continue
+            try:
+                covered = obj.states.get(object_states.Covered)
+            except Exception:
+                covered = None
+            if covered is None:
+                continue
+            for system in active_systems:
+                try:
+                    if covered.get_value(system):
+                        state_changed = bool(covered.set_value(system, False)) or state_changed
+                except (AssertionError, ValueError):
+                    continue
+                except Exception:
+                    continue
+        if state_changed and og.sim.is_playing():
+            self._step(1)
+
+        remove_usdz_flame()
+        removed = 0
+        if spawned_objects:
+            # OmniGibson's batch context refreshes the physics simulation view
+            # once around the whole topology change. Sequential remove_object()
+            # calls can try to dump articulation state after a preceding USDZ or
+            # Flow edit has invalidated that view, poisoning the rest of a batch.
+            og.sim.batch_remove_objects(spawned_objects)
+            removed = len(spawned_objects)
         if removed:
             self._clear_usd_selection()
             if step_after:
@@ -3552,7 +4840,7 @@ class OnlineDeltaSGEngine:
         # Remove generated objects, then explicitly restore native poses. This
         # works across changed object topology and prevents cumulative drift.
         try:
-            self._remove_spawned_objects_by_prefix(step_after=False)
+            removed = self._remove_spawned_objects_by_prefix(step_after=False)
             if not og.sim.is_playing():
                 og.sim.play()
             scene_objects = {getattr(obj, "name", ""): obj for obj in self._scene_objects()}
@@ -3633,6 +4921,11 @@ class OnlineDeltaSGEngine:
             prefer_reset=not self.config.fast_env_a_cleanup
         )
         self._env_a_attempt_prepared = True
+
+    def begin_env_bc_attempt(self) -> None:
+        """Clean the previous Env-B/C sample before the runner stabilizes the robot."""
+        self._cleanup_spawned_objects(prefer_reset=True)
+        self._env_bc_attempt_prepared = True
 
     def _get_active_categories(self) -> dict[str, set[str]]:
         """Return the currently active task categories dict."""
@@ -4178,7 +5471,12 @@ class OnlineDeltaSGEngine:
             return False
 
     def _spawn_retrieval_source_support(
-        self, object_name, graph, preferred_room=None, max_local_attempts=6
+        self,
+        object_name,
+        graph,
+        preferred_room=None,
+        max_local_attempts=6,
+        min_surface_span=0.48,
     ):
         """Place a compact source support without restarting the whole task.
 
@@ -4207,7 +5505,7 @@ class OnlineDeltaSGEngine:
             }, None)
 
         compact_models = self._compact_support_models(
-            "coffee_table", min_surface_span=0.48
+            "coffee_table", min_surface_span=min_surface_span
         )
         compact_models.extend(
             model
@@ -6458,7 +7756,11 @@ class OnlineDeltaSGEngine:
         if support_node:
             receptacle = ((support_node.get("semantic") or {}).get("receptacle") or {})
             wants_inside = (record.get("edit_metadata", {}).get("receptacle") or {}).get("supports_inside")
-            if wants_inside and receptacle.get("supports_inside"):
+            if (
+                not record.get("_open_surface_only")
+                and wants_inside
+                and receptacle.get("supports_inside")
+            ):
                 mode = "inside"
             elif receptacle.get("supports_on_top"):
                 mode = "on_top"
@@ -6620,6 +7922,8 @@ class OnlineDeltaSGEngine:
             receptacle = ((node.get("semantic") or {}).get("receptacle") or {})
             if not receptacle.get("can_support"):
                 continue
+            if record.get("_open_surface_only") and not receptacle.get("supports_on_top"):
+                continue
 
             # Compute support surface area from bbox
             bbox = node.get("bbox") or {}
@@ -6705,8 +8009,14 @@ class OnlineDeltaSGEngine:
             graph = graph or self.snapshot()
             mode = "on_top"
             receptacle = ((support_node.get("semantic") or {}).get("receptacle") or {})
+            if record.get("_open_surface_only") and not receptacle.get("supports_on_top"):
+                return None
             wants_inside = (record.get("edit_metadata", {}).get("receptacle") or {}).get("supports_inside")
-            if wants_inside and receptacle.get("supports_inside"):
+            if (
+                not record.get("_open_surface_only")
+                and wants_inside
+                and receptacle.get("supports_inside")
+            ):
                 mode = "inside"
             elif receptacle.get("supports_on_top"):
                 mode = "on_top"
@@ -6933,6 +8243,19 @@ class OnlineDeltaSGEngine:
         traversable = trav_map._erode_trav_map(
             th.clone(trav_map.floor_map[floor]), robot=robot
         )
+        extra_clearance = float(self.config.expert_base_clearance_margin)
+        if extra_clearance > 0:
+            clearance_pixels = int(
+                math.ceil(extra_clearance / float(trav_map.map_resolution))
+            )
+            kernel_size = max(1, 2 * clearance_pixels + 1)
+            traversable = th.as_tensor(
+                cv2.erode(
+                    traversable.cpu().numpy(),
+                    np.ones((kernel_size, kernel_size), dtype=np.uint8),
+                ),
+                device=traversable.device,
+            )
         free = traversable.cpu().numpy() != 0
         robot_position, robot_orientation = robot.get_position_orientation()
         robot_position = np.asarray(robot_position.cpu(), dtype=float)
@@ -7259,7 +8582,8 @@ class OnlineDeltaSGEngine:
         placement["pose"]["position"] = position
         return floor_height
 
-    def _validate_floor_manipulation_height(self, obj, floor_height):
+    def _validate_floor_manipulation_height(self, obj, floor_height, minimum_height=None):
+        minimum_height = self.config.min_manipulation_height if minimum_height is None else minimum_height
         lo, hi, _ = self._safe_aabb(obj)
         if not lo or not hi:
             return {
@@ -7267,7 +8591,7 @@ class OnlineDeltaSGEngine:
                 "eligible": False,
                 "primitive": "GRASP",
                 "reason": "object AABB unavailable after floor placement",
-                "min_height": float(self.config.min_manipulation_height),
+                "min_height": float(minimum_height),
                 "max_height": float(self.config.max_manipulation_height),
             }
         return evaluate_manipulation_height(
@@ -7275,19 +8599,19 @@ class OnlineDeltaSGEngine:
             lo[2],
             hi[2],
             floor_height,
-            self.config.min_manipulation_height,
+            minimum_height,
             self.config.max_manipulation_height,
         )
 
-    def _direct_floor_primary_view_error(self, relative_height):
+    def _direct_floor_primary_view_error(self, relative_height, minimum_height=None):
         """Apply the floor-view prefilter for the active solvability profile."""
         if self.config.solvability_profile == "oracle_symbolic":
             # The symbolic expert still verifies the actual primary camera and
-            # may use a head-only look-at. Keep a geometric lower bound here,
-            # while reserving the stricter fixed-view bound for physical_control.
+            # may use a head-only look-at. Honor the configured manipulation
+            # floor here; the stricter fixed-view bound is for physical_control.
             return direct_floor_primary_view_error(
                 relative_height,
-                min_height=max(self.config.min_manipulation_height, 0.15),
+                min_height=self.config.min_manipulation_height if minimum_height is None else minimum_height,
             )
         return direct_floor_primary_view_error(relative_height)
 
@@ -7325,6 +8649,21 @@ class OnlineDeltaSGEngine:
                     trav_map = self.env.scene.trav_map
                     reference = room_center or preferred_position
                     ranked_pixels = list(pixels)
+                    # Enforce storage separation before the 96-pixel / 24-pose
+                    # shortlist, otherwise valid distant poses are never tested.
+                    policy = record.get("_household_layout")
+                    if policy:
+                        target = self.env.scene.object_registry("name", policy["target"])
+                        lower, upper = placement_obj.aabb
+                        origin = placement_obj.get_position_orientation()[0]
+                        ranked_pixels = [pixel for pixel in ranked_pixels if evaluate_tool_layout(
+                            (lower - origin + th.cat((trav_map.map_to_world(pixel), origin[2:3])),
+                             upper - origin + th.cat((trav_map.map_to_world(pixel), origin[2:3]))),
+                            target.aabb, policy,
+                        )["ok"]]
+                        print(f"[floor-layout] {placement_obj.name} separated_candidates={len(ranked_pixels)}/{len(pixels)}", flush=True)
+                        if not ranked_pixels:
+                            return None
                     if reference is not None:
                         reference_pixel = trav_map.world_to_map(
                             th.as_tensor(reference[:2], dtype=th.float32)
@@ -7483,6 +8822,18 @@ class OnlineDeltaSGEngine:
                     )
             if pixels:
                 trav_map = self.env.scene.trav_map
+                policy = record.get("_household_layout")
+                if policy and placement_obj is not None:
+                    target = self.env.scene.object_registry("name", policy["target"])
+                    lower, upper = placement_obj.aabb
+                    origin = placement_obj.get_position_orientation()[0]
+                    pixels = [pixel for pixel in pixels if evaluate_tool_layout(
+                        (lower - origin + th.cat((trav_map.map_to_world(pixel), origin[2:3])),
+                         upper - origin + th.cat((trav_map.map_to_world(pixel), origin[2:3]))),
+                        target.aabb, policy,
+                    )["ok"]]
+                    if not pixels:
+                        return None
                 reference = preferred_position if preferred_position is not None else room_center
                 if reference is not None:
                     reference_pixel = trav_map.world_to_map(
@@ -7551,7 +8902,8 @@ class OnlineDeltaSGEngine:
                 },
                 "pose_source": pose_source,
             }
-        except Exception:
+        except Exception as exc:
+            print(f"[floor-placement] candidate construction failed: {exc!r}", flush=True)
             return None
 
     def _hypothetical_support_has_operation_approach(
@@ -7674,10 +9026,21 @@ class OnlineDeltaSGEngine:
                     except Exception:
                         pass
                     if not is_obstacle:
-                        # Check if object is near the support (within 0.5m above or 0.2m below)
-                        if (ox_min < sup_x_max and ox_max > sup_x_min and
-                            oy_min < sup_y_max and oy_max > sup_y_min and
-                            oz_min < sup_z_top + 0.5 and oz_max > sup_z_top - 0.2):
+                        # Only geometry crossing the candidate object's live
+                        # vertical slab can occupy the top surface. Cabinet
+                        # bodies just below a countertop and wall cabinets well
+                        # above a short dish overlap its XY footprint but do not
+                        # obstruct placement on that countertop.
+                        placed_z_min = sup_z_top + 0.005
+                        placed_z_max = sup_z_top + obj_h + 0.02
+                        if (
+                            ox_min < sup_x_max
+                            and ox_max > sup_x_min
+                            and oy_min < sup_y_max
+                            and oy_max > sup_y_min
+                            and oz_min < placed_z_max
+                            and oz_max > placed_z_min
+                        ):
                             is_obstacle = True
                     if is_obstacle:
                         obstacles.append({
@@ -8583,6 +9946,7 @@ class OnlineDeltaSGEngine:
                     "category": item.get("category"),
                     "synset": item.get("synset"),
                     "model": item.get("model"),
+                    "object_type": item.get("object_type") or "rigid",
                     "semantic_roles": [item.get("semantic_role")] if item.get("semantic_role") else [],
                     "room_id": (item.get("placement") or {}).get("room_id"),
                     "placement": {
@@ -8591,6 +9955,8 @@ class OnlineDeltaSGEngine:
                         "support_category": (item.get("placement") or {}).get("support_category"),
                         "pose": (item.get("placement") or {}).get("pose"),
                         "pose_source": (item.get("placement") or {}).get("pose_source"),
+                        "household_layout": (item.get("placement") or {}).get("household_layout"),
+                        "expert_navigation_preflight": (item.get("placement") or {}).get("expert_navigation_preflight"),
                         "robot_approach": (item.get("placement") or {}).get("robot_approach"),
                         "manipulation_height": (item.get("placement") or {}).get(
                             "manipulation_height"
@@ -8627,6 +9993,9 @@ class OnlineDeltaSGEngine:
             if isinstance(validation.get("failed_objects"), list)
             else None,
             "settling": validation.get("settling"),
+            "destination_preflight": validation.get("destination_preflight"),
+            "sweep_preflight": validation.get("sweep_preflight"),
+            "navigation_preflight": validation.get("navigation_preflight"),
             "camera_coverage": validation.get("camera_coverage"),
             "robot_stability": validation.get("robot_stability"),
             "failure_summary": [
