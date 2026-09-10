@@ -267,6 +267,75 @@ def test_env_b_infrastructure_task_conditions_robot_spawn_on_fixture():
     assert "engine.prepare_env_b_robot_spawn(" in runner
     assert "preferred_target_name=preferred_target" in runner
     assert "preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE" in runner
+    assert 'spawn_report.get("preferred_target_satisfied", False)' in runner
+    assert "engine.reject_prepared_env_b_infrastructure(preferred_target)" in runner
+
+
+def test_env_b_rejects_only_the_exhausted_infrastructure_object():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    paths = source[
+        source.index("def _available_env_b_resolution_paths"):
+        source.index("def prepare_env_b_robot_spawn")
+    ]
+    assert "self._rejected_env_b_infrastructure" in paths
+    assert "def reject_prepared_env_b_infrastructure" in paths
+    assert "self._prepared_env_b_path_name = None" in paths
+    api = (CODE_DIR / "api.py").read_text(encoding="utf-8")
+    spawn_start = api.index("def stabilize_robot_spawn")
+    spawn = api[spawn_start:api.index("# =========================\n# Step2", spawn_start)]
+    assert '"preferred_target_satisfied"' in spawn
+    assert "preferred_target_name is None or candidate_kind == 0" in spawn
+
+
+def test_env_b_zero_candidate_dish_layout_rejects_only_bound_fixture():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert 'anomaly_type == "dirty_dishes" and no_placement_candidates' in generator
+    assert '"sink" if recipe["path_name"] == "hand_wash" else "dishwasher"' in generator
+    assert "self.reject_prepared_env_b_infrastructure(fixture.get(\"id\"))" in generator
+
+
+def test_env_b_inside_routes_match_the_expert_operation_envelope():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = source[
+        source.index("def generate_env_b_anomaly"):
+        source.index("def generate_env_b_fire")
+    ]
+    assert '"held_object": anomaly_obj.name' in generator
+    assert '"operation_relation": "inside"' in generator
+    assert 'recipe["path_name"] in {"machine_wash", "machine_wash_clothes"}' in generator
+    assert "self.reject_prepared_env_b_infrastructure(destination_name)" in generator
+
+
+def test_broken_cleanup_navigation_uses_the_sweep_receptacle_operation_point():
+    generation = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    generator = generation[
+        generation.index("elif anomaly_type == \"broken_object\":"):
+        generation.index("from omnigibson.action_primitives", generation.index("elif anomaly_type == \"broken_object\":"))
+    ]
+    assert '"operation_target": dustpan_name' in generator
+    assert '{"target": dustpan_name, "held_object": None}' in generator
+
+    expert = (CODE_DIR / "run_deltasg_expert.py").read_text(encoding="utf-8")
+    execute = expert[expert.index("def execute("):expert.index("def main()")]
+    assert 'elif next_step.primitive == "SWEEP_INTO":' in execute
+    assert "navigation_operation_point = sweep_destination.aabb_center" in execute
+    assert "navigation_view_point = (" in execute
+    assert "controller._deltasg_navigation_view_point = navigation_view_point" in execute
+    connected_pose = expert[
+        expert.index("def _connected_observation_pose("):
+        expert.index("def _container_operation_point")
+    ]
+    assert "view_target_position=None" in connected_pose
+    assert "float(view_target_position[1] - xy[1])" in connected_pose
+    assert "min_operation_target_distance=None" in connected_pose
+    assert "operation_target_distance < min_operation_target_distance" in connected_pose
+    policy = (CODE_DIR / "deltasg_expert.py").read_text(encoding="utf-8")
+    assert "SWEEP_CAMERA_MIN_OPERATION_DISTANCE = 0.75" in policy
+    assert "min_operation_target_distance=(" in generation
 
 
 def test_env_b_cleanup_bundle_marks_manipulated_tools_as_actions():
@@ -279,14 +348,16 @@ def test_env_b_cleanup_bundle_marks_manipulated_tools_as_actions():
     assert 'role = "candidate_solution"' in generator
 
 
-def test_env_b_visible_anomalies_only_use_open_support_surfaces():
+def test_env_b_dishes_use_open_surfaces_and_broken_pieces_use_floor():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     generator = source[
         source.index("def generate_env_b_anomaly"):
         source.index("def generate_env_b_fire")
     ]
-    assert 'anomaly_type in {"dirty_dishes", "broken_object"}' in generator
+    assert 'if anomaly_type == "dirty_dishes":' in generator
     assert 'anomaly_record["_open_surface_only"] = True' in generator
+    assert 'anomaly_record["_force_floor_only"] = True' in generator
+    assert 'anomaly_record["_floor_manipulation_primitive"] = "SWEEP_INTO"' in generator
     selection = source[
         source.index("def _choose_support_node"):
         source.index("def _validate_task_approach_position")
@@ -1510,9 +1581,12 @@ def test_floor_pose_sampling_filters_the_live_object_footprint_before_spawn():
     assert "center_offset = (live_lo + live_hi) * 0.5 - live_position" in builder
     assert "half_extent = (live_hi - live_lo)[:2] * 0.5 + 0.02" in builder
     assert "footprint_clear_pixels" in builder
-    assert "pixels = ranked_pixels" in builder
+    assert "pixels = robot_clear_pixels or ranked_pixels" in builder
+    assert "for pixel in ranked_pixels:" in builder
+    assert "if robot_blockers and not robot_clear_pixels:" in builder
+    assert "return None" in builder
     assert "conservative footprint preflight" in builder
-    assert "using {len(pixels)} reachable candidates" in builder
+    assert "using {len(pixels)} robot-clear candidates" in builder
     assert "elif require_footprint_clear:" in builder
     assert "return None" in builder
     floor_call = source[

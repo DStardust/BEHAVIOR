@@ -1322,6 +1322,9 @@ def stabilize_robot_spawn(
                 "ground_gap": ground_gap,
                 "ground_path": ground_path,
                 "room": spawn_room,
+                "preferred_target_satisfied": (
+                    preferred_target_name is None or candidate_kind == 0
+                ),
                 "native_max_displacement": native_max,
                 "pinned_native_objects": [],
                 "physics_rebuild_attempted": physics_rebuild_attempted,

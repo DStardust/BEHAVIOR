@@ -338,6 +338,18 @@ def test_swept_payload_is_carried_by_dustpan_until_emptying():
     assert '"omnigibson_official_inside_preflight_pose_replay"' in empty
 
 
+def test_sweep_post_frame_tracks_dustpan_while_payload_remains_useful():
+    source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
+        encoding="utf-8"
+    )
+    execute = source[source.index("def execute("):source.index("def main()")]
+    assert 'step.primitive == "SWEEP_INTO" and destination is not None' in execute
+    assert "replace(step, target_object=step.destination_object)" in execute
+    assert 'getattr(post_visibility_target, "name", step.target_object)' in execute
+    assert "payload_visibility_step = replace(step, target_object=step.target_object)" in execute
+    assert 'record["post_visibility_target"] = post_visibility_target_id' in execute
+
+
 def test_expert_records_per_step_wall_time():
     source = (Path(__file__).resolve().parents[1] / "code" / "run_deltasg_expert.py").read_text(
         encoding="utf-8"

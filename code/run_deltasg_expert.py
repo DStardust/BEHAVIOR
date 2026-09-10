@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict, deque
+from dataclasses import replace
 import gc
 import json
 import math
@@ -101,6 +102,7 @@ from deltasg_expert import (
     PLACE_SUPPORT_REFERENCE_SURFACE_TOLERANCE,
     PLACE_SUPPORT_REFERENCE_TOP_EPSILON,
     PLACE_SUPPORT_REFERENCE_XY_RADIUS,
+    SWEEP_CAMERA_MIN_OPERATION_DISTANCE,
     compile_expert_plan,
     evaluate_manipulation_height,
     place_descent_corridor_blockers,
@@ -297,7 +299,9 @@ def _connected_observation_pose(
     route_target=None,
     max_target_aabb_distance=None,
     operation_target_position=None,
+    min_operation_target_distance=None,
     max_operation_target_distance=None,
+    view_target_position=None,
     start_pose=None,
     held_object=None,
 ):
@@ -307,6 +311,11 @@ def _connected_observation_pose(
         th.as_tensor(operation_target_position, dtype=th.float32)
         if operation_target_position is not None
         else target_position
+    )
+    view_target_position = (
+        th.as_tensor(view_target_position, dtype=th.float32)
+        if view_target_position is not None
+        else operation_target_position
     )
     robot_position, _ = robot.get_position_orientation()
     if start_pose is not None:
@@ -497,6 +506,12 @@ def _connected_observation_pose(
             rejected["operation_distance"] += 1
             continue
         if (
+            min_operation_target_distance is not None
+            and operation_target_distance < min_operation_target_distance
+        ):
+            rejected["operation_distance"] += 1
+            continue
+        if (
             max_operation_target_distance is not None
             and operation_target_distance > max_operation_target_distance
         ):
@@ -532,8 +547,8 @@ def _connected_observation_pose(
             rejected["line_of_sight"] += 1
             continue
         direct_yaw = math.atan2(
-            float(operation_target_position[1] - xy[1]),
-            float(operation_target_position[0] - xy[0]),
+            float(view_target_position[1] - xy[1]),
+            float(view_target_position[0] - xy[0]),
         )
         if relative_camera is not None:
             fallback_yaw = direct_yaw + math.radians(fallback_yaw_offset)
@@ -690,6 +705,8 @@ def _manipulation_height_gate(env, step, target, args, task_name=None):
         if args.backend == "physical_control" and step.primitive == "GRASP"
         else args.min_manipulation_height
     )
+    if step.primitive == "SWEEP_INTO":
+        min_height = 0.0
     if step.primitive == "GRASP":
         min_height = task_grasp_minimum(task_name, target.category, min_height)
     result = evaluate_manipulation_height(
@@ -1222,6 +1239,13 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
         operation_target_position = getattr(
             self, "_deltasg_navigation_operation_point", None
         )
+        view_target_position = getattr(
+            self, "_deltasg_navigation_view_point", None
+        )
+        min_operation_target_distance = (
+            SWEEP_CAMERA_MIN_OPERATION_DISTANCE
+            if view_target_position is not None else None
+        )
         current_position, _ = self.robot.get_position_orientation()
         target_lower, target_upper = obj.aabb
         nearest_target_xy = th.minimum(
@@ -1240,7 +1264,13 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             and current_target_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
             and (
                 current_operation_distance is None
-                or current_operation_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                or (
+                    (
+                        min_operation_target_distance is None
+                        or current_operation_distance >= min_operation_target_distance
+                    )
+                    and current_operation_distance <= DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+                )
             )
         ):
             # The robot is already at a valid symbolic operation stance. Keep
@@ -1248,7 +1278,9 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             # camera is not forced past Tiago's pan limit. This is an in-place
             # NAVIGATE_TO turn, not post-capture visibility recovery.
             aim_position = (
-                operation_target_position
+                view_target_position
+                if view_target_position is not None
+                else operation_target_position
                 if operation_target_position is not None
                 else obj.aabb_center
             )
@@ -1346,11 +1378,13 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
                     route_target=obj,
                     max_target_aabb_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
                     operation_target_position=operation_target_position,
+                    min_operation_target_distance=min_operation_target_distance,
                     max_operation_target_distance=(
                         DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
                         if operation_target_position is not None
                         else None
                     ),
+                    view_target_position=view_target_position,
                 )
             route = _connected_navigation_waypoints(
                 self.env,
@@ -5532,22 +5566,36 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         )
         try:
             next_step = plan.steps[step_index + 1] if step_index + 1 < len(plan.steps) else None
-            navigation_operation_point = (
-                _container_operation_point(target)
-                if (
-                    target is not None
-                    and step.primitive == "NAVIGATE_TO"
-                    and next_step is not None
-                    and next_step.target_object == step.target_object
-                    and next_step.primitive == "PLACE_INSIDE"
-                )
-                else None
-            )
+            navigation_operation_point = None
+            navigation_view_point = None
+            if (
+                target is not None
+                and step.primitive == "NAVIGATE_TO"
+                and next_step is not None
+                and next_step.target_object == step.target_object
+            ):
+                if next_step.primitive == "PLACE_INSIDE":
+                    navigation_operation_point = _container_operation_point(target)
+                elif next_step.primitive == "SWEEP_INTO":
+                    sweep_destination = objects.get(next_step.destination_object)
+                    if sweep_destination is not None:
+                        # Choose the NAVIGATE_TO stance around the post-sweep
+                        # receptacle while still enforcing the target's 1.15 m
+                        # operation envelope. This keeps both floor objects in
+                        # Tiago's head-camera range without a post-action base
+                        # translation.
+                        navigation_operation_point = sweep_destination.aabb_center
+                        navigation_view_point = (
+                            target.aabb_center + sweep_destination.aabb_center
+                        ) * 0.5
             controller._deltasg_navigation_operation_point = navigation_operation_point
+            controller._deltasg_navigation_view_point = navigation_view_point
             if navigation_operation_point is not None:
                 record["navigation_operation_point"] = _jsonable(
                     navigation_operation_point
                 )
+            if navigation_view_point is not None:
+                record["navigation_view_point"] = _jsonable(navigation_view_point)
             _nav_diag_checkpoint(env, env.robots[0], f"step{step.step_id}_pre:{step.primitive}")
             if step.primitive == "WAIT":
                 for _ in range(args.wait_steps):
@@ -5969,15 +6017,23 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 and next_step.target_object == step.target_object
                 and next_step.primitive in {"PLACE_ON_TOP", "PLACE_INSIDE"}
             )
+            post_visibility_target = (
+                destination
+                if step.primitive == "SWEEP_INTO" and destination is not None
+                else target
+            )
             post_head_aim = (
                 _aim_tiago_head(
-                    env.robots[0], target, support_surface=post_support_surface
+                    env.robots[0], post_visibility_target,
+                    support_surface=post_support_surface,
                 )
-                if target is not None else None
+                if post_visibility_target is not None else None
             )
             post = _capture_event(
                 env, run, output_dir, f"step_{step.step_id:03d}_post", target_ids,
-                args.min_bbox_pixels, step.target_object, camera_streams
+                args.min_bbox_pixels,
+                getattr(post_visibility_target, "name", step.target_object),
+                camera_streams,
             )
             events.append(post)
             last_post = post
@@ -5988,7 +6044,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             # dataset visibility contract, inventory objects are not required
             # to remain framed in the post-grasp camera observation.
             if step.primitive in MANIPULATION_PRIMITIVES and step.primitive != "GRASP":
-                post_visibility_step = step
+                post_visibility_step = (
+                    replace(step, target_object=step.destination_object)
+                    if step.primitive == "SWEEP_INTO" and step.destination_object
+                    else step
+                )
             elif step.primitive == "NAVIGATE_TO" and step_index + 1 < len(plan.steps):
                 next_step = plan.steps[step_index + 1]
                 if (
@@ -6007,6 +6067,29 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
                 if post_visibility_step is not None
                 else []
             )
+            post_visibility_target_id = (
+                post_visibility_step.target_object
+                if post_visibility_step is not None else None
+            )
+            if step.primitive == "SWEEP_INTO" and post_visibility_errors:
+                # The swept payload and thin dustpan overlap in the image, so
+                # official instance segmentation may assign the shared pixels
+                # to either object. Both remain useful (union-visible); accept
+                # the post frame when either member of the composite operation
+                # has a valid robot-primary bbox.
+                payload_visibility_step = replace(step, target_object=step.target_object)
+                payload_visibility_errors = validate_visibility_snapshot(
+                    payload_visibility_step,
+                    post["robot_visible"],
+                    post["global_visible"],
+                    post["robot_primary"]["bboxes"],
+                    args.min_bbox_pixels,
+                )
+                if not payload_visibility_errors:
+                    post_visibility_step = payload_visibility_step
+                    post_visibility_errors = []
+                    post_visibility_target_id = step.target_object
+            record["post_visibility_target"] = post_visibility_target_id
             navigation_visibility_recovery = []
             if (
                 args.backend == "oracle_symbolic"

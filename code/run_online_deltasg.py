@@ -790,7 +790,7 @@ def main():
                         else None
                     )
                     try:
-                        stabilize_robot_spawn(
+                        spawn_report = stabilize_robot_spawn(
                             env,
                             seed=(args.seed or 0) + idx + 1 + attempt,
                             warmup_steps=max(args.warmup_steps, 10),
@@ -798,6 +798,12 @@ def main():
                             preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
                             settle_scene=False,
                         )
+                        if (
+                            args.env_type == "B"
+                            and preferred_target
+                            and not spawn_report.get("preferred_target_satisfied", False)
+                        ):
+                            engine.reject_prepared_env_b_infrastructure(preferred_target)
                     except RobotSpawnError as exc:
                         print(
                             f"[robot-spawn] Env-{args.env_type} re-stabilize exhausted "

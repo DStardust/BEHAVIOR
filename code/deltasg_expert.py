@@ -46,9 +46,13 @@ INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS = 10
 
 
 def task_grasp_minimum(task_name, category, configured_minimum):
-    """Laundry may be collected near the floor; other grasp gates stay unchanged."""
+    """Return task-specific low-object grasp bounds for floor-staged items."""
     if task_name == "collect_dirty_clothes" and category in {"t_shirt", "sock", "sweatshirt", "dress"}:
         return min(configured_minimum, 0.04)
+    if task_name == "clean_up_broken_object" and category in {"broom", "dustpan"}:
+        # These long tools may lie flat, while their handles remain the real
+        # grasp affordance; the generic AABB-centre test is not representative.
+        return 0.0
     return configured_minimum
 
 
@@ -56,6 +60,7 @@ DEFAULT_MAX_MANIPULATION_HEIGHT = 1.55
 DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT = 0.65
 DEFAULT_MIN_DIRECT_FLOOR_PRIMARY_VIEW_HEIGHT = 0.18
 DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE = 1.15
+SWEEP_CAMERA_MIN_OPERATION_DISTANCE = 0.75
 # Fix N (2026-08-15): access-aware OnTop place contract. attempt-7 / diag27 on
 # Beechwood_0 deliver_drink showed the official place sampler accepting a
 # far-edge table candidate (~0.82 m from the base, beside an armchair); the

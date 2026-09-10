@@ -273,3 +273,83 @@ steps through `OPEN`, `PLACE_INSIDE`, `CLOSE`, and `TOGGLE_ON`; hamper and wicke
 basket each complete four steps through `PLACE_INSIDE`. Static verification is
 379 tests passed plus Python compilation and `git diff --check`. This is a
 single-scene all-recipe gate; multi-scene Env-B regression remains required.
+
+## Benevolence_0 Generation and Expert Gate - 2026-09-10
+
+The previous two-scene run exposed a false grasp-height requirement on broken
+pieces, which are swept rather than grasped. Broken anomalies now use the real
+`SWEEP_INTO` floor-height contract; the expert applies the same floor-level
+contract. Brooms and dustpans remain dynamic and are grasped normally, but their
+task-specific grasp check recognizes the handle affordance instead of rejecting
+a flat tool by its AABB centre. The official plan still forbids grasping broken
+pieces by hand and requires one `SWEEP_INTO` plus one `EMPTY_INTO`.
+
+Open-surface-only assets no longer fall through to an unvalidated structural
+floor candidate. Spawned fire sources are filtered by their actual placement
+mode before import: compact appliances require a real OnTop support, while a
+space heater may use a validated floor pose. Sweep `OnTop` preflight retains two
+bounded low-level samples: four samples were tested but made the official,
+uninterruptible call approach 120 seconds in Beechwood_0, so that change was
+reverted. Floor fallback retains live collision, navigation,
+visibility, and scene-integrity validation and never selects a pose overlapping
+the robot. A fire task whose every reachable extinguisher placement has zero
+candidates under the 2.5 m AABB-edge storage gap is skipped for the remainder of
+that simulator process; the distance requirement is not lowered.
+
+Fresh end-to-end evidence is
+`code/outputs/envb_b0_fix5_20260910/Benevolence_0_int`. Generation produced 4/4
+requested samples in five raw attempts (80% raw-attempt success): one broken
+object cleanup, two dirty-clothes recipes, and one fire emergency. The fire used
+a floor-staged `space_heater`; its extinguisher gap is 2.749 m against the 2.5 m
+minimum. Generation audit, expert process, and expert audit all exited zero.
+Expert replay accepted 4/4 with no failure stage, QA-gate violation, artifact
+violation, or scene-integrity rejection. This scene has no reachable official
+dirty-dish infrastructure, so `clean_dirty_dishes` is correctly unavailable
+rather than synthesized or counted as a failed generated sample.
+
+The corresponding Beechwood_0 regression is terminal at
+`code/outputs/envb_beech_fix5_20260910`. Generation produced all four requested
+task families in seven raw attempts (4/4 generated, 57.1% raw-attempt success),
+with four clean audit records, four different target categories/models, and
+2-3 global cameras per sample. The pre-fix expert replay accepted fire, dirty
+clothes, and broken cleanup (3/4). Dirty dishes failed because generation
+validated the dishwasher exterior AABB while `PLACE_INSIDE` used the official
+fillable-volume centre. Inside routes now use that same operation point; a
+washer or dishwasher whose complete operation ring is unreachable is rejected
+by exact object id for the remainder of the process instead of repeatedly
+producing an unsolvable sample. No reach or state threshold was relaxed.
+
+## Broken-object Stability and Camera-operation Gate - 2026-09-10
+
+Broken cleanup now validates the official `OnTop` sweep relation after eight
+physics steps before preserving its replay pose. Fresh generation at
+`code/outputs/envb_broken_stable_20260910/Beechwood_0_int/generation` produced
+2/2 requested samples in exactly two raw attempts with no errors. Both official
+relations remained stable, and the generation audit is clean. The samples use
+different installed anomaly assets: `broken_light_bulb::cugtye` and
+`broken_glass::beltgg`.
+
+The first expert diagnostics established that a post-sweep floor target could
+fall below Tiago's official head-tilt envelope when the navigation stance was
+only 0.608 m from the dustpan. Navigation before `SWEEP_INTO` now constrains the
+real dustpan operation point to 0.75-1.15 m and faces the midpoint between the
+pieces and dustpan. Candidate selection still validates traversability, route,
+native occupancy, line of sight, and the 1.15 m distance to the pieces. It does
+not translate the robot after the sweep. When official instance segmentation
+assigns overlapping dustpan/payload pixels to either object, the post frame is
+accepted only if one member has a valid robot-primary bbox while both remain
+visible in the required robot/global union.
+
+Final replay is
+`code/outputs/envb_broken_stable_20260910/Beechwood_0_int/expert_distgate`:
+2/2 accepted and QA-eligible, with all 16 plan steps accepted, no failure stage,
+no artifact or QA-gate violation, stable robot and scene-integrity checks, and
+both official `SWEEP_INTO` / `EMPTY_INTO` postconditions. The second official
+`OnTop` transition took 71.4 seconds but completed within the existing sample
+timeout. This closes the focused broken-cleanup gate; it is not an exhaustive
+all-scene Env-B rate claim. Broad multi-scene regression remains required after
+source freeze.
+
+Final static verification: 391 tests passed; all five changed production Python
+modules compiled; relevant shell entrypoints passed `bash -n`; and
+`git diff --check` passed.

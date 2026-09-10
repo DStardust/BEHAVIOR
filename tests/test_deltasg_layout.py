@@ -17,6 +17,58 @@ def test_laundry_floor_grasp_policy_is_scoped_and_has_a_lower_bound():
     assert task_grasp_minimum("retrieve_object", "sock", 0.10) == 0.10
     assert task_grasp_minimum("collect_dirty_clothes", "hamper", 0.10) == 0.10
     assert task_grasp_minimum("wash_dirty_dishes", "bowl", 0.10) == 0.10
+    assert task_grasp_minimum("clean_up_broken_object", "broom", 0.10) == 0.0
+    assert task_grasp_minimum("clean_up_broken_object", "dustpan", 0.10) == 0.0
+    assert task_grasp_minimum("clean_up_broken_object", "trash_can", 0.10) == 0.10
+
+
+def test_broken_object_uses_floor_sweep_height_in_generation_and_expert():
+    from pathlib import Path
+
+    code_dir = Path(__file__).resolve().parents[1] / "code"
+    generation = (code_dir / "online_deltasg.py").read_text()
+    expert = (code_dir / "run_deltasg_expert.py").read_text()
+    assert 'anomaly_record["_floor_manipulation_primitive"] = "SWEEP_INTO"' in generation
+    assert 'if step.primitive == "SWEEP_INTO":\n        min_height = 0.0' in expert
+
+
+def test_floor_fallback_still_excludes_robot_footprint():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "code/online_deltasg.py").read_text()
+    block = source[
+        source.index("def _build_floor_placement"):
+        source.index("def _hypothetical_support_has_operation_approach")
+    ]
+    assert "robot_blockers = []" in block
+    assert "robot_clear_pixels = [" in block
+    assert "pixels = robot_clear_pixels or ranked_pixels" in block
+
+
+def test_fire_layout_exhaustion_is_cached_without_lowering_storage_gap():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "code/online_deltasg.py").read_text()
+    fire = source[
+        source.index("def generate_env_b_fire"):
+        source.index("def generate_env_c_fire_disambiguation")
+    ]
+    assert 'self._rejected_env_b_types.add("fire")' in fire
+    assert 'error.get("num_attempts") == 0' in fire
+    assert "FIRE_EXTINGUISHER_MIN_TARGET_GAP" in fire
+
+
+def test_spawned_fire_sources_require_their_real_placement_mode():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "code/online_deltasg.py").read_text()
+    spawn = source[
+        source.index("def _spawn_fire_target"):
+        source.index("def _set_boolean_state")
+    ]
+    assert 'if category == "space_heater"' in spawn
+    assert 'record["_open_surface_only"] = True' in spawn
+    assert 'self._choose_support_node(record, target_room, graph)' in spawn
 
 
 def test_rigid_clothing_requires_real_container_capacity():
@@ -61,6 +113,19 @@ def test_cleaning_station_requires_both_target_separation_and_sink_proximity():
     assert evaluate_tool_layout(tool, target, policy, sink)["ok"]
     assert not evaluate_tool_layout(tool, target, policy)["ok"]
     assert not evaluate_tool_layout(tool, target, policy, ([3, 0, 0], [4, 1, 1]))["ok"]
+
+
+def test_broken_cleanup_tools_have_non_overlapping_storage_layout():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "code/online_deltasg.py").read_text()
+    generation = source[
+        source.index("for requested_category in sorted(recipe"):
+        source.index("all_created = [anomaly, *solution_objects]")
+    ]
+    assert '"name": "separate_cleanup_tools_v1"' in generation
+    assert '"target": anomaly_obj.name' in generation
+    assert '"min_target_gap": 0.4' in generation
 
 
 def test_extinguisher_is_not_accepted_next_to_fire():

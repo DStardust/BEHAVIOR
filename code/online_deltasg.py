@@ -70,6 +70,7 @@ from deltasg_expert import (
     DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
     DEFAULT_MIN_MANIPULATION_HEIGHT,
     DEFAULT_MIN_PORTABLE_OBJECT_HEIGHT,
+    SWEEP_CAMERA_MIN_OPERATION_DISTANCE,
     ExpertPlanError,
     SUPPORTED_APPLIANCE_TASKS,
     SUPPORTED_OPEN_CLOSE_TASKS,
@@ -541,6 +542,8 @@ class OnlineDeltaSGEngine:
         self._env_a_attempt_prepared = False
         self._env_bc_attempt_prepared = False
         self._env_b_attempt_counts: Counter[str] = Counter()
+        self._rejected_env_b_infrastructure: set[str] = set()
+        self._rejected_env_b_types: set[str] = set()
         self._env_b_last_task = None
         self._prepared_env_b_type: str | None = None
         self._prepared_env_b_target_room: str | None = None
@@ -1449,6 +1452,8 @@ class OnlineDeltaSGEngine:
         graph = self.snapshot()
         feasible = []
         for anomaly_type in requested:
+            if anomaly_type in self._rejected_env_b_types:
+                continue
             if anomaly_type != "dirty_dishes" or self._available_env_b_resolution_paths(
                 anomaly_type, graph, target_room
             ):
@@ -1592,8 +1597,15 @@ class OnlineDeltaSGEngine:
             anomaly_record["_grasp_task_name"] = "collect_dirty_clothes"
             if anomaly_record.get("object_type") == "cloth":
                 anomaly_record["_cloth_configuration"] = "crumpled"
-        if anomaly_type in {"dirty_dishes", "broken_object"}:
+        if anomaly_type == "dirty_dishes":
             anomaly_record["_open_surface_only"] = True
+        if anomaly_type == "broken_object":
+            # Broken pieces are swept from the floor; they are never grasped by
+            # hand. Keep navigation / visibility validation, but use the real
+            # expert primitive for the floor-height gate.
+            anomaly_record["_floor_manipulation_primitive"] = "SWEEP_INTO"
+            anomaly_record["_force_floor_only"] = True
+            anomaly_record["_prefer_floor_first"] = True
         anomaly = self.add_task_asset(
             record=anomaly_record,
             object_name=f"{run_id}_anomaly",
@@ -1602,6 +1614,17 @@ class OnlineDeltaSGEngine:
             cached_graph=before_graph,
         )
         if not anomaly.get("ok"):
+            no_placement_candidates = any(
+                error.get("error") == "all_placement_attempts_failed"
+                and error.get("num_attempts") == 0
+                for error in anomaly.get("errors") or []
+            )
+            if anomaly_type == "dirty_dishes" and no_placement_candidates:
+                infrastructure_key = (
+                    "sink" if recipe["path_name"] == "hand_wash" else "dishwasher"
+                )
+                fixture = recipe["infrastructure_bindings"].get(infrastructure_key) or {}
+                self.reject_prepared_env_b_infrastructure(fixture.get("id"))
             raise RuntimeError(f"Could not place {anomaly_type} carrier: {anomaly.get('errors')}")
         anomaly_obj = self.env.scene.object_registry("name", anomaly["object_name"], None)
         if anomaly_type in {"dirty_dishes", "dirty_clothes"}:
@@ -1639,7 +1662,7 @@ class OnlineDeltaSGEngine:
                 record["_expert_navigation_preflight"] = True
             if actual_category in {"broom", "dustpan"}:
                 record["_prefer_support_first"] = True
-                record["_open_surface_only"] = True
+                record["_grasp_task_name"] = "clean_up_broken_object"
             tool_position = None
             if recipe["path_name"] == "hand_wash":
                 sink_id = recipe["infrastructure_bindings"]["sink"]["id"]
@@ -1650,6 +1673,12 @@ class OnlineDeltaSGEngine:
                 record["_household_layout"] = {
                     "name": "cleaning_station_v1", "target": anomaly_obj.name,
                     "min_target_gap": 0.4, "anchor": sink_id, "max_anchor_gap": 1.0,
+                }
+            elif anomaly_type == "broken_object":
+                record["_household_layout"] = {
+                    "name": "separate_cleanup_tools_v1",
+                    "target": anomaly_obj.name,
+                    "min_target_gap": 0.4,
                 }
             if actual_category in {"fire_extinguisher", "sponge", "broom", "dustpan"}:
                 role = "interaction_tool"
@@ -1898,15 +1927,38 @@ class OnlineDeltaSGEngine:
             solutions_by_requested = {
                 item["requested_category"]: item for item in solution_objects
             }
+            broom_name = solutions_by_requested["broom"]["object_name"]
+            dustpan_name = solutions_by_requested["dustpan"]["object_name"]
             route_targets = [
-                solutions_by_requested["broom"]["object_name"],
-                anomaly_obj.name,
-                solutions_by_requested["dustpan"]["object_name"],
-                solutions_by_requested["trash_can"]["object_name"],
+                {"target": broom_name, "held_object": None},
+                {
+                    "target": anomaly_obj.name,
+                    "held_object": broom_name,
+                    "operation_target": dustpan_name,
+                },
+                {"target": dustpan_name, "held_object": None},
+                {
+                    "target": solutions_by_requested["trash_can"]["object_name"],
+                    "held_object": dustpan_name,
+                },
             ]
         else:
-            route_targets = [anomaly_obj.name, destination_name]
-        navigation_preflight = self._preflight_env_b_navigation_sequence(route_targets)
+            route_targets = [
+                anomaly_obj.name,
+                {
+                    "target": destination_name,
+                    "held_object": anomaly_obj.name,
+                    "operation_relation": "inside",
+                },
+            ]
+        from omnigibson.action_primitives.action_primitive_set_base import ActionPrimitiveError
+
+        try:
+            navigation_preflight = self._preflight_env_b_navigation_sequence(route_targets)
+        except ActionPrimitiveError:
+            if recipe["path_name"] in {"machine_wash", "machine_wash_clothes"}:
+                self.reject_prepared_env_b_infrastructure(destination_name)
+            raise
         anomaly_node = copy.deepcopy(anomaly.get("delta_node") or {})
         anomaly_node.update(
             {
@@ -2072,6 +2124,22 @@ class OnlineDeltaSGEngine:
         if extinguisher is None:
             extinguisher = {"ok": False, "errors": room_failures}
         if not extinguisher.get("ok"):
+            layout_exhausted = bool(room_failures) and all(
+                any(
+                    error.get("error") == "all_placement_attempts_failed"
+                    and error.get("num_attempts") == 0
+                    for error in failure["errors"]
+                )
+                for failure in room_failures
+            )
+            if layout_exhausted:
+                self._rejected_env_b_types.add("fire")
+                print(
+                    "[env-b-fire] no reachable placement satisfies the "
+                    f"{FIRE_EXTINGUISHER_MIN_TARGET_GAP:.1f}m storage gap; "
+                    "skipping fire for this process",
+                    flush=True,
+                )
             raise RuntimeError(f"Fire safety tool placement failed: {extinguisher.get('errors')}")
         extinguisher["placement"]["room_candidates"] = extinguisher_rooms
         extinguisher["placement"]["room_failures"] = room_failures
@@ -2768,6 +2836,9 @@ class OnlineDeltaSGEngine:
         minimum_height = task_grasp_minimum(
             record.get("_grasp_task_name"), category, self.config.min_manipulation_height
         )
+        floor_manipulation_primitive = record.get("_floor_manipulation_primitive", "GRASP")
+        if floor_manipulation_primitive == "SWEEP_INTO":
+            minimum_height = 0.0
         result = {
             "ok": False,
             "object_name": object_name,
@@ -2974,7 +3045,8 @@ class OnlineDeltaSGEngine:
                         floor_candidates.append(floor_placement)
             candidates = []
             primary_is_floor = (
-                placement.get("mode") == "floor"
+                placement.get("support_object_id") is None
+                or placement.get("mode") == "floor"
                 or self._tokens(placement.get("support_category") or "") & {"floor", "floors"}
             )
             if generated_support_fixture:
@@ -2988,7 +3060,10 @@ class OnlineDeltaSGEngine:
             ):
                 candidates.extend(floor_candidates)
                 candidates.append(placement)
-            elif not primary_is_floor or task_floor_eligible:
+            elif (
+                not (record.get("_open_surface_only") and primary_is_floor)
+                and (not primary_is_floor or task_floor_eligible)
+            ):
                 candidates.append(placement)
             if (
                 not generated_support_fixture
@@ -3270,7 +3345,10 @@ class OnlineDeltaSGEngine:
                             })
                             continue
                         manipulation_height = self._validate_floor_manipulation_height(
-                            obj, floor_height, minimum_height
+                            obj,
+                            floor_height,
+                            minimum_height,
+                            primitive=floor_manipulation_primitive,
                         )
                         if manipulated_object and not manipulation_height["eligible"]:
                             print(
@@ -3447,7 +3525,10 @@ class OnlineDeltaSGEngine:
                         obj.get_position_orientation()[0]
                     )
                     manipulation_height = self._validate_floor_manipulation_height(
-                        obj, floor_height, minimum_height
+                        obj,
+                        floor_height,
+                        minimum_height,
+                        primitive=floor_manipulation_primitive,
                     )
                     if not manipulation_height["eligible"]:
                         result["errors"].append({
@@ -3672,6 +3753,17 @@ class OnlineDeltaSGEngine:
             changed = bool(obj.states[state_cls].set_value(destination, True))
             obj.states[state_cls].clear_cache()
             reached = bool(obj.states[state_cls].get_value(destination))
+            stability_steps = 0
+            if predicate == "OnTop" and reached:
+                # A thin dustpan may satisfy OnTop for only one frame. Expert
+                # capture advances physics, so generation must validate the
+                # relation after the same short settling window.
+                stability_steps = 8
+                with og.sim.render_on_step(False):
+                    for _ in range(stability_steps):
+                        og.sim.step()
+                obj.states[state_cls].clear_cache()
+                reached = bool(obj.states[state_cls].get_value(destination))
             volume_fallback = None
             if predicate == "Inside" and not reached:
                 volume_fallback = place_inside_official_volume(obj, destination)
@@ -3680,7 +3772,7 @@ class OnlineDeltaSGEngine:
                           sampling_attempts={
                               "high": 2,
                               "low": INSIDE_LOW_LEVEL_SAMPLING_ATTEMPTS if predicate == "Inside" else 2,
-                          })
+                          }, stability_steps=stability_steps)
             if volume_fallback is not None:
                 result["volume_fallback"] = volume_fallback
             result["ok"] = reached
@@ -3790,21 +3882,33 @@ class OnlineDeltaSGEngine:
                     if held_name else None
                 )
             target = self.env.scene.object_registry("name", name)
-            operation_target_position = (
-                _container_operation_point(target)
-                if not isinstance(route_step, str)
-                and route_step.get("operation_relation") == "inside"
-                else None
-            )
+            operation_target_position = None
+            view_target_position = None
+            if not isinstance(route_step, str):
+                if route_step.get("operation_relation") == "inside":
+                    operation_target_position = _container_operation_point(target)
+                elif route_step.get("operation_target"):
+                    operation_target = self.env.scene.object_registry(
+                        "name", route_step["operation_target"]
+                    )
+                    operation_target_position = operation_target.aabb_center
+                    view_target_position = (
+                        target.aabb_center + operation_target.aabb_center
+                    ) * 0.5
             pose = _connected_observation_pose(
                 self.env, robot, target,
                 preferred_distance=_target_framing_distance(target, robot=robot),
                 require_route=True, route_clearance_margin=0.0,
                 route_target=target, max_target_aabb_distance=1.15,
                 operation_target_position=operation_target_position,
+                min_operation_target_distance=(
+                    SWEEP_CAMERA_MIN_OPERATION_DISTANCE
+                    if view_target_position is not None else None
+                ),
                 max_operation_target_distance=(
                     1.15 if operation_target_position is not None else None
                 ),
+                view_target_position=view_target_position,
                 start_pose=start_pose, held_object=held_object,
             )
             approaches.append({
@@ -3814,6 +3918,11 @@ class OnlineDeltaSGEngine:
                 "operation_target_position": (
                     operation_target_position.tolist()
                     if operation_target_position is not None
+                    else None
+                ),
+                "view_target_position": (
+                    view_target_position.tolist()
+                    if view_target_position is not None
                     else None
                 ),
             })
@@ -3887,6 +3996,10 @@ class OnlineDeltaSGEngine:
                     target_room=target_room,
                     require_reachable=require_reachable,
                 )
+                candidates = [
+                    node for node in candidates
+                    if node.get("id") not in self._rejected_env_b_infrastructure
+                ]
                 if not candidates:
                     valid = False
                     break
@@ -3915,6 +4028,18 @@ class OnlineDeltaSGEngine:
                 available.append(item)
         return available
 
+    def reject_prepared_env_b_infrastructure(self, object_id):
+        """Stop retrying one fixture after its complete operation ring failed."""
+        if object_id:
+            self._rejected_env_b_infrastructure.add(str(object_id))
+            print(
+                f"[env-b] rejected inaccessible infrastructure={object_id}",
+                flush=True,
+            )
+        self._prepared_env_b_type = None
+        self._prepared_env_b_target_room = None
+        self._prepared_env_b_path_name = None
+
     def prepare_env_b_robot_spawn(self, env_b_types=None, target_room=None, skip_tasks=None):
         """Select an under-covered Env-B type before robot spawn.
 
@@ -3923,8 +4048,12 @@ class OnlineDeltaSGEngine:
         component. Select a real fixture first, then let stabilize_robot_spawn
         establish the same-room 1.15 m operation pose used by validation.
         """
-        requested = tuple(name for name in (env_b_types or ENV_B_TYPES)
-                          if ENV_B_TASK_NAMES.get(name) not in (skip_tasks or set()))
+        requested = tuple(
+            name
+            for name in (env_b_types or ENV_B_TYPES)
+            if ENV_B_TASK_NAMES.get(name) not in (skip_tasks or set())
+            and name not in self._rejected_env_b_types
+        )
         graph = self.snapshot()
         successful = Counter(
             sample.get("task")
@@ -4409,8 +4538,21 @@ class OnlineDeltaSGEngine:
             category for category in SPAWNABLE_FIRE_SOURCE_CATEGORIES
             if self._category_has_models(category)
         ]
+        graph = self.snapshot()
+        placement_compatible = []
+        for category in categories:
+            if category == "space_heater":
+                placement_compatible.append(category)
+                continue
+            record = self._record_for_category(category)
+            record["_open_surface_only"] = True
+            if self._choose_support_node(record, target_room, graph).get("node") is not None:
+                placement_compatible.append(category)
+        categories = placement_compatible
         if not categories:
-            raise RuntimeError("No installed spawnable fire-source asset")
+            raise RuntimeError(
+                f"No fire-source asset has a valid support in room {target_room}"
+            )
         used = Counter()
         for sample in self._checkpoint.get("successful_samples", []):
             for category in (sample.get("diversity") or {}).get("target_categories") or []:
@@ -8915,7 +9057,9 @@ class OnlineDeltaSGEngine:
         placement["pose"]["position"] = position
         return floor_height
 
-    def _validate_floor_manipulation_height(self, obj, floor_height, minimum_height=None):
+    def _validate_floor_manipulation_height(
+        self, obj, floor_height, minimum_height=None, primitive="GRASP"
+    ):
         minimum_height = self.config.min_manipulation_height if minimum_height is None else minimum_height
         lo, hi, _ = self._safe_aabb(obj)
         if not lo or not hi:
@@ -8928,7 +9072,7 @@ class OnlineDeltaSGEngine:
                 "max_height": float(self.config.max_manipulation_height),
             }
         return evaluate_manipulation_height(
-            "GRASP",
+            primitive,
             lo[2],
             hi[2],
             floor_height,
@@ -9043,6 +9187,7 @@ class OnlineDeltaSGEngine:
                     center_offset = (live_lo + live_hi) * 0.5 - live_position
                     half_extent = (live_hi - live_lo)[:2] * 0.5 + 0.02
                     blockers = []
+                    robot_blockers = []
                     seen = set()
                     robots = list(getattr(self.env, "robots", None) or [])
                     for other in [
@@ -9074,10 +9219,13 @@ class OnlineDeltaSGEngine:
                                 "preflight", other, extra=f"{base_extra} SKIP=no-aabb",
                             )
                             continue
-                        blockers.append((
+                        blocker = (
                             np.asarray(other_lo[:2], dtype=float),
                             np.asarray(other_hi[:2], dtype=float),
-                        ))
+                        )
+                        blockers.append(blocker)
+                        if is_robot:
+                            robot_blockers.append(blocker)
                         self._debug_spawn_door(
                             "preflight", other, extra=f"{base_extra} RESULT=blocker",
                         )
@@ -9140,11 +9288,30 @@ class OnlineDeltaSGEngine:
                         # placement gates. Generated supports are handled by
                         # the fail-closed branch above because a failed
                         # footprint preflight can otherwise disturb furniture.
-                        pixels = ranked_pixels
+                        robot_clear_pixels = []
+                        for pixel in ranked_pixels:
+                            xy = np.asarray(trav_map.map_to_world(pixel).cpu(), dtype=float)
+                            center = xy + center_offset[:2]
+                            proposed_lo = center - half_extent
+                            proposed_hi = center + half_extent
+                            if not any(
+                                np.all(proposed_lo < other_hi)
+                                and np.all(proposed_hi > other_lo)
+                                for other_lo, other_hi in robot_blockers
+                            ):
+                                robot_clear_pixels.append(pixel)
+                        if robot_blockers and not robot_clear_pixels:
+                            print(
+                                f"[floor-placement] no robot-clear pose for "
+                                f"{getattr(placement_obj, 'name', '?')} in {target_room}",
+                                flush=True,
+                            )
+                            return None
+                        pixels = robot_clear_pixels or ranked_pixels
                         print(
                             f"[floor-placement] conservative footprint preflight "
                             f"found no pose for {getattr(placement_obj, 'name', '?')}; "
-                            f"using {len(pixels)} reachable candidates",
+                            f"using {len(pixels)} robot-clear candidates",
                             flush=True,
                         )
                 except Exception as exc:

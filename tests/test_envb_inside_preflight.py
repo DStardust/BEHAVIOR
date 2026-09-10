@@ -95,6 +95,36 @@ def test_navigation_preflight_uses_explicit_inventory_for_hand_wash(monkeypatch)
     assert planner.call_args_list[1].kwargs["max_operation_target_distance"] == 1.15
 
 
+def test_sweep_navigation_preflight_frames_target_and_dustpan(monkeypatch):
+    import torch
+    source = Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py"
+    method = next(n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_preflight_env_b_navigation_sequence")
+    planner = Mock(return_value=torch.tensor([1., 2., 0.]))
+    monkeypatch.setitem(sys.modules, "run_deltasg_expert", SimpleNamespace(
+        _connected_observation_pose=planner,
+        _container_operation_point=lambda obj: None,
+        _target_framing_distance=lambda *a, **kw: 0.85))
+    namespace = {"SWEEP_CAMERA_MIN_OPERATION_DISTANCE": 0.75}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    target = SimpleNamespace(name="pieces", aabb_center=torch.tensor([0., 0., 0.]))
+    dustpan = SimpleNamespace(name="dustpan", aabb_center=torch.tensor([0., 2., 0.]))
+    objects = {obj.name: obj for obj in (target, dustpan)}
+    engine = SimpleNamespace(env=SimpleNamespace(robots=[Mock()], scene=SimpleNamespace(
+        object_registry=lambda _, name: objects[name])))
+
+    result = namespace[method.name](engine, [{
+        "target": "pieces", "held_object": None, "operation_target": "dustpan",
+    }])
+
+    kwargs = planner.call_args.kwargs
+    assert torch.equal(kwargs["operation_target_position"], dustpan.aabb_center)
+    assert torch.equal(kwargs["view_target_position"], torch.tensor([0., 1., 0.]))
+    assert kwargs["min_operation_target_distance"] == 0.75
+    assert kwargs["max_operation_target_distance"] == 1.15
+    assert result["approaches"][0]["view_target_position"] == [0.0, 1.0, 0.0]
+
+
 def test_hand_wash_tools_cannot_use_sink_as_their_support():
     source = (Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py").read_text()
     hand_wash = source[source.index('if recipe["path_name"] == "hand_wash":'):
@@ -227,6 +257,19 @@ def test_inside_preflight_restores_scene_and_sampling_limits(monkeypatch, change
     result = namespace[method.name](None, obj, container)
     assert result["reason"] == "missing_official_container_volume"
     sim.dump_state.assert_not_called()
+
+
+def test_broken_sweep_preflight_requires_relation_to_survive_physics_steps():
+    source = Path(__file__).resolve().parents[1] / "code" / "online_deltasg.py"
+    method = next(
+        node for node in ast.walk(ast.parse(source.read_text()))
+        if isinstance(node, ast.FunctionDef) and node.name == "_preflight_env_b_inside"
+    )
+    body = ast.unparse(method)
+    assert "predicate == 'OnTop' and reached" in body
+    assert "stability_steps = 8" in body
+    assert "og.sim.render_on_step(False)" in body
+    assert "result.update(setter_return=changed, predicate_after_set=reached" in body
 
 
 def test_faucet_toggle_preflight_exercises_both_states_and_restores_scene():
