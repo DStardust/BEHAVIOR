@@ -353,3 +353,44 @@ source freeze.
 Final static verification: 391 tests passed; all five changed production Python
 modules compiled; relevant shell entrypoints passed `bash -n`; and
 `git diff --check` passed.
+
+## Fifteen-scene Env-B Regression - 2026-09-10
+
+Frozen-source run `code/outputs/envb_multiscene_d0ea68f_20260910_105000`
+completed all 15 configured scenes without leaving a simulator process. It
+requested four samples per scene and generated 46/60 (76.7%) from 144 raw
+attempts. Expert replay accepted 37/46 (80.4%); requested-slot end-to-end yield
+was therefore 37/60 (61.7%). Per-task expert results were fire 9/9, dirty
+clothes 16/18, broken cleanup 10/14, and dirty dishes 2/5.
+
+All four requested samples were generated in 10/15 scenes. Beechwood_1,
+Benevolence_1, Benevolence_2, and Pomaria_0 generated only 1/4; Wainscott_0 and
+Wainscott_1 generated 3/4. The low-yield scenes exhausted strict placement,
+same-room navigation, complete-route, or official relation preflights; they did
+not serialize rejected attempts as successful samples. Expert failures comprise
+five post-visibility failures, three execution/navigation failures, and one
+persistent-worker crash. This run verifies the 80% expert target over 46
+multi-scene samples, but generation yield and the resulting 61.7% end-to-end
+rate remain below the desired 70-80% range and are the next work item.
+
+## Placement-diversity Gate - 2026-09-10
+
+Accepted samples now persist the actual room, support, placement mode, model,
+semantic role, XY position, and 25 cm position bin for every generated object.
+Subsequent floor and OnTop sampling consumes that history using a 0.50 m
+maximin preference. Candidate diversity is applied only after household-layout,
+footprint, collision, support-capacity, and reachability filtering. In compact
+spaces that cannot provide 0.50 m separation, the farthest remaining legal pose
+is used. Three fallback floor candidates for one object also avoid each other.
+The private sampler history is removed from exported placement records.
+
+Fresh focused evidence is
+`code/outputs/envb_fire_position_diversity_20260910_162854`: Beechwood_0
+generated 3/3 fire samples in one simulator process. The audit reports 3 clean
+runs, no duplicate fingerprints, 6 generated-object position records, 6/6
+unique category-room-25 cm bins, and zero repeated bins. The fire sources use a
+floor pose and two different tables; the extinguishers use three different
+corridor positions. The corridor's first two extinguisher poses are more than
+0.50 m apart; the third uses the maximum legal spacing after the narrow floor
+region is saturated. Full static verification is 392 passing tests plus
+`py_compile`, `bash -n`, and `git diff --check`.

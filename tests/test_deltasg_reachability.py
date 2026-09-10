@@ -746,7 +746,7 @@ def test_floor_overlap_gate_includes_the_robot_footprint():
 def test_generated_support_floor_candidates_cover_the_reachable_room():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     assert "generated_support_fixture\n                            or bool(record.get(\"_prefer_floor_first\"))" in source
-    assert "pool = ordered if spread_across_room else ordered[: min(25, len(ordered))]" in source
+    assert "pool = ordered if spread_across_room else ordered[: min(128, len(ordered))]" in source
 
 
 def test_generated_support_records_do_not_mutate_shared_asset_database_records():
@@ -801,6 +801,34 @@ def test_generated_support_models_are_not_reported_as_task_target_models():
         {"category": "toaster", "model": "toaster_model"},
     ]
     assert record["source_rooms"] == ["kitchen_0"]
+    assert len(record["placement_records"]) == 3
+    assert record["placement_records"][0]["position_xy"] == [1.0, 2.0]
+    assert record["placement_records"][0]["position_bin_25cm"] == [4, 8]
+
+
+def test_placement_diversity_is_applied_after_physical_candidate_filters():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    floor = source[
+        source.index("def _build_floor_placement"):
+        source.index("def _hypothetical_support_has_operation_approach")
+    ]
+    relation = source[source.index("def _apply_relation"):source.index("def _state_by_name")]
+    assert "*self._historical_placement_positions(target_room)" in floor
+    assert floor.index("footprint_clear_pixels") < floor.index(
+        "*self._historical_placement_positions(target_room)"
+    )
+    assert "free_grid_points" in relation
+    assert relation.index("free_grid_points.append") < relation.index(
+        'historical_positions = placement.get("_diversity_avoid_positions_xy")'
+    )
+    floor_calls = source[
+        source.index("floor_candidates = []"):
+        source.index("\n            candidates = []", source.index("floor_candidates = []"))
+    ]
+    assert "floor_candidate_positions = []" in floor_calls
+    assert "diversity_avoid_positions=floor_candidate_positions" in floor_calls
+    batch = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
+    assert '--min-placement-diversity-distance "$MIN_PLACEMENT_DIVERSITY_DISTANCE"' in batch
 
 
 def test_envb_inside_audit_requires_recorded_success_in_exported_validation():

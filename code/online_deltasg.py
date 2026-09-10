@@ -465,6 +465,9 @@ class OnlineDeltaSGConfig:
     require_nav_clearance_route: bool = True
     min_manipulation_height: float = DEFAULT_MIN_MANIPULATION_HEIGHT
     max_manipulation_height: float = DEFAULT_MAX_MANIPULATION_HEIGHT
+    # Maximin preference over prior accepted placements in the room / support.
+    # This is applied only after collision, layout, and reachability filtering.
+    min_placement_diversity_distance: float = 0.50
 
     # Deterministic coverage controls. These remain unset for normal diverse
     # generation and are used by the coverage backfill scheduler.
@@ -3009,6 +3012,7 @@ class OnlineDeltaSGEngine:
                     preferred_placement["support_candidates"] = fallback_nodes
                     placement = preferred_placement
             floor_candidates = []
+            floor_candidate_positions = []
             placement_orientation = record.get("_placement_orientation_xyzw")
             if placement_orientation is not None:
                 obj.set_position_orientation(orientation=th.tensor(placement_orientation, dtype=th.float32))
@@ -3038,11 +3042,15 @@ class OnlineDeltaSGEngine:
                         ),
                         placement_obj=obj,
                         require_footprint_clear=generated_support_fixture,
+                        diversity_avoid_positions=floor_candidate_positions,
                     )
                     if floor_placement:
                         if record.get("_prefer_floor_first"):
                             floor_placement["_preferred_floor_candidate"] = True
                         floor_candidates.append(floor_placement)
+                        floor_candidate_positions.append(
+                            floor_placement["pose"]["position"][:2]
+                        )
             candidates = []
             primary_is_floor = (
                 placement.get("support_object_id") is None
@@ -3386,6 +3394,7 @@ class OnlineDeltaSGEngine:
                             continue
                         placed = True
                         chosen_placement = copy.deepcopy(placement_attempt)
+                        chosen_placement.pop("_diversity_avoid_positions_xy", None)
                         chosen_placement["robot_approach"] = reachability
                         chosen_placement["manipulation_height"] = manipulation_height
                         chosen_placement["mode"] = "floor"
@@ -3620,6 +3629,7 @@ class OnlineDeltaSGEngine:
                           flush=True)
                 placed = True
                 chosen_placement = copy.deepcopy(placement_attempt)
+                chosen_placement.pop("_diversity_avoid_positions_xy", None)
                 chosen_placement["robot_approach"] = reachability
                 break
 
@@ -8255,7 +8265,60 @@ class OnlineDeltaSGEngine:
                 "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
             },
             "pose_source": "live_support_object",
+            "_diversity_avoid_positions_xy": self._historical_placement_positions(
+                target_room, support_object_id=support_node["id"] if support_node else None,
+            ),
         }
+
+    def _historical_placement_positions(
+        self, target_room, support_object_id=None
+    ):
+        """Return accepted XY poses used to diversify a room or support."""
+        positions = []
+        for sample in self._checkpoint.get("successful_samples", []):
+            diversity = sample.get("diversity") or {}
+            placement_records = diversity.get("placement_records") or []
+            for item in placement_records:
+                if item.get("room_id") != target_room:
+                    continue
+                if (
+                    support_object_id is not None
+                    and item.get("support_object_id") != support_object_id
+                ):
+                    continue
+                position = item.get("position_xy")
+                if isinstance(position, (list, tuple)) and len(position) >= 2:
+                    positions.append((float(position[0]), float(position[1])))
+            # Checkpoints created before placement_records used task-object bins.
+            if placement_records or target_room not in (diversity.get("source_rooms") or []):
+                continue
+            for position_bin in diversity.get("position_bins_25cm") or []:
+                if isinstance(position_bin, (list, tuple)) and len(position_bin) >= 2:
+                    positions.append((float(position_bin[0]) * 0.25, float(position_bin[1]) * 0.25))
+        return positions
+
+    def _choose_diverse_xy(self, candidates, historical_positions):
+        """Choose a maximin XY candidate, preferring the configured separation."""
+        if not candidates or not historical_positions:
+            return None
+        scored = []
+        for index, position in enumerate(candidates):
+            min_distance = min(
+                math.hypot(
+                    float(position[0]) - float(previous[0]),
+                    float(position[1]) - float(previous[1]),
+                )
+                for previous in historical_positions
+            )
+            scored.append((min_distance, index))
+        separated = [
+            item for item in scored
+            if item[0] >= self.config.min_placement_diversity_distance
+        ]
+        pool = separated or scored
+        best_distance = max(item[0] for item in pool)
+        best_indices = [item[1] for item in pool if abs(item[0] - best_distance) < 1e-6]
+        return candidates[self.rng.choice(best_indices)]
 
     # Object category → preferred support categories.
     # Maps object categories to the support surfaces they work best on.
@@ -8511,6 +8574,9 @@ class OnlineDeltaSGEngine:
                     "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
                 },
                 "pose_source": "fallback_support",
+                "_diversity_avoid_positions_xy": self._historical_placement_positions(
+                    target_room, support_object_id=support_node["id"],
+                ),
             }
         except Exception:
             return None
@@ -9102,6 +9168,7 @@ class OnlineDeltaSGEngine:
         spread_across_room=False,
         placement_obj=None,
         require_footprint_clear=False,
+        diversity_avoid_positions=None,
     ):
         """Last-resort placement: on the floor in the target room."""
         try:
@@ -9334,6 +9401,10 @@ class OnlineDeltaSGEngine:
                     )["ok"]]
                     if not pixels:
                         return None
+                historical_positions = [
+                    *self._historical_placement_positions(target_room),
+                    *(diversity_avoid_positions or []),
+                ]
                 reference = preferred_position if preferred_position is not None else room_center
                 if reference is not None:
                     reference_pixel = trav_map.world_to_map(
@@ -9364,10 +9435,28 @@ class OnlineDeltaSGEngine:
                             ordered = separated
                         pool = ordered[: min(25, len(ordered))]
                     else:
-                        pool = ordered if spread_across_room else ordered[: min(25, len(ordered))]
-                    pixel = self.rng.choice(pool)
+                        pool = ordered if spread_across_room else ordered[: min(128, len(ordered))]
+                    world_candidates = [
+                        tuple(float(value) for value in trav_map.map_to_world(candidate)[:2])
+                        for candidate in pool
+                    ]
+                    diverse_xy = self._choose_diverse_xy(world_candidates, historical_positions)
+                    pixel = (
+                        pool[world_candidates.index(diverse_xy)]
+                        if diverse_xy is not None
+                        else self.rng.choice(pool)
+                    )
                 else:
-                    pixel = self.rng.choice(pixels)
+                    world_candidates = [
+                        tuple(float(value) for value in trav_map.map_to_world(candidate)[:2])
+                        for candidate in pixels
+                    ]
+                    diverse_xy = self._choose_diverse_xy(world_candidates, historical_positions)
+                    pixel = (
+                        pixels[world_candidates.index(diverse_xy)]
+                        if diverse_xy is not None
+                        else self.rng.choice(pixels)
+                    )
                 xy = trav_map.map_to_world(pixel)
                 pos = [float(xy[0]), float(xy[1]), 0.5]
                 pose_source = "robot_reachable_floor"
@@ -9609,6 +9698,7 @@ class OnlineDeltaSGEngine:
                             point[1] - float(access_xy[1]),
                         )
                     )
+                free_grid_points = []
                 for cx, cy in grid_points:
                     ok_spot = True
                     for obs in obstacles:
@@ -9619,8 +9709,31 @@ class OnlineDeltaSGEngine:
                             ok_spot = False
                             break
                     if ok_spot:
-                        best_cx, best_cy = cx, cy
-                        break
+                        free_grid_points.append((cx, cy))
+
+                historical_positions = placement.get("_diversity_avoid_positions_xy") or []
+                if free_grid_points and historical_positions:
+                    # Stay close to the nearest manipulation side of the support,
+                    # then spread placements within that operationally safe band.
+                    operable_points = free_grid_points
+                    if access_xy is not None:
+                        access_distances = [
+                            math.hypot(
+                                point[0] - float(access_xy[0]),
+                                point[1] - float(access_xy[1]),
+                            )
+                            for point in free_grid_points
+                        ]
+                        distance_limit = min(access_distances) + 0.35
+                        operable_points = [
+                            point for point, distance in zip(free_grid_points, access_distances)
+                            if distance <= distance_limit
+                        ]
+                    selected = self._choose_diverse_xy(operable_points, historical_positions)
+                    if selected is not None:
+                        best_cx, best_cy = selected
+                elif free_grid_points:
+                    best_cx, best_cy = free_grid_points[0]
 
                 if best_cx is None:
                     return {

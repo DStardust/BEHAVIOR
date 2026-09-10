@@ -62,7 +62,27 @@ def sample_diversity_record(run):
         set(item.get("room_id") for item in task_objects if item.get("room_id"))
     )
     position_bins = []
+    placement_records = []
     target_models = set()
+    for item in objects:
+        position = ((item.get("pose") or {}).get("position"))
+        if isinstance(position, (list, tuple)) and len(position) >= 2:
+            placement = item.get("placement") or {}
+            placement_records.append({
+                "category": item.get("category"),
+                "model": item.get("model"),
+                "object_name": item.get("object_name"),
+                "semantic_roles": sorted(item.get("semantic_roles") or []),
+                "room_id": item.get("room_id"),
+                "mode": placement.get("mode"),
+                "support_object_id": placement.get("support_object_id"),
+                "support_category": placement.get("support_category"),
+                "position_xy": [float(position[0]), float(position[1])],
+                "position_bin_25cm": [
+                    round(float(position[0]) / 0.25),
+                    round(float(position[1]) / 0.25),
+                ],
+            })
     for item in task_objects:
         if item.get("category") and item.get("model"):
             target_models.add((item["category"], item["model"]))
@@ -89,6 +109,7 @@ def sample_diversity_record(run):
         )),
         "support_categories": sorted(set(supports)),
         "position_bins_25cm": sorted(position_bins),
+        "placement_records": placement_records,
     }
 
 
@@ -347,6 +368,12 @@ def main():
     parser.add_argument("--min-manipulation-height", type=float, default=0.10)
     parser.add_argument("--max-manipulation-height", type=float, default=1.55)
     parser.add_argument(
+        "--min-placement-diversity-distance",
+        type=float,
+        default=0.50,
+        help="Prefer legal placements at least this many metres from prior room/support placements.",
+    )
+    parser.add_argument(
         "--min-global-cameras",
         type=int,
         default=2,
@@ -524,6 +551,8 @@ def main():
             parser.error(f"invalid --env-b-types values: {invalid_env_b_types or env_b_types}")
     if args.min_manipulation_height < 0 or args.max_manipulation_height <= args.min_manipulation_height:
         parser.error("manipulation height bounds must satisfy 0 <= min < max")
+    if args.min_placement_diversity_distance < 0:
+        parser.error("--min-placement-diversity-distance must be non-negative")
     if args.max_camera_pose_attempts < 1 or args.camera_pose_render_steps < 1:
         parser.error("camera pose attempts and render steps must both be positive")
     if args.target_asset_model and not args.target_asset_category:
@@ -592,6 +621,7 @@ def main():
             ),
             min_manipulation_height=args.min_manipulation_height,
             max_manipulation_height=args.max_manipulation_height,
+            min_placement_diversity_distance=args.min_placement_diversity_distance,
             target_asset_category=args.target_asset_category,
             target_asset_model=args.target_asset_model,
             target_native_object_id=args.target_native_object_id,

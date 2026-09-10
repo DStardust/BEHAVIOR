@@ -13,6 +13,7 @@ ENVB_TYPES="${ENVB_TYPES:-fire,dirty_dishes,dirty_clothes,broken_object}"
 ENVC_NUM="${ENVC_NUM:-8}"
 SEED_BASE="${SEED_BASE:-96800}"
 RUN_EXPERT="${RUN_EXPERT:-1}"
+MIN_PLACEMENT_DIVERSITY_DISTANCE="${MIN_PLACEMENT_DIVERSITY_DISTANCE:-0.50}"
 
 if [[ -f .env ]]; then
   set -a
@@ -28,7 +29,7 @@ fi
 
 mkdir -p "$OUT_ROOT/logs"
 printf '%s\n' "${SCENE_LIST[@]}" > "$OUT_ROOT/scenes.txt"
-python - "$OUT_ROOT/config.json" "$MODEL" "$ROBOT" "$ENVB_NUM" "$ENVC_NUM" "$RUN_EXPERT" "$ENVB_TYPES" "$ENVA_NUM" <<'PY'
+python - "$OUT_ROOT/config.json" "$MODEL" "$ROBOT" "$ENVB_NUM" "$ENVC_NUM" "$RUN_EXPERT" "$ENVB_TYPES" "$ENVA_NUM" "$MIN_PLACEMENT_DIVERSITY_DISTANCE" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -44,6 +45,7 @@ Path(sys.argv[1]).write_text(
             "envc_requested_per_scene": int(sys.argv[5]),
             "expert_backend": "oracle_symbolic",
             "run_expert": sys.argv[6] == "1",
+            "min_placement_diversity_distance": float(sys.argv[9]),
         },
         indent=2,
     ),
@@ -76,6 +78,7 @@ run_generation() {
       --min-global-cameras 2 --max-global-cameras 3 \
       --max-camera-pose-attempts 8 --camera-pose-render-steps 4 \
       --min-manipulation-height 0.10 --max-manipulation-height 1.55 \
+      --min-placement-diversity-distance "$MIN_PLACEMENT_DIVERSITY_DISTANCE" \
       --solvability-profile oracle_symbolic \
       --output-dir "$output_dir" --seed "$seed" \
       "$@" >"$log_path" 2>&1 || status=$?

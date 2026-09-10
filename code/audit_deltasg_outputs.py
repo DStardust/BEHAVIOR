@@ -640,6 +640,8 @@ def main():
         "env_type": Counter(), "primary_task": Counter(), "target_room": Counter(),
         "source_room": Counter(), "target_category": Counter(), "target_model": Counter(),
         "target_object_id": Counter(), "support_category": Counter(), "position_bin_25cm": Counter(),
+        "placement_category_position_bin_25cm": Counter(),
+        "placement_support_object_id": Counter(),
         "global_camera_count": Counter(), "camera_redundancy": Counter(),
         "global_camera_room": Counter(),
     }
@@ -686,6 +688,15 @@ def main():
             diversity_totals["support_category"][str(category)] += 1
         for position_bin in diversity.get("position_bins_25cm") or []:
             diversity_totals["position_bin_25cm"][str(position_bin)] += 1
+        for placement in diversity.get("placement_records") or []:
+            position_bin = placement.get("position_bin_25cm")
+            if placement.get("category") and placement.get("room_id") and position_bin:
+                key = f"{placement['category']}::{placement['room_id']}::{position_bin}"
+                diversity_totals["placement_category_position_bin_25cm"][key] += 1
+            if placement.get("support_object_id"):
+                diversity_totals["placement_support_object_id"][str(
+                    placement["support_object_id"]
+                )] += 1
         camera_coverage = (te.get("validation") or {}).get("camera_coverage") or {}
         if camera_coverage:
             diversity_totals["global_camera_count"][str(
@@ -734,6 +745,10 @@ def main():
             "with_issues": len(items) - ok_count,
         }
 
+    placement_position_counts = diversity_totals[
+        "placement_category_position_bin_25cm"
+    ]
+    placement_position_records = sum(placement_position_counts.values())
     report = {
         "root": str(root),
         "vis_root": str(vis_root) if vis_root else None,
@@ -744,6 +759,13 @@ def main():
         "issue_examples": examples,
         "duplicate_fingerprint_groups": duplicate_groups[:20],
         "diversity": {key: dict(counter) for key, counter in diversity_totals.items()},
+        "diversity_summary": {
+            "placement_position_records": placement_position_records,
+            "unique_category_room_position_bins_25cm": len(placement_position_counts),
+            "repeated_category_room_position_records": (
+                placement_position_records - len(placement_position_counts)
+            ),
+        },
     }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
