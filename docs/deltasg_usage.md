@@ -19,13 +19,19 @@
 
 ## 当前验收状态
 
-截至 2026-09-09，代码仓库中的“完成”分为两级，不能混用：
+截至 2026-09-10，代码仓库中的“完成”分为两级，不能混用：
 
 - 聚焦回归：Env-A 在 `Beechwood_0_int` 已生成 6/6 个不同任务样本且审计无问题；
   对这 6 个样本使用当前专家实现回放，5/6 通过（83.3%，失败项为
   `deliver_drink` 的官方 `OnTop` 终态）；
   Env-B fire 在 `Ihlen_1_int` 已生成 3/3、专家接受 3/3，并验证官方
   `OnFire=False`、场景完整性、摄像头和步骤图片。
+- Env-B 15 场景回归生成 46/60（76.7%），专家接受 37/46（80.4%）；其中 fire
+  9/9、dirty clothes 16/18、broken cleanup 10/14、dirty dishes 2/5。该结果验证了
+  已生成样本的专家通过率，但请求槽位端到端产出率为 37/60（61.7%），还不能标记为
+  全场景发布门禁完成。
+- 位置多样性聚焦回归在 `Beechwood_0_int` 连续生成 fire 3/3；6 个新增物体得到
+  6 个不同的“类别+房间+25 cm 位置”组合，零重复指纹、零审计问题。
 - 全覆盖发布：必须再通过 15 场景、全部任务/物品覆盖审计。聚焦回归通过不等于该门禁
   已完成，批量发布时仍应按“全任务批处理”一节执行并保留审计报告。
 
@@ -94,11 +100,35 @@ DELTASG_GPU=0 PYTHONUNBUFFERED=1 \
     --allow-repeat-tasks \
     --num-envs 10 \
     --llm-model qwen3.8-max \
+    --min-placement-diversity-distance 0.50 \
     --output-dir code/outputs/enva_beechwood \
     --seed 1000
 ```
 
-`--allow-repeat-tasks` 允许重复抽取任务类别，不允许生成完全相同的样本。样本指纹包含初始场景、任务、房间、物品、承接面和量化后的位置；相同物品放在不同合理位置会被视为不同样本。
+`--allow-repeat-tasks` 允许重复抽取任务类别，不允许生成完全相同的样本。样本指纹包含初始场景、任务、房间、物品、承接面和毫米级舍入后的位置；相同物品放在不同合理位置会被视为不同样本。
+
+## 放置位置多样性
+
+`--min-placement-diversity-distance` 默认是 `0.50` 米，适用于 Env-A/B/C。每个成功
+样本会把所有新增物体的实际位置写入 `diversity.placement_records`，包括类别、模型、
+语义角色、房间、承接面、放置模式、XY 坐标和 25 cm 位置分桶。后续样本按以下顺序选点：
+
+1. 先执行生活布局、承接面容量、物体 footprint、碰撞、机器人可达性和操作高度检查。
+2. 在通过上述检查的候选中，对同房间的地面位置或同一承接面的桌面位置执行 maximin
+   选择，优先选择离所有历史位置至少 0.50 米的点。
+3. 同一物体预先生成的三个地面回退候选也互相避让。
+4. 紧凑房间或小桌面无法满足 0.50 米时，选择最远的合法候选；不会为满足多样性而
+   穿过墙体、碰撞家具或降低可达性门槛。
+
+连续生成必须在同一个模拟器进程中运行，或使用 `--resume` 加载原输出目录的
+`checkpoint.json`，才能继承前序位置历史。不同场景使用各自的坐标历史，不把两个场景的
+世界坐标混在一起。完全相同的样本仍会由 `sample_fingerprint` 硬拒绝。
+
+查看一个样本记录的位置：
+
+```bash
+jq '.diversity.placement_records' code/outputs/<run>/online_env*.json
+```
 
 初始摄像头布置使用官方相机内参、视锥投影与 PhysX 射线遮挡检查。系统先检查
 机器人头部主相机，再针对仍不可见的任务物品，在其所在房间按官方墙角/墙面相机
@@ -288,6 +318,7 @@ tmux new-session -d -s "envbc_${RUN_ID}" \
    ENVA_NUM=0 ENVB_NUM=8 \
    ENVB_TYPES='fire,dirty_dishes,dirty_clothes,broken_object' \
    ENVC_NUM=0 RUN_EXPERT=1 \
+   MIN_PLACEMENT_DIVERSITY_DISTANCE=0.50 \
    bash code/run_envbc_multiscene_e2e.sh '$OUT' \
    > '$OUT.console.log' 2>&1"
 ```
@@ -296,7 +327,8 @@ tmux new-session -d -s "envbc_${RUN_ID}" \
 可设 `ENVB_TYPES=fire`；不设置 `SCENES` 时使用
 `code/configs/env_a_scenes.txt` 中的场景。脚本通过
 `code/run_omnigibson_single_gpu.sh` 保证每个 OmniGibson 子进程只看到一张 GPU，
-并且只在子进程内取消代理。
+并且只在子进程内取消代理。`config.json` 会记录实际使用的模型、每场景请求数、任务类型和
+`min_placement_diversity_distance`，发布数据时应与审计报告一并保留。
 
 实时查看生成数和专家端到端接受率：
 
@@ -334,6 +366,17 @@ python code/audit_deltasg_outputs.py \
   --json-out <output-root>/audit_accepted.json \
   --fail-on-issues
 ```
+
+位置多样性汇总直接读取审计 JSON：
+
+```bash
+jq '.diversity_summary' <output-root>/audit_accepted.json
+```
+
+- `placement_position_records`：参与统计的新增物体放置记录总数。
+- `unique_category_room_position_bins_25cm`：类别、房间和 25 cm 位置组合的唯一数。
+- `repeated_category_room_position_records`：落入既有组合的记录数；正式批次应结合房间
+  尺寸解释该值，并同时确认 `duplicate_fingerprint_groups` 为空。
 
 只有同时满足生成成功、初始场景完整、物理稳定、非重复且可视化审计通过的样本，才应进入训练数据集。生成输出和大批量图像不提交到 Git；应作为带 manifest 和审计报告的 release artifact 或外部数据集发布。
 

@@ -394,3 +394,26 @@ corridor positions. The corridor's first two extinguisher poses are more than
 0.50 m apart; the third uses the maximum legal spacing after the narrow floor
 region is saturated. Full static verification is 392 passing tests plus
 `py_compile`, `bash -n`, and `git diff --check`.
+
+## Active diversified 15-scene generation - 2026-09-10
+
+Commit `a79a4c8` is running a generation-only Env-B batch in tmux session
+`deltasg_envb_diverse15`. The output root is
+`code/outputs/envb_diverse_15scenes_a79a4c8_20260910_163923`. It requests eight
+samples in each of the 15 versioned scenes (120 slots total), rotates all four
+Env-B anomaly types, uses `qwen3.8-max`, and records a 0.50 m placement-diversity
+preference in `config.json`. Expert replay is intentionally disabled for this
+generation pass and must use the accepted generation outputs in a subsequent
+audited stage.
+
+Progress is read without attaching to Kit:
+
+```bash
+python code/monitor_envbc_multiscene_e2e.py \
+  code/outputs/envb_diverse_15scenes_a79a4c8_20260910_163923
+```
+
+The first-scene health check reached 2/8 generated from four raw attempts while
+the same simulator process remained alive. The terminal result must replace
+this launch snapshot after the batch completes; no success-rate claim is made
+from this partial count.
