@@ -65,9 +65,11 @@ def sample_diversity_record(run):
     placement_records = []
     target_models = set()
     for item in objects:
+        placement = item.get("placement") or {}
+        if placement.get("mode") == "reused":
+            continue
         position = ((item.get("pose") or {}).get("position"))
         if isinstance(position, (list, tuple)) and len(position) >= 2:
-            placement = item.get("placement") or {}
             placement_records.append({
                 "category": item.get("category"),
                 "model": item.get("model"),

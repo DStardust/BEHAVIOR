@@ -689,6 +689,8 @@ def main():
         for position_bin in diversity.get("position_bins_25cm") or []:
             diversity_totals["position_bin_25cm"][str(position_bin)] += 1
         for placement in diversity.get("placement_records") or []:
+            if placement.get("mode") == "reused":
+                continue
             position_bin = placement.get("position_bin_25cm")
             if placement.get("category") and placement.get("room_id") and position_bin:
                 key = f"{placement['category']}::{placement['room_id']}::{position_bin}"

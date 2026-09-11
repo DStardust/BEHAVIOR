@@ -2873,29 +2873,66 @@ class OnlineDeltaSGEngine:
                 actual_rooms = self._rooms_for_obj(existing)
                 actual_room = actual_rooms[0] if actual_rooms else target_room
                 native_name = getattr(existing, "name", None)
-                result.update({
-                    "ok": True,
-                    "requested_object_name": object_name,
-                    "object_name": native_name,
-                    "reused": True,
-                    "reused_object_name": native_name,
-                    "model": getattr(existing, "model", None),
-                    "relation": {"ok": True, "mode": "reused", "reason": "scene_native"},
-                    "placement": {"room_id": actual_room, "mode": "reused", "support_object_id": None},
-                    "final_pose_before_warmup": {"position": pos, "orientation_xyzw": ori},
-                    "delta_node": {
-                        "id": native_name,
-                        "type": "reused_object",
-                        "category": category,
-                        "synset": record["synset"],
-                        "room_id": actual_room,
-                        "semantic_roles": [semantic_role],
-                        "reused_from": native_name,
-                    },
-                    "delta_edges": [{"source": f"room::{actual_room}", "target": native_name, "relation": "contains"}],
-                })
-                print(f"[reuse] {category} → existing {getattr(existing, 'name', '?')}", flush=True)
-                return result
+                reused_placement = {
+                    "room_id": actual_room,
+                    "mode": "reused",
+                    "support_object_id": None,
+                }
+                if manipulated_object:
+                    reachability = self._validate_task_object_approach(
+                        existing, target_room=actual_room,
+                    )
+                    floor_height = self._floor_height_for_position(pos)
+                    manipulation_height = self._validate_floor_manipulation_height(
+                        existing,
+                        floor_height,
+                        minimum_height,
+                        primitive=floor_manipulation_primitive,
+                    )
+                    manipulation_height["solvability_profile"] = self.config.solvability_profile
+                    reused_placement["robot_approach"] = reachability
+                    reused_placement["manipulation_height"] = manipulation_height
+                    if not reachability["ok"] or not manipulation_height["eligible"]:
+                        result["errors"].append({
+                            "error": "reused_manipulated_object_ineligible",
+                            "object_name": native_name,
+                            "reachability": reachability,
+                            "manipulation_height": manipulation_height,
+                        })
+                        print(
+                            f"[reuse] reject {category} {native_name}: "
+                            f"approach_ok={reachability['ok']} "
+                            f"height_ok={manipulation_height['eligible']}; "
+                            "spawning a validated replacement",
+                            flush=True,
+                        )
+                        existing = None
+                if existing is None:
+                    native_name = None
+                else:
+                    result.update({
+                        "ok": True,
+                        "requested_object_name": object_name,
+                        "object_name": native_name,
+                        "reused": True,
+                        "reused_object_name": native_name,
+                        "model": getattr(existing, "model", None),
+                        "relation": {"ok": True, "mode": "reused", "reason": "scene_native"},
+                        "placement": reused_placement,
+                        "final_pose_before_warmup": {"position": pos, "orientation_xyzw": ori},
+                        "delta_node": {
+                            "id": native_name,
+                            "type": "reused_object",
+                            "category": category,
+                            "synset": record["synset"],
+                            "room_id": actual_room,
+                            "semantic_roles": [semantic_role],
+                            "reused_from": native_name,
+                        },
+                        "delta_edges": [{"source": f"room::{actual_room}", "target": native_name, "relation": "contains"}],
+                    })
+                    print(f"[reuse] {category} → existing {native_name}", flush=True)
+                    return result
 
             if not self._category_has_models(category):
                 raise ValueError(f"No available models found for category {category}")
@@ -2974,7 +3011,8 @@ class OnlineDeltaSGEngine:
             # Use cached graph from generate_env_a when available to avoid expensive re-scans
             placement_graph = cached_graph or self.snapshot()
             placement = self._choose_live_placement(
-                record, target_room, graph=placement_graph, preferred_position=preferred_position,
+                record, target_room, graph=placement_graph,
+                preferred_position=preferred_position, placement_category=category,
             )
             if preferred_support_id:
                 preferred_support = next(
@@ -2987,6 +3025,7 @@ class OnlineDeltaSGEngine:
                 preferred_placement = (
                     self._build_placement_for_support(
                         record, target_room, preferred_support, graph=placement_graph,
+                        placement_category=category,
                     )
                     if preferred_support is not None
                     else None
@@ -3043,6 +3082,7 @@ class OnlineDeltaSGEngine:
                         placement_obj=obj,
                         require_footprint_clear=generated_support_fixture,
                         diversity_avoid_positions=floor_candidate_positions,
+                        placement_category=category,
                     )
                     if floor_placement:
                         if record.get("_prefer_floor_first"):
@@ -3089,7 +3129,10 @@ class OnlineDeltaSGEngine:
                 alt_is_floor = self._tokens(alt_support.get("category") or "") & {"floor", "floors"}
                 if manipulated_object and alt_is_floor and not task_floor_eligible:
                     continue
-                alt_placement = self._build_placement_for_support(record, target_room, alt_support, graph=placement_graph)
+                alt_placement = self._build_placement_for_support(
+                    record, target_room, alt_support, graph=placement_graph,
+                    placement_category=category,
+                )
                 if alt_placement:
                     candidates.append(alt_placement)
             if (
@@ -8229,7 +8272,10 @@ class OnlineDeltaSGEngine:
         max_score = max(scores.values())
         return self.rng.choice(sorted(room for room, score in scores.items() if score == max_score))
 
-    def _choose_live_placement(self, record, target_room, graph=None, preferred_position=None):
+    def _choose_live_placement(
+        self, record, target_room, graph=None, preferred_position=None,
+        placement_category=None,
+    ):
         graph = graph or self.snapshot()
         support_result = self._choose_support_node(
             record, target_room, graph, preferred_position=preferred_position,
@@ -8266,20 +8312,26 @@ class OnlineDeltaSGEngine:
             },
             "pose_source": "live_support_object",
             "_diversity_avoid_positions_xy": self._historical_placement_positions(
-                target_room, support_object_id=support_node["id"] if support_node else None,
+                target_room,
+                support_object_id=support_node["id"] if support_node else None,
+                category=placement_category,
             ),
         }
 
     def _historical_placement_positions(
-        self, target_room, support_object_id=None
+        self, target_room, support_object_id=None, category=None,
     ):
-        """Return accepted XY poses used to diversify a room or support."""
+        """Return prior XY poses for the same category in a room or support."""
         positions = []
         for sample in self._checkpoint.get("successful_samples", []):
             diversity = sample.get("diversity") or {}
             placement_records = diversity.get("placement_records") or []
             for item in placement_records:
+                if item.get("mode") == "reused":
+                    continue
                 if item.get("room_id") != target_room:
+                    continue
+                if category is not None and item.get("category") != category:
                     continue
                 if (
                     support_object_id is not None
@@ -8290,7 +8342,11 @@ class OnlineDeltaSGEngine:
                 if isinstance(position, (list, tuple)) and len(position) >= 2:
                     positions.append((float(position[0]), float(position[1])))
             # Checkpoints created before placement_records used task-object bins.
-            if placement_records or target_room not in (diversity.get("source_rooms") or []):
+            if (
+                category is not None
+                or placement_records
+                or target_room not in (diversity.get("source_rooms") or [])
+            ):
                 continue
             for position_bin in diversity.get("position_bins_25cm") or []:
                 if isinstance(position_bin, (list, tuple)) and len(position_bin) >= 2:
@@ -8541,7 +8597,10 @@ class OnlineDeltaSGEngine:
         alt_candidates = [n for n in alt_candidates if n["id"] != chosen["id"]]
         return {"node": chosen, "candidates": alt_candidates}
 
-    def _build_placement_for_support(self, record, target_room, support_node, graph=None):
+    def _build_placement_for_support(
+        self, record, target_room, support_node, graph=None,
+        placement_category=None,
+    ):
         """Build a placement dict for a specific fallback support node."""
         try:
             graph = graph or self.snapshot()
@@ -8575,7 +8634,9 @@ class OnlineDeltaSGEngine:
                 },
                 "pose_source": "fallback_support",
                 "_diversity_avoid_positions_xy": self._historical_placement_positions(
-                    target_room, support_object_id=support_node["id"],
+                    target_room,
+                    support_object_id=support_node["id"],
+                    category=placement_category,
                 ),
             }
         except Exception:
@@ -9169,6 +9230,7 @@ class OnlineDeltaSGEngine:
         placement_obj=None,
         require_footprint_clear=False,
         diversity_avoid_positions=None,
+        placement_category=None,
     ):
         """Last-resort placement: on the floor in the target room."""
         try:
@@ -9402,7 +9464,9 @@ class OnlineDeltaSGEngine:
                     if not pixels:
                         return None
                 historical_positions = [
-                    *self._historical_placement_positions(target_room),
+                    *self._historical_placement_positions(
+                        target_room, category=placement_category,
+                    ),
                     *(diversity_avoid_positions or []),
                 ]
                 reference = preferred_position if preferred_position is not None else room_center

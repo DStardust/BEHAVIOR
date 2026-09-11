@@ -417,3 +417,44 @@ The first-scene health check reached 2/8 generated from four raw attempts while
 the same simulator process remained alive. The terminal result must replace
 this launch snapshot after the batch completes; no success-rate claim is made
 from this partial count.
+
+## Diversified 15-scene terminal audit - 2026-09-11
+
+The generation-only run above completed all scenes and left no simulator
+process. It generated 87/120 requested slots (72.5%) from 312 raw attempts:
+34 dirty-clothes, 28 broken-object, 17 fire, and 8 dirty-dish samples. Four
+scenes reached 8/8; the weakest scenes were `Beechwood_1_int` and
+`Pomaria_0_int` at 1/8. Every accepted JSON has two or three global cameras,
+and no pair has the same full sample fingerprint.
+
+A strict aggregate audit found that only 85/120 requested slots (70.8%) were
+clean. Two `Merom_0_int` broken-object records had reused the same native trash
+can in an unreachable utility room without recording task-destination approach
+or height evidence. Reused manipulated objects are now checked before the
+reuse branch can return success. An ineligible native object is left untouched
+and a normally placed, collision/reachability/height-validated replacement is
+attempted in the requested room. A real `Merom_0_int` diagnostic at
+`code/outputs/runtime_checks/merom0_reusegate_20260911_095729` exercised this
+branch: the native trash can was rejected with `approach_ok=False`, and the
+replacement passed the official `Inside` preflight. The attempt later failed
+the independent official broken-piece-to-dustpan `OnTop` preflight. The same
+two-slot run produced one separately accepted broken-cleanup sample whose
+reachable native destination records a 0.724 m approach and valid 0.199 m
+operation height. Strict audit is 1/1 clean with three generated position
+records in three unique bins; the process exit is 2 because the other requested
+slot exhausted its strict retry budget.
+
+Placement history and audit summaries now exclude `mode=reused` scene-native
+objects and compare historical positions within the same object category.
+This avoids counting an unchanged native container as generated-placement
+diversity and prevents other tool categories from consuming the 0.50 m spacing
+budget. The old output, re-audited under this definition, has 227 generated
+placement records, 226 unique category-room-25 cm bins, and one repeated bin;
+the next fresh batch must verify that the category-scoped maximin rule removes
+that remaining Ihlen trash-can repeat.
+
+The multiscene shell runner also no longer marks partial production as `DONE`:
+generation audits use `--fail-on-issues`, per-scene and root state become
+`PARTIAL` when any requested phase exits nonzero, and the shell returns nonzero
+accordingly. Final static verification is 395 passing tests, Python compilation,
+shell syntax validation, and `git diff --check`.

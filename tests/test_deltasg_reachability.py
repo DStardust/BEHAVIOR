@@ -794,6 +794,14 @@ def test_generated_support_models_are_not_reported_as_task_target_models():
             ("anomaly_carrier", "toaster", "toaster_model", "kitchen_0"),
         ]
     ]
+    objects.append({
+        "semantic_roles": ["task_destination"],
+        "category": "trash_can",
+        "model": "native_model",
+        "room_id": "kitchen_0",
+        "pose": {"position": [1, 2, 0]},
+        "placement": {"mode": "reused"},
+    })
     record = namespace["sample_diversity_record"]({"task_environment": {"added_objects": objects}})
     assert record["target_categories"] == ["plate", "toaster"]
     assert record["target_models"] == [
@@ -806,6 +814,37 @@ def test_generated_support_models_are_not_reported_as_task_target_models():
     assert record["placement_records"][0]["position_bin_25cm"] == [4, 8]
 
 
+def test_historical_placement_positions_match_category_and_ignore_reused_objects():
+    import ast
+
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    engine = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "OnlineDeltaSGEngine"
+    )
+    function = next(
+        node for node in engine.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_historical_placement_positions"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(CODE_DIR), "exec"), namespace)
+    dummy = type("Dummy", (), {})()
+    dummy._checkpoint = {"successful_samples": [{"diversity": {"placement_records": [
+        {"category": "trash_can", "room_id": "kitchen_0", "mode": "floor",
+         "support_object_id": None, "position_xy": [1.0, 2.0]},
+        {"category": "broom", "room_id": "kitchen_0", "mode": "floor",
+         "support_object_id": None, "position_xy": [3.0, 4.0]},
+        {"category": "trash_can", "room_id": "kitchen_0", "mode": "reused",
+         "support_object_id": None, "position_xy": [5.0, 6.0]},
+    ]}}]}
+    positions = namespace["_historical_placement_positions"](
+        dummy, "kitchen_0", category="trash_can",
+    )
+    assert positions == [(1.0, 2.0)]
+
+
 def test_placement_diversity_is_applied_after_physical_candidate_filters():
     source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
     floor = source[
@@ -813,9 +852,10 @@ def test_placement_diversity_is_applied_after_physical_candidate_filters():
         source.index("def _hypothetical_support_has_operation_approach")
     ]
     relation = source[source.index("def _apply_relation"):source.index("def _state_by_name")]
-    assert "*self._historical_placement_positions(target_room)" in floor
+    assert "*self._historical_placement_positions(" in floor
+    assert "target_room, category=placement_category" in floor
     assert floor.index("footprint_clear_pixels") < floor.index(
-        "*self._historical_placement_positions(target_room)"
+        "*self._historical_placement_positions("
     )
     assert "free_grid_points" in relation
     assert relation.index("free_grid_points.append") < relation.index(
@@ -829,6 +869,32 @@ def test_placement_diversity_is_applied_after_physical_candidate_filters():
     assert "diversity_avoid_positions=floor_candidate_positions" in floor_calls
     batch = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
     assert '--min-placement-diversity-distance "$MIN_PLACEMENT_DIVERSITY_DISTANCE"' in batch
+
+
+def test_reused_manipulated_assets_are_validated_before_acceptance():
+    source = (CODE_DIR / "online_deltasg.py").read_text(encoding="utf-8")
+    reuse = source[
+        source.index("if existing is not None:", source.index("def add_task_asset")):
+        source.index("if not self._category_has_models", source.index("def add_task_asset"))
+    ]
+    assert "self._validate_task_object_approach(" in reuse
+    assert "self._validate_floor_manipulation_height(" in reuse
+    assert '"reused_manipulated_object_ineligible"' in reuse
+    assert reuse.index('if not reachability["ok"]') < reuse.index('"ok": True')
+
+    audit = (CODE_DIR / "audit_deltasg_outputs.py").read_text(encoding="utf-8")
+    diversity = audit[audit.index('for placement in diversity.get("placement_records")'):
+                      audit.index("camera_coverage =", audit.index('for placement in diversity.get("placement_records")'))]
+    assert 'if placement.get("mode") == "reused":' in diversity
+
+
+def test_envbc_batch_reports_partial_generation_and_strict_audit_failures():
+    source = (CODE_DIR / "run_envbc_multiscene_e2e.sh").read_text(encoding="utf-8")
+    assert "--root \"$generation_root\" --ok-only --fail-on-issues" in source
+    assert "generation_audit_status=0" in source
+    assert "printf 'PARTIAL\\n' > \"$scene_root/state\"" in source
+    assert "printf 'PARTIAL\\n' > \"$OUT_ROOT/state\"" in source
+    assert 'exit "$overall_status"' in source
 
 
 def test_envb_inside_audit_requires_recorded_success_in_exported_validation():
