@@ -223,7 +223,8 @@ def ingest_task_objects(idx: SceneIndex, task_instance: dict[str, Any]) -> None:
 
 def build_candidate_descriptors(task_instance: dict[str, Any],
                                 candidate_ids: list[str],
-                                index: "SceneIndex | None" = None) -> dict[str, str]:
+                                index: "SceneIndex | None" = None,
+                                exclude_room: bool = False) -> dict[str, str]:
     """为消歧候选对象生成"独一无二的空间特征"短语 (题干与选项共用, 保证标签一致)。
 
     返回 ``{object_id: 描述短语}``; 短语不含冠词, 形如::
@@ -236,6 +237,10 @@ def build_candidate_descriptors(task_instance: dict[str, Any],
     在房间内唯一) → 同一地标远近 → 门相对 (near/opposite the door) → 罗盘方位 → 数字后缀。
     数据源为 ``before_graph`` (edges.near + nodes.pose/rooms), 回退 after_graph / debug.before_graph;
     图缺失时直接退到数字后缀 (保证不坍缩)。
+
+    ``exclude_room=True`` (题干隐式化用): 房间名不作区分特征, 只用地标/门/方位等非房间属性;
+    全部无法区分时才以房间 id 兜底 (同房间多实例则加数字后缀)。此模式供
+    ``target_location_phrase`` 生成 room-free 的题干定位短语。
     """
     if index is None:
         index = build_scene_index(task_instance)
@@ -388,17 +393,21 @@ def build_candidate_descriptors(task_instance: dict[str, Any],
     for cat, members in groups.items():
         if len(members) == 1:
             oid = members[0]
+            if exclude_room:
+                descriptors[oid] = cat
+                continue
             room = _room(oid)
             descriptors[oid] = f"{cat} in {humanize(room)}" if room else cat
             continue
 
-        # 多实例: 先房间区分
-        rooms = [_room(oid) for oid in members]
-        if all(rooms) and len(set(rooms)) == len(members):
-            for oid in members:
-                room = _room(oid)
-                descriptors[oid] = f"{cat} in {humanize(room)}" if room else cat
-            continue
+        # 多实例: 先房间区分 (exclude_room 模式下跳过, 房间仅作最后兜底)
+        if not exclude_room:
+            rooms = [_room(oid) for oid in members]
+            if all(rooms) and len(set(rooms)) == len(members):
+                for oid in members:
+                    room = _room(oid)
+                    descriptors[oid] = f"{cat} in {humanize(room)}" if room else cat
+                continue
 
         # 同房间: 显著地标锚定
         room = _room(members[0]) or _room(members[-1])
@@ -441,6 +450,9 @@ def build_candidate_descriptors(task_instance: dict[str, Any],
         dirs = [_direction(oid, _room(oid)) for oid in members]
         if all(d for d in dirs) and len(set(dirs)) == len(members):
             for oid, d in zip(members, dirs):
+                if exclude_room:
+                    descriptors[oid] = f"{cat} ({d})"
+                    continue
                 room = _room(oid)
                 descriptors[oid] = (f"{cat} in the {d} part of {humanize(room)}" if room
                                     else f"{cat} ({d})")
@@ -452,7 +464,7 @@ def build_candidate_descriptors(task_instance: dict[str, Any],
             if d0 is not None and d1 is not None and abs(d0 - d1) > DIRECTION_EPS:
                 room = _room(members[0]) or _room(members[1])
                 nearer, farther = (members[0], members[1]) if d0 < d1 else (members[1], members[0])
-                if room:
+                if room and not exclude_room:
                     descriptors[nearer] = f"{cat} nearer to the center of {humanize(room)}"
                     descriptors[farther] = f"{cat} farther from the center of {humanize(room)}"
                 else:
@@ -460,12 +472,24 @@ def build_candidate_descriptors(task_instance: dict[str, Any],
                     descriptors[farther] = f"{cat} farther from the room center"
                 continue
 
-        # 兜底: 数字后缀 (必唯一)
+        # 兜底: 目标房间在同类实例中唯一时用干净房间 id (无裸数字); 仅同房间多实例
+        # (房间本身无法区分) 才追加数字后缀。避免全局"所有房间互异"失败时给每个实例
+        # 都塞上冗余裸数字 (如 13 个开关里 2 个同房间 → 其余 11 个也被迫加后缀)。
+        room_counts: dict[str, int] = {}
+        for oid in members:
+            r = _room(oid)
+            if r:
+                room_counts[r] = room_counts.get(r, 0) + 1
         for i, oid in enumerate(members, 1):
             m = re.search(r"_(\d+)$", oid)
             suffix = m.group(1) if m else str(i)
             room = _room(oid)
-            descriptors[oid] = f"{cat} {suffix} in {humanize(room)}" if room else f"{cat} {suffix}"
+            if room and room_counts[room] == 1:
+                descriptors[oid] = f"{cat} in {humanize(room)}"
+            elif room:
+                descriptors[oid] = f"{cat} {suffix} in {humanize(room)}"
+            else:
+                descriptors[oid] = f"{cat} {suffix}"
 
     return descriptors
 
@@ -632,3 +656,129 @@ def disambiguation_candidates(task_instance: dict[str, Any] | None) -> list[str]
     desc = build_candidate_descriptors(task_instance, ids)
     return [desc.get(oid) or object_category(oid, task_instance) or humanize(oid)
             for oid in ids]
+
+
+# ======================================================================
+# 题干隐式化: 目标物品的 room-free 定位短语 (R2)
+# ======================================================================
+# 结构支撑面类别 → 可读单数 (用于 "on the floor" 之类的支撑特征)
+SUPPORT_NL = {"floors": "floor", "walls": "wall", "ceilings": "ceiling"}
+
+
+def instances_of_category(index: "SceneIndex", oid: str | None) -> list[str]:
+    """返回与 ``oid`` 同类别 (humanize 后) 的全部 object_id 列表 (含自身)。
+
+    与 ``build_candidate_descriptors`` 的分组口径一致 (按 humanize 后的类别), 避免
+    原生物体与任务物体类别字符串的细微差异导致同类别被拆成两桶。
+    """
+    if not oid:
+        return []
+    cat = humanize((index.affordance.get(oid) or {}).get("category"))
+    if not cat:
+        return [oid]
+    return [o for o, aff in index.affordance.items() if humanize(aff.get("category")) == cat]
+
+
+def support_of(oid: str | None, task_instance: dict[str, Any],
+               index: "SceneIndex") -> str | None:
+    """返回物体 ``oid`` 的支撑物 object_id (来自时空图 ``supported_by_candidate`` 边), 无则 None。"""
+    if not oid:
+        return None
+    graph = (task_instance.get("before_graph")
+             or task_instance.get("after_graph")
+             or (task_instance.get("debug") or {}).get("before_graph")
+             or {})
+    for e in graph.get("edges") or []:
+        if e.get("relation") != "supported_by_candidate":
+            continue
+        src = strip_room_prefix(e.get("source") or "")
+        if src == oid:
+            return strip_room_prefix(e.get("target") or "") or None
+    return None
+
+
+def _support_phrase(support: str | None, index: "SceneIndex") -> str:
+    """支撑物 object_id → 可读短语 (floor/wall/ceiling 归一到单数, 其余取类别)。"""
+    cat = humanize((index.affordance.get(support) or {}).get("category") if support else "")
+    if not cat and support:
+        cat = humanize(support)
+    return SUPPORT_NL.get(cat, cat)
+
+
+def target_location_phrase(task_instance: dict[str, Any], oid: str | None,
+                           index: "SceneIndex | None" = None) -> str | None:
+    """生成目标物体 ``oid`` 的 room-free 定位短语, 供题干隐式化 (R2) 使用。
+
+    决策链 (按序, 第一条能唯一区分同类别实例即采用):
+      1. 类别唯一 (同类别实例 <=1)  → None (题干用裸类别)
+      2. 支撑特征 (时空图 supported_by_candidate) → "on the {support}" / "on the floor"
+      3. 非房间地标/门/方位 (复用 ``build_candidate_descriptors(exclude_room=True)`` 的 NL 特征)
+      4. 目标所在房间在同类实例中唯一 → "in {room}" (干净的房间 id, 无裸数字)
+      5. 以上全部失败 (同房间多实例且无自然语言特征可区分) → None (数据不合法, 调用方放弃)
+
+    返回短语**不含类别名** (如 "on the floor" / "near the door" / "in living room 0"), 便于
+    直接附加到题干已有的类别名之后; 无法生成时返回 None。
+    """
+    if not oid:
+        return None
+    if index is None:
+        index = build_scene_index(task_instance)
+    siblings = instances_of_category(index, oid)
+    if len(siblings) <= 1:
+        return None
+    cat = humanize((index.affordance.get(oid) or {}).get("category") or oid)
+
+    # 支撑特征: 各实例支撑物互异时用 "on the X" 区分
+    supports = [support_of(s, task_instance, index) for s in siblings]
+    if all(supports) and len(set(supports)) == len(siblings):
+        phrase = _support_phrase(supports[siblings.index(oid)], index)
+        if phrase:
+            return f"on the {phrase}"
+
+    # 非房间地标/门/方位链: 只接受 room-free 的 NL 特征 (不以 "in "/数字开头,
+    # 房间 id 兜底形如 "in living room 0" / "7 in living room 0" / "7" 一律排除)
+    desc = build_candidate_descriptors(task_instance, siblings, index, exclude_room=True).get(oid, "")
+    feature = (desc or "").strip()
+    if feature.startswith(cat):
+        feature = feature[len(cat):].strip()
+    if feature and not feature.startswith("in ") and not feature[0].isdigit():
+        return feature
+
+    # 房间兜底: 目标所在房间在同类实例中唯一 → 干净的房间 id (不暴露裸数字)
+    room = room_of(index, oid)
+    if room and [room_of(index, s) for s in siblings].count(room) == 1:
+        return f"in {humanize(room)}"
+
+    # 同房间多实例且无自然语言特征可区分 → 数据不合法 (裸数字兜底), 放弃
+    return None
+
+
+def target_is_unresolvable(task_instance: dict[str, Any], oid: str | None,
+                           index: "SceneIndex | None" = None) -> bool:
+    """目标类别存在多个实例, 且无法用自然语言特征或互异房间区分 (仅剩裸数字后缀)。
+
+    此类样例模型无法凭画面与自然语言定位目标物体 → 数据不合法, 应放弃该题。
+    唯一实例返回 False (裸类别即无歧义)。
+    """
+    if not oid:
+        return False
+    if index is None:
+        index = build_scene_index(task_instance)
+    if len(instances_of_category(index, oid)) <= 1:
+        return False
+    return target_location_phrase(task_instance, oid, index) is None
+
+
+def descriptor_is_bare_number(desc: str, cat: str) -> bool:
+    """判断空间描述符是否为"裸数字后缀"形态 (如 "electric switch 7 in living room 0")。
+
+    裸数字后缀 = 仅靠 object_id 末尾数字区分同房间多实例, 不含自然语言特征; 依用户规则
+    该类数据不合法 (模型无法凭画面/自然语言定位目标), 应放弃。``cat`` 为人类可读类别名,
+    须与 ``build_candidate_descriptors`` 的分组键一致 (即 ``category_of`` 的返回值)。
+    """
+    desc = (desc or "").strip()
+    cat = (cat or "").strip()
+    if not cat or not desc.startswith(cat):
+        return False
+    rest = desc[len(cat):].strip()
+    return bool(rest) and rest[0].isdigit()
