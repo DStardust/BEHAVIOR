@@ -384,6 +384,44 @@ jq '.diversity_summary' <output-root>/audit_accepted.json
 
 只有同时满足生成成功、初始场景完整、物理稳定、非重复且可视化审计通过的样本，才应进入训练数据集。生成输出和大批量图像不提交到 Git；应作为带 manifest 和审计报告的 release artifact 或外部数据集发布。
 
+## 上传 ModelScope
+
+先用 `prepare_deltasg_modelscope.py` 汇总 Env-A/B/C 已生成的数据。该脚本只保留
+`generation.ok=true`、`expert_result.accepted=true` 且机器人视角、全局视角、分割图和
+动作记录完整的样本，并把 `qa_eligible` 原值写入可移植 manifest：
+
+```bash
+python code/prepare_deltasg_modelscope.py \
+  --env-a-root code/outputs/<env-a-run> \
+  --env-b-root code/outputs/<env-b-run> \
+  --env-c-root code/outputs/<env-c-run> \
+  --output code/outputs/modelscope_ready
+```
+
+首次在机器上上传前执行一次 `modelscope login`。访问令牌只保存在 ModelScope CLI
+自己的登录配置中，不写入仓库、脚本或命令行参数。随后建议在 `tmux` 中上传到
+`DStardust/EM-STORM`：
+
+```bash
+RUN_ID="$(date +%Y%m%d_%H%M%S)"
+STAGED="code/outputs/modelscope_ready"
+LOG="code/outputs/modelscope_upload_${RUN_ID}.log"
+tmux new-session -d -s "modelscope_upload_${RUN_ID}" \
+  "cd '$PWD' && MODELSCOPE_COMMIT_MESSAGE='Upload DeltaSG accepted samples' \
+   code/upload_deltasg_modelscope.sh '$STAGED' \
+   > '$LOG' 2>&1"
+tail -f "$LOG"
+```
+
+脚本默认使用 8 个上传 worker；可通过 `MODELSCOPE_MAX_WORKERS` 调整，也可把第二个
+位置参数设为其他数据集仓库。上传前脚本会强制检查非空的
+`accepted_manifest.jsonl` 和 `dataset_summary.json`，不会直接上传未经筛选的原始
+`code/outputs` 目录。完整可选项可运行：
+
+```bash
+code/upload_deltasg_modelscope.sh
+```
+
 ## 已验收的可视化示例
 
 以下第一组图片来自同一个已通过的 `Beechwood_0_int` 检索专家样本，展示初始状态、
