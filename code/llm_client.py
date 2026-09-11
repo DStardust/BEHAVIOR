@@ -874,6 +874,94 @@ Determine the minimum objects needed. Output JSON:
 
 
 # ======================================================================
+# Prompt: QRA reasoning generation
+# ======================================================================
+_SYSTEM_QRA_REASONING = """\
+You are an embodied-AI reasoning annotator for a home-care robot benchmark.
+
+Given a multiple-choice question, its options, the correct answer, and a hint about \
+the robot's current step, produce a concise step-by-step reasoning chain explaining \
+WHY the correct answer is right.
+
+Rules:
+- Use only information present in the question, options, and the provided step hint. \
+Do not invent objects, rooms, or facts.
+- Ground the reasoning in the robot's situation (its room, the task it must accomplish, \
+what the correct action targets) and in the correct answer.
+- For a planning/next-step question, justify the chosen primitive and the target object/room.
+- For a disambiguation question, explain why the chosen object fits the task and why the \
+other candidates do not (use the rejected-candidate reasons when given).
+- Briefly touch on why the wrong options are wrong only when it clarifies the reasoning; \
+do not enumerate every distractor.
+- 2-4 short steps, one sentence each, plain English, no A/B/C/D labels, no object IDs.
+
+Output JSON with a single "reasoning" string (use "\\n" to separate steps)."""
+
+
+def _reasoning_step_hint(a: dict) -> dict:
+    """Extract a compact, human-readable "current step" hint from a structured answer ``A``.
+
+    Drops raw object IDs / bbox noise; keeps categories, the action primitive, the target
+    room, and (for disambiguation) the rejected candidates' reasons, which are exactly the
+    material the reasoning chain should articulate.
+    """
+    hint: dict[str, Any] = {}
+    if not isinstance(a, dict):
+        return hint
+    for k in ("action", "category", "room", "cross_room", "optimal_object"):
+        v = a.get(k)
+        if v not in (None, "", [], {}):
+            hint[k] = v
+    rejected = a.get("rejected_candidates") or []
+    if isinstance(rejected, list) and rejected:
+        hint["rejected_candidates"] = [
+            {"category": rc.get("category"), "reason": rc.get("reason")}
+            for rc in rejected if isinstance(rc, dict)
+        ]
+    return hint
+
+
+def translate_qra_to_nl(
+    client: LLMClient,
+    qra: dict,
+) -> dict | None:
+    """Generate the natural-language answer and reasoning chain for one QRA pair.
+
+    Args:
+        client: LLMClient instance.
+        qra: dict from ``QRAPair.to_dict()`` (question, options, answer_index, A, A_nl, ...).
+
+    Returns:
+        {"answer": str, "reasoning": str} or None on failure.
+    """
+    question = qra.get("Q") or qra.get("question") or ""
+    options = [o.get("text", "") for o in (qra.get("options") or []) if isinstance(o, dict)]
+    answer_index = qra.get("answer_index", -1)
+    answer = qra.get("A_nl") or ""
+    if not answer and 0 <= answer_index < len(options):
+        answer = options[answer_index]
+
+    if not question and not options:
+        return None
+
+    payload: dict[str, Any] = {
+        "task_type": qra.get("task_type") or "",
+        "question_type": qra.get("question_type") or "",
+        "question": question,
+        "options": options,
+        "correct_answer": answer,
+        "correct_option_index": answer_index,
+        "current_step": _reasoning_step_hint(qra.get("A") or {}),
+    }
+    user_prompt = json.dumps(payload, ensure_ascii=False)
+    result = client.call(_SYSTEM_QRA_REASONING, user_prompt, json_mode=True)
+    if not isinstance(result, dict):
+        return None
+    reasoning = str(result.get("reasoning") or "").strip()
+    return {"answer": answer, "reasoning": reasoning}
+
+
+# ======================================================================
 # Factory
 # ======================================================================
 def create_llm_client(
