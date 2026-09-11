@@ -77,11 +77,12 @@ from extract_feature import (
     STRUCTURAL_CATEGORIES,
     build_room_topology,
     derive_anomaly,
-    disambiguation_candidates,
     global_camera_rooms,
     humanize,
     object_category,
     resolve_rooms,
+    target_is_unresolvable,
+    target_location_phrase,
 )
 
 
@@ -754,39 +755,81 @@ def _surveillance_cam_line(task_instance: dict[str, Any] | None) -> str:
     return f"There are surveillance cameras in {rooms_str}.\n"
 
 
-def _build_english_question(ctx: GenContext, question_type: str) -> str:
+def _strip_room_from_text(text: str, rooms: list[str]) -> str:
+    """从指令/任务文本中剔除房间名 (R2 隐式化): 只删 " in <room>" 介词短语。
+
+    房间名取 humanize 后的形态 (如 "living room 0"), 按长度降序替换避免前缀误伤
+    ("living room 0" 与 "living room 1" 互不干扰)。
+    """
+    for room in sorted({humanize(r) for r in rooms if r}, key=len, reverse=True):
+        if not room:
+            continue
+        text = re.sub(r"\s+in\s+(?:the\s+)?" + re.escape(room) + r"\b", "", text)
+    return text
+
+
+def _implicitize_instruction(ctx: GenContext, instruction: str) -> str | None:
+    """把任务指令改成"不直接透露任务地点"的隐式形态 (R2)。
+
+    1. 剔除房间名;
+    2. 指令遵循类 (C/D) 的目标物品存在同类别多实例时, 附加 room-free 空间特征短语
+       (消歧类 E 不加 —— 消歧本身就是题目, 空间特征属于选项/答案, 见 distractor)。
+
+    目标类别多实例且无法用自然语言特征或互异房间区分 (仅剩裸数字后缀) 时返回 None,
+    表示该题数据不合法, 调用方应放弃。
+    """
+    rooms = (ctx.spatial_context or {}).get("rooms") or []
+    text = _strip_room_from_text(instruction or "", rooms)
+    if ctx.task_type == TASK_DISAMBIGUATION:
+        return text.strip().rstrip(".")
+    target = (ctx.next_step or {}).get("target_object")
+    if target:
+        if target_is_unresolvable(ctx.task_instance, target):
+            return None
+        phrase = target_location_phrase(ctx.task_instance, target)
+        if phrase and phrase.lower() not in text.lower():
+            text = f"{text.rstrip('.')} ({phrase})"
+    return text.strip().rstrip(".")
+
+
+def _build_english_question(ctx: GenContext, question_type: str) -> str | None:
     """生成英文题干 (home-care robot 场景), 避免中英混杂。
 
     规划类: 场景结构 + 任务指令(目标) + 上一步动作 + "下一步做什么"。
     预测类: 与规划类同结构, 但末句改为"执行下一步后场景会如何" (不给当前一步动作)。
     主动响应类 (A/B): 点明"可能存在需要处理的异常", 但不点名异常是什么/在哪里 (异常由模型
-        从视觉观测自行发现); 不渲染 instruction 与上一步动作 (避免泄露灭火器/房间)。
-    消歧类 (E): 任务指令 (保持原句) + 候选对象类别列表 + "选择正确对象并给出动作步骤"。
+        从视觉观测自行发现); 不渲染 instruction (避免泄露灭火器/房间), 上一步动作照常给出
+        (计划延续上下文)。
+    消歧类 (E): 任务指令 (保持原句) + 上一步动作 + "选择正确对象并给出动作步骤";
+        候选对象列表不写入题干 (只出现在选项侧, 由模型从视觉场景自行分辨)。
     只给最近一步动作 (Markov 形式), 不罗列完整历史, 避免文本泄露答案。
     感知类: 让机器人指出当前可见物体 (discriminator 侧再改写为判别式选择题)。
+
+    目标类别多实例且无法用自然语言/房间区分 (数据不合法) 时返回 None, 调用方放弃该题。
     """
     if question_type in (QTYPE_PLANNING, QTYPE_PREDICTION):
         structure = _room_structure_nl(ctx.spatial_context)
-        current_room, _, _ = resolve_rooms(ctx.task_instance, ctx.scene, ctx.next_step)
-        current_line = f"You are currently in the {humanize(current_room)}.\n" if current_room else ""
+        # R1: 机器人位置隐式化 —— 不再显式告知所在房间 (机器人自身必在摄像头可见,
+        # 结构行已列出全部房间名, 模型可从画面推断位置)。
+        current_line = ""
         cam_line = _surveillance_cam_line(ctx.task_instance)
+        previous = _previous_action_nl(ctx.task_instance, ctx.scene.simulation_step)
+        previous_text = previous.rstrip(".") if previous else "none — the task has just started"
 
-        # 多源信息消歧 (E): instruction + 候选对象 + "选择正确对象"
+        # 多源信息消歧 (E): instruction + 上一步动作 + "选择正确对象"
         if ctx.task_type == TASK_DISAMBIGUATION:
-            instruction = (ctx.scene.global_task or "").strip().rstrip(".")
-            candidates = disambiguation_candidates(ctx.task_instance)
-            cand_line = f"The candidate objects are: {', '.join(candidates)}.\n" if candidates else ""
+            instruction = _implicitize_instruction(ctx, ctx.scene.global_task or "")
             return (
                 "You are a home-care robot.\n"
                 f"You are in a room with structure {structure}.\n"
                 f"{current_line}"
                 f"{cam_line}"
                 f"Your task is: {instruction}.\n"
-                f"{cand_line}"
+                f"You have just completed: {previous_text}.\n"
                 "Select the correct object, give the action steps and your reasoning."
             )
 
-        # 主动响应 (A/B): 泛化异常提示, 不点名异常的具体内容/位置
+        # 主动响应 (A/B): 泛化异常提示, 不点名异常的具体内容/位置; 上一步动作照常给出
         if ctx.task_type in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
             tail = (
                 "Determine what needs to be handled and give the next step."
@@ -799,13 +842,14 @@ def _build_english_question(ctx: GenContext, question_type: str) -> str:
                 f"{current_line}"
                 f"{cam_line}"
                 "There may be an anomaly in the environment that needs to be handled.\n"
+                f"You have just completed: {previous_text}.\n"
                 f"{tail}"
             )
 
         # 指令遵循 (C/D): 明确指令 + 上一步动作
-        instruction = (ctx.scene.global_task or "").strip().rstrip(".")
-        previous = _previous_action_nl(ctx.task_instance, ctx.scene.simulation_step)
-        previous_text = previous.rstrip(".") if previous else "none — the task has just started"
+        instruction = _implicitize_instruction(ctx, ctx.scene.global_task or "")
+        if instruction is None:
+            return None  # 目标无法用自然语言/房间区分 (裸数字兜底) → 放弃该题
         tail = (
             "Now what should you do next?"
             if question_type == QTYPE_PLANNING
@@ -824,11 +868,17 @@ def _build_english_question(ctx: GenContext, question_type: str) -> str:
 
 
 def _primary_pair(ctx: GenContext, question_type: str,
-                  context: list[dict[str, Any]] | None = None) -> QRAPair:
-    """主问题 (规划 / 通用感知) 共用的组装逻辑: 出一类一条。"""
+                  context: list[dict[str, Any]] | None = None) -> QRAPair | None:
+    """主问题 (规划 / 通用感知) 共用的组装逻辑: 出一类一条。
+
+    题干无法生成 (目标多实例且无法用自然语言/房间区分) 时返回 None, 调用方放弃该题。
+    """
+    question = _build_english_question(ctx, question_type)
+    if question is None:
+        return None
     return _make_pair(
         ctx, question_type, question_type,
-        _build_english_question(ctx, question_type),
+        question,
         build_answer(question_type, ctx.scene, ctx.next_step, ctx.task_instance, ctx.task_type),
         build_reasoning(ctx.task_type, question_type, ctx.scene, ctx.next_step, ctx.llm),
         context=context,
@@ -842,7 +892,8 @@ def _gen_planning(ctx: GenContext) -> list[QRAPair]:
     """
     if classify_question(ctx.task_type, ctx.strategy) != QTYPE_PLANNING:
         return []
-    return [_primary_pair(ctx, QTYPE_PLANNING, context=ctx.backbone_context)]
+    pair = _primary_pair(ctx, QTYPE_PLANNING, context=ctx.backbone_context)
+    return [pair] if pair is not None else []
 
 
 def _gen_perception(ctx: GenContext) -> list[QRAPair]:
@@ -852,7 +903,8 @@ def _gen_perception(ctx: GenContext) -> list[QRAPair]:
     """
     if classify_question(ctx.task_type, ctx.strategy) != QTYPE_PERCEPTION:
         return []
-    return [_primary_pair(ctx, QTYPE_PERCEPTION)]
+    pair = _primary_pair(ctx, QTYPE_PERCEPTION)
+    return [pair] if pair is not None else []
 
 
 def _gen_anomaly(ctx: GenContext) -> list[QRAPair]:
@@ -949,6 +1001,8 @@ def _gen_prediction(ctx: GenContext) -> list[QRAPair]:
         "effect": effect,
     }
     question = _build_english_question(ctx, QTYPE_PREDICTION)
+    if question is None:
+        return []  # 目标无法用自然语言/房间区分 (裸数字兜底) → 放弃该题
     return [
         _make_pair(
             ctx, QTYPE_PREDICTION, QTYPE_PREDICTION, question, answer,

@@ -49,9 +49,12 @@ from extract_feature import (
     build_scene_index,
     category_of,
     current_room,
+    descriptor_is_bare_number,
     humanize,
+    instances_of_category,
     is_structural,
     room_of,
+    target_is_unresolvable,
 )
 
 
@@ -125,6 +128,16 @@ def _rng(seed: str, salt: str = "") -> "random.Random":
     """由 (qra_id, salt) 构造确定性 RNG, 保证同一实例多次生成结果一致。"""
     h = hashlib.md5(f"{seed}:{salt}".encode("utf-8")).hexdigest()
     return random.Random(int(h, 16))
+
+
+# 选项数区间 (R3): 每题在 [MIN, MAX] 内随机抽取, 由 qra_id 种子确定 (可复现)。
+NUM_OPTIONS_MIN = 5
+NUM_OPTIONS_MAX = 8
+
+
+def _num_options(qra_id: str) -> int:
+    """每题随机选项数 n ∈ [5, 8] (含正确项), 由 qra_id 种子确定。"""
+    return _rng(qra_id, "n_options").randint(NUM_OPTIONS_MIN, NUM_OPTIONS_MAX)
 
 
 def _action_key(a: dict[str, Any]) -> tuple:
@@ -246,7 +259,7 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
 def _action_distractors(step: dict[str, Any], index: SceneIndex,
                         plan: list[dict[str, Any]], t: int,
                         qra_id: str, rng: "random.Random",
-                        cur: str = "") -> list[tuple[dict[str, Any], dict[str, Any]]]:
+                        cur: str = "", k: int = NUM_OPTIONS - 1) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """为规划类下一步动作生成干扰项 (动作三元组单点替换)。返回 [(action, source)]。"""
     prim = step.get("primitive") or PRIMITIVE_WAIT
     target = step.get("target_object")
@@ -303,7 +316,7 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
         for oid in _tool_swap_pool(tool, target, index):
             cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
 
-    return _sample_distinct(cands, NUM_OPTIONS - 1, rng)
+    return _sample_distinct(cands, k, rng)
 
 
 # ======================================================================
@@ -472,19 +485,46 @@ def _planning_options(pair: Any, index: SceneIndex,
 
     rng = _rng(pair.qra_id, "distractors")
     cam = _robot_camera_grounding(scene)
+    n = _num_options(pair.qra_id)
+    target = step.get("target_object")
+
+    # 多实例目标: 用空间特征描述符区分 (选项可带房间, 故用含房间的描述符, 与题干 room-free 解耦)
+    siblings = instances_of_category(index, target)
+    desc_map: dict[str, str] = {}
+    if task_instance is not None and len(siblings) > 1:
+        desc_map = build_candidate_descriptors(task_instance, siblings, index)
 
     correct = {"kind": "action", "primitive": step.get("primitive") or PRIMITIVE_WAIT,
-               "target_object": step.get("target_object"), "tool_object": step.get("tool_object"),
-               "room": step.get("target_room") or room_of(index, step.get("target_object")),
+               "target_object": target, "tool_object": step.get("tool_object"),
+               "room": step.get("target_room") or room_of(index, target),
                "current_room": cur}
+    if target in desc_map:
+        correct["category"] = desc_map[target]
+        correct["room"] = None  # 描述符已含房间, 避免 MOVE 渲染重复 "in <room>"
     _annotate_action_bbox(correct, cam)
     correct_opt = {"kind": "action", "structured": correct,
                    "source": {"type": "solution_plan_step", "step_id": step.get("step_id")}}
 
     dist_opts = [{"kind": "action", "structured": a, "source": src}
-                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id, rng, cur)]
+                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id, rng, cur, k=n - 1)]
     for d in dist_opts:
         _annotate_action_bbox(d["structured"], cam)
+
+    # 空间特征干扰项 (R3): 同动作 + 同类别 + 不同实例/特征 (仅多实例时)。
+    # 仅纳入能被自然语言/房间干净区分的同类实例; 同房间且无 NL 特征区分者会退化为
+    # 裸数字后缀 (不合法), 直接跳过不用作干扰项。
+    prim = step.get("primitive") or PRIMITIVE_WAIT
+    tool = step.get("tool_object")
+    for oid in siblings:
+        if oid == target:
+            continue
+        if task_instance is not None and target_is_unresolvable(task_instance, oid, index):
+            continue
+        a = {"kind": "action", "primitive": prim, "target_object": oid,
+             "tool_object": tool if prim == PRIMITIVE_INTERACT else None,
+             "room": None, "current_room": cur, "category": desc_map.get(oid)}
+        dist_opts.append({"kind": "action", "structured": a,
+                          "source": {"type": "spatial_feature_confusion", "object_id": oid}})
 
     # bbox 混淆: 若正确目标在主视角可见, 追加"同动作、bbox 近误"的干扰项 (与正确项仅
     # bbox 数值不同, 是 planning 里最易混淆的一类, 考察细粒度定位)。
@@ -499,8 +539,17 @@ def _planning_options(pair: Any, index: SceneIndex,
             dist_opts.append({"kind": "action", "structured": confused,
                               "source": {"type": "bbox_confusion"}})
 
+    # R3 must-include: 保证强迷惑干扰项 (空间特征 / 仅 bbox 错误) 至少各入选一个。
+    # 空间特征干扰项仅在有"可被干净区分"的同类实例时要求入选 (同房间裸数字者已被跳过)。
+    must_include: list[str] = []
+    if any((d.get("source") or {}).get("type") == "spatial_feature_confusion" for d in dist_opts):
+        must_include.append("spatial_feature_confusion")
+    if isinstance(correct_bbox, (list, tuple)) and len(correct_bbox) == 4:
+        must_include.append("bbox_confusion")
+
     return _finalize(pair.qra_id, correct_opt, dist_opts, index,
-                     llm=llm, question=getattr(pair, "Q", "") or "")
+                     llm=llm, question=getattr(pair, "Q", "") or "",
+                     must_include=must_include or None)
 
 
 # ======================================================================
@@ -564,7 +613,7 @@ def _prediction_options(pair: Any, index: SceneIndex,
         for oid in _target_swap_pool(PRIMITIVE_PICK, moved, index):
             cands.append((_state(oid, "held"), {"type": "state_confusion", "subtype": "object"}))
 
-    picked = _sample_distinct(cands, NUM_OPTIONS - 1, rng,
+    picked = _sample_distinct(cands, _num_options(pair.qra_id) - 1, rng,
                               key_fn=lambda a, src: _option_key(a),
                               bucket_fn=lambda a, src: src.get("subtype", "other"))
     dist_opts = [{"kind": "state", "structured": a, "source": src} for a, src in picked]
@@ -845,12 +894,17 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
 # ======================================================================
 def _finalize(qra_id: str, correct_opt: dict[str, Any],
               dist_opts: list[dict[str, Any]], index: SceneIndex,
-              llm: Any = None, question: str = "") -> tuple[list[dict[str, Any]], int]:
+              llm: Any = None, question: str = "",
+              must_include: list[str] | None = None) -> tuple[list[dict[str, Any]], int]:
     """把正确项 + 干扰项合成一份选择题选项列表, 返回 (options, answer_index)。
 
     选项文本优先由 LLM 依据结构化整合信息措辞 (``_llm_render_options``), LLM 不可用/失败/
     坐标被改动时回退到规则渲染 (``_render_option``), 保证不丢样本、答案不受措辞影响。
+
+    选项数 n 由 ``_num_options`` (qra_id 种子) 决定, 在 [5,8] 内随机; ``must_include``
+    列出必须入选至少一个的干扰项来源类型 (R3 强迷惑项), 保证其不被随机丢弃。
     """
+    n = _num_options(qra_id)
     # 去重: 干扰项 vs 正确项 & 彼此 (结构化键 + 渲染文本, 避免"同类别多实例"渲染成同文案;
     # 动作文本已在物品名后内联 bbox, 使"同类别不同实例"若 bbox 不同仍可区分)
     seen = {_option_key(correct_opt["structured"])}
@@ -868,8 +922,20 @@ def _finalize(qra_id: str, correct_opt: dict[str, Any],
         uniq.append(d)
 
     rng = _rng(qra_id, "shuffle")
-    rng.shuffle(uniq)                 # 随机化"哪些干扰项入选" (类型组合跨样本随机)
-    uniq = uniq[:NUM_OPTIONS - 1]
+    # must-include: 保证指定来源类型的干扰项至少入选一个 (R3 强迷惑项)
+    if must_include:
+        head: list[dict[str, Any]] = []
+        for mt in must_include:
+            for d in uniq:
+                if (d.get("source") or {}).get("type") == mt and d not in head:
+                    head.append(d)
+                    break
+        rest = [d for d in uniq if d not in head]
+        rng.shuffle(rest)             # 其余干扰项随机化"哪些入选" (类型组合跨样本随机)
+        uniq = head + rest
+    else:
+        rng.shuffle(uniq)
+    uniq = uniq[:n - 1]
 
     opts = [correct_opt] + uniq
     rng.shuffle(opts)
@@ -917,7 +983,7 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
     target = a.get("target_object") or optimal
     cam = _robot_camera_grounding(scene) if scene is not None else {}
 
-    needed = NUM_OPTIONS - 1
+    needed = _num_options(pair.qra_id) - 1
     # 语义候选 (target + optimal + rejected): 空间特征只为它们计算, 与题干 (translator) 用同一批输入,
     # 保证题干列举的对象与选项标签一致 (同一类多实例用方位等特征区分, 而非任意的数字后缀)。
     semantic_ids: list[str] = [target]
@@ -929,6 +995,12 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
             semantic_ids.append(oid)
 
     desc_map = build_candidate_descriptors(task_instance, semantic_ids, index) if task_instance else {}
+
+    # 依用户规则: 消歧候选 (target/optimal/rejected) 若只能靠裸数字后缀区分 (同房间多实例
+    # 且无自然语言特征差异), 该题数据不合法 → 放弃 (返回空选项, 由审计脚本标记, 不静默降级)。
+    for oid in semantic_ids:
+        if oid in desc_map and descriptor_is_bare_number(desc_map[oid], category_of(index, oid)):
+            return [], -1
 
     def _make(oid: str, use_tool: str | None) -> dict[str, Any]:
         if oid in desc_map:
