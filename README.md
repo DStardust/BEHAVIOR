@@ -12,7 +12,9 @@
 审计与多场景批处理工具。项目使用方法、运行约束、实时进度命令和验收口径见
 [DeltaSG 中文使用手册](docs/deltasg_usage.md)。经过验收的检索、着火任务步骤图和
 全局相机画面见
-[可视化示例](docs/deltasg_usage.md#已验收的可视化示例)。
+[可视化示例](docs/deltasg_usage.md#已验收的可视化示例)。数据维护者将验收结果发布到
+`DStardust/EM-STORM` 的最短流程见
+[ModelScope 上传说明](docs/deltasg_usage.md#上传-modelscope)。
 
 # 🛠️ Installation
 

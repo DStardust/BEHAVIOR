@@ -398,9 +398,33 @@ python code/prepare_deltasg_modelscope.py \
   --output code/outputs/modelscope_ready
 ```
 
-首次在机器上上传前执行一次 `modelscope login`。访问令牌只保存在 ModelScope CLI
-自己的登录配置中，不写入仓库、脚本或命令行参数。随后建议在 `tmux` 中上传到
-`DStardust/EM-STORM`：
+上传不需要 OmniGibson 或 GPU，但本机必须能执行 ModelScope CLI。若尚未安装，可在
+准备上传所用的 Python 环境中执行：
+
+```bash
+python -m pip install modelscope
+modelscope --help
+```
+
+每位上传者应使用自己的 ModelScope 账号和 access token。仓库所有者需要先为该账号
+授予 `DStardust/EM-STORM` 数据集的写权限；仅能读取数据集的账号不能上传。首次在
+机器上登录时使用下面的方式，token 不会作为字面量进入 shell 历史：
+
+```bash
+read -rsp 'ModelScope access token: ' MODELSCOPE_TOKEN; echo
+modelscope login --token "$MODELSCOPE_TOKEN"
+unset MODELSCOPE_TOKEN
+```
+
+登录凭据由 ModelScope CLI 保存在当前用户自己的配置中，上传脚本不读取项目 `.env`、
+不包含固定 token，也不绑定最初上传数据的账号。完成登录且账号有写权限后，任何协作者
+都可以运行同一脚本。前台最短用法为：
+
+```bash
+code/upload_deltasg_modelscope.sh code/outputs/modelscope_ready
+```
+
+数据量较大时建议在 `tmux` 中上传到 `DStardust/EM-STORM`：
 
 ```bash
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
@@ -413,13 +437,14 @@ tmux new-session -d -s "modelscope_upload_${RUN_ID}" \
 tail -f "$LOG"
 ```
 
-脚本默认使用 8 个上传 worker；可通过 `MODELSCOPE_MAX_WORKERS` 调整，也可把第二个
-位置参数设为其他数据集仓库。上传前脚本会强制检查非空的
+脚本默认上传到 `DStardust/EM-STORM` 并使用 8 个上传 worker；可通过
+`MODELSCOPE_MAX_WORKERS` 调整，也可把第二个位置参数设为其他有写权限的数据集仓库。
+上传前脚本会强制检查非空的
 `accepted_manifest.jsonl` 和 `dataset_summary.json`，不会直接上传未经筛选的原始
 `code/outputs` 目录。完整可选项可运行：
 
 ```bash
-code/upload_deltasg_modelscope.sh
+code/upload_deltasg_modelscope.sh --help
 ```
 
 ## 已验收的可视化示例

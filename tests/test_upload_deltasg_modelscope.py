@@ -67,3 +67,16 @@ def test_upload_rejects_unstaged_output(tmp_path):
 
     assert result.returncode == 65
     assert "Refusing upload" in result.stderr
+
+
+def test_upload_help_is_available_without_modelscope_login():
+    result = subprocess.run(
+        [str(SCRIPT), "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "<staged-directory> [repo-id]" in result.stderr

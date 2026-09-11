@@ -6,7 +6,8 @@ usage() {
 Usage: code/upload_deltasg_modelscope.sh <staged-directory> [repo-id]
 
 Upload a directory produced by prepare_deltasg_modelscope.py to a ModelScope
-dataset repository. Authenticate once with `modelscope login` before running.
+dataset repository. Authenticate once with `modelscope login --token TOKEN`
+before running; use your own account and do not store its token in this repo.
 
 Optional environment variables:
   MODELSCOPE_REPO_ID             Default: DStardust/EM-STORM
@@ -15,6 +16,11 @@ Optional environment variables:
   MODELSCOPE_COMMIT_DESCRIPTION  Upload commit description
 EOF
 }
+
+if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+  exit 0
+fi
 
 if (( $# < 1 || $# > 2 )); then
   usage
