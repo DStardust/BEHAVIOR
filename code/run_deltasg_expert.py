@@ -1490,6 +1490,15 @@ class DeltaSGOraclePrimitives(SymbolicSemanticActionPrimitives):
             self.robot.keep_still()
             with og.sim.render_on_step(False):
                 og.sim.step()
+        # The render-off settle above solves the holonomic-base teleport in
+        # PhysX without updating Fabric (update_fabric=False), so the robot's
+        # articulation link poses (including the head camera prim) stay stale in
+        # the render/USD stage. Drain with render-only ticks, which force the
+        # PhysX->Fabric sync (SimulationContext.render's force_update) and render
+        # the solved pose, so the immediately-following post capture shows the
+        # new robot location (step3-post was rendering the grasp location).
+        for _ in range(3):
+            og.sim.render()
         if False:
             yield None
 
@@ -3459,7 +3468,17 @@ def _capture_event_unprotected(
     sensor = camera_streams.get("primary")
     if sensor is None:
         _, sensor = _primary_robot_camera(env.robots[0])
-    og.sim.render()
+    # Teleport-based state changes (GRASP object teleport, NAVIGATE_TO robot
+    # teleport) are stepped render-off in the action loop, so the render/USD
+    # stage still shows the previous state. A render-only drain is not enough
+    # for the robot kinematic tree (camera is a child link): per Simulator.step's
+    # TODO a pose change needs render-enabled steps to reach rendering. A few
+    # extra physics steps are negligible here — the scene is settled and held
+    # objects have gravity/collisions off, so nothing drifts — and give the
+    # articulation link poses (head camera included) more room to propagate
+    # before the capture reads the rendered frame.
+    for _ in range(5):
+        og.sim.step()
     _nav_diag_r6_state(env, env.robots[0], f"capture:{event_id}:render_1")
     # Defect #19 round-5 characterization (additive, DELTASG_NAV_DIAG-gated):
     # bracket the capture sub-operations so a native mover can be pinned to the
@@ -4945,9 +4964,19 @@ def _aim_tiago_head(robot, obj, support_surface=False, support_height_offset=0.2
             indices=robot.camera_control_idx,
             drive=False,
         )
-        # The next official capture performs the render. Rendering here after
-        # changing the camera-bearing head joints can crash SyntheticData while
-        # it rebuilds the post-process graph.
+        # The pan/tilt joints are set kinematically (drive=False), so the
+        # camera link's USD pose -- derived from articulation forward
+        # kinematics -- is not propagated to the render stage by the joint
+        # write alone, and the immediately-following capture reads the last
+        # rendered frame. Drain the post-process graph with render-only ticks
+        # (force_update) or the capture renders the previous aim target one
+        # frame late (step3-post still framed the extinguisher after the
+        # fire-point aim). Mirrors _restore_visible_observation_pose's
+        # head-joint restore drain; render-only ticks after a camera-bearing
+        # joint change are the established safe pattern (_settle_robot,
+        # _rotate_toward, _restore_visible_observation_pose).
+        for _ in range(3):
+            og.sim.render()
         return {
             "aimed": True,
             "requested_pan_tilt": list(requested),

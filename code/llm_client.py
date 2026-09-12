@@ -903,12 +903,15 @@ def _reasoning_step_hint(a: dict) -> dict:
 
     Drops raw object IDs / bbox noise; keeps categories, the action primitive, the target
     room, and (for disambiguation) the rejected candidates' reasons, which are exactly the
-    material the reasoning chain should articulate.
+    material the reasoning chain should articulate. For PLACE answers it also keeps the
+    placed object / destination categories, so the reasoning does not mistake the
+    destination (target) for the object being placed.
     """
     hint: dict[str, Any] = {}
     if not isinstance(a, dict):
         return hint
-    for k in ("action", "category", "room", "cross_room", "optimal_object"):
+    for k in ("action", "category", "room", "cross_room", "optimal_object",
+              "placed_category", "placement_mode", "destination_category"):
         v = a.get(k)
         if v not in (None, "", [], {}):
             hint[k] = v

@@ -13,7 +13,8 @@ translator.py — 层级4 数据管线层: 采样点 → QRA 结构化输出 (EM
    MOVE/PICK/PLACE/INTERACT/WAIT) / plan_objects / robot / camera
 2. **现成采样点**  ``expert_result.json`` 的 ``observation_events`` —— 每个采样点
    (event_id 形如 step_001_pre / step_001_post / ...) 携带机器人主视角与全局视角的
-   rgb/分割图路径、bbox、物体与机器人位姿、可见性列表
+   rgb/分割图路径、bbox、物体与机器人位姿、可见性列表。同一步骤若存在 ``*_retry_M``
+   重采样事件 (可见性恢复), 只取最终 retry 帧, 原事件视为被覆盖 (见 ``load_sampling_scenes``)
 3. **画面/分割图** ``frames/<event_id>/`` —— 由采样点里的路径指向
 
 输出
@@ -76,6 +77,7 @@ from typing import Any, Callable
 from extract_feature import (
     STRUCTURAL_CATEGORIES,
     build_room_topology,
+    carried_object_id,
     derive_anomaly,
     global_camera_rooms,
     humanize,
@@ -154,7 +156,7 @@ class StaticScene:
     robot_pose: dict[str, Any] = field(default_factory=dict)
     robot_visible: list[str] = field(default_factory=list)
     global_visible: list[str] = field(default_factory=list)
-    is_retry: bool = False             # nav_retry 事件 (step_NNN_post_nav_retry_M), 不重复生成主干规划/预测
+    is_retry: bool = False             # 最终 retry 帧 (step_NNN_post_nav_retry_M / step_NNN_post_head_retry_M)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StaticScene":
@@ -404,13 +406,16 @@ def _target_bbox(scene: StaticScene, object_id: str | None) -> list[int] | None:
 def build_answer(question_type: str, scene: StaticScene,
                  next_step: dict[str, Any] | None,
                  task_instance: dict[str, Any] | None = None,
-                 task_type: str | None = None) -> dict[str, Any]:
+                 task_type: str | None = None,
+                 simulation_step: int = 0) -> dict[str, Any]:
     """组装答案 A。
 
     - 感知类 → 场景中可见物体列表
     - 消歧类 (E) → optimal_object + 候选/干扰项 + 下一步动作
     - 响应类 → 下一步动作 (无下一步则任务完成); 附 target 的类别与主视角 bbox,
       供 LLM 翻译用 bounding box 定位物品 (不暴露物品 ID)。主动响应 (A/B) 额外附异常上下文。
+      PLACE 步骤额外附被放置物 (此前最近一次 PICK 的对象, 由 ``simulation_step`` 定位)
+      与放置模式, 避免把目的地 (target) 误当作被放置物。
 
     [MLLM] 感知类答案目前只列物体 id; 日后可接入 MLLM 从 rgb/seg 图生成物体状态的
     自然语言描述 (如"瓶子放在下层橱柜上")。异常检测类 (G) 的异常标注见 ``_gen_anomaly``。
@@ -466,6 +471,16 @@ def build_answer(question_type: str, scene: StaticScene,
         "room": humanize(target_room),
         "cross_room": cross_room,
     }
+    # PLACE 步骤: target 是目的地/容器, 被放置物为此前最近一次 PICK 的对象,
+    # 一并写入 A (供推理提示与规则兜底渲染使用, 避免下游把目的地误当作被放置物)。
+    if answer["action"] == PRIMITIVE_PLACE:
+        placed = carried_object_id((task_instance or {}).get("solution_plan") or [], simulation_step)
+        if placed is not None:
+            answer["placed_object"] = placed
+            answer["placed_category"] = object_category(placed, task_instance) or humanize(placed)
+            answer["destination_category"] = object_category(target, task_instance) or humanize(target)
+            answer["placement_mode"] = next_step.get("placement_mode") or "on"
+
     # 主动响应 (A/B): 附异常上下文 (异常由模型从视觉中自行发现, 题干不点名)
     if task_type in (TASK_SINGLE_VIEW_ACTIVE, TASK_MULTI_VIEW_ACTIVE):
         anomaly = (task_instance or {}).get("anomaly")
@@ -704,7 +719,8 @@ def _render_step_nl(step: dict[str, Any], task_instance: dict[str, Any],
     if prim == PRIMITIVE_PICK:
         return f"Pick up the {cat}."
     if prim == PRIMITIVE_PLACE:
-        return f"Place the {carried or 'object'} on the {cat}."
+        prep = "inside" if (step.get("placement_mode") or "") == "inside" else "on"
+        return f"Place the {carried or 'object'} {prep} the {cat}."
     if prim == PRIMITIVE_INTERACT:
         tool = object_category(step.get("tool_object"), task_instance)
         if tool and tool != cat:
@@ -737,11 +753,7 @@ def _carried_object_id(task_instance: dict[str, Any], t: int) -> str | None:
     供预测题求 PLACE 的"被放置物": PLACE 步骤本身不含被放置物, 需回看此前最近一次 PICK
     (与 ``_previous_action_nl`` 的 carried 推断同源, 但返回 object_id 而非人类可读类别)。
     """
-    plan = task_instance.get("solution_plan") or []
-    for s in reversed(plan[:t]):
-        if (s.get("primitive") or "") == PRIMITIVE_PICK:
-            return s.get("target_object")
-    return None
+    return carried_object_id(task_instance.get("solution_plan") or [], t)
 
 
 def _surveillance_cam_line(task_instance: dict[str, Any] | None) -> str:
@@ -879,7 +891,8 @@ def _primary_pair(ctx: GenContext, question_type: str,
     return _make_pair(
         ctx, question_type, question_type,
         question,
-        build_answer(question_type, ctx.scene, ctx.next_step, ctx.task_instance, ctx.task_type),
+        build_answer(question_type, ctx.scene, ctx.next_step, ctx.task_instance, ctx.task_type,
+                     ctx.scene.simulation_step),
         build_reasoning(ctx.task_type, question_type, ctx.scene, ctx.next_step, ctx.llm),
         context=context,
     )
@@ -1035,13 +1048,19 @@ def _parse_event_id(event_id: str) -> tuple[int, str]:
     return int(m.group(1)), m.group(2)
 
 
-def _is_retry_event(event_id: str) -> bool:
-    """是否 nav_retry 事件 (step_NNN_post_nav_retry_M)。
+def _retry_rank(event_id: str) -> int:
+    """retry 事件的重采样序号 (非 retry 事件为 0)。"""
+    m = re.search(r"_retry_(\d+)$", event_id or "")
+    return int(m.group(1)) if m else 0
 
-    这类事件与同名 step 的 post 帧共享同一 simulation_step, 仅用于补充 bbox/perception 采样,
-    不重复生成主干规划/预测问题 (见 translate_task_instance 的去重)。
+
+def _is_retry_event(event_id: str) -> bool:
+    """是否 retry 事件 (step_NNN_post_nav_retry_M / step_NNN_post_head_retry_M)。
+
+    这类事件是 expert 对同一 (step, phase) 的可见性恢复重采样; 最终 retry 帧为正确帧,
+    不带 retry 的原事件是被覆盖的失败尝试, 由 load_sampling_scenes 的覆盖过滤丢弃。
     """
-    return bool(re.search(r"_nav_retry_\d+", event_id or ""))
+    return bool(re.search(r"_retry_\d+$", event_id or ""))
 
 
 def load_task_context(task_instance: dict[str, Any]) -> dict[str, Any]:
@@ -1140,8 +1159,26 @@ def load_sampling_scenes(expert_result: dict[str, Any], task_ctx: dict[str, Any]
     global_task = task_ctx.get("instruction") or ""
     global_target = [o.get("object_id") for o in task_ctx.get("plan_objects") or []]
 
+    # 覆盖语义: 同一 (step, phase) 若同时存在原事件与 *_retry_M 事件, 原事件(及更早的
+    # retry)是 expert 侧被覆盖的失败尝试 (可见性校验未通过后重采样), 只保留最终 retry 帧
+    # 作为该采样点 (与 expert 侧 record["post_observation"] 的语义一致)。
+    events = expert_result.get("observation_events") or []
+    kept: set[str] = set()
+    by_key: dict[tuple[int, str], list[str]] = {}
+    for ev in events:
+        eid = ev.get("event_id", "")
+        by_key.setdefault(_parse_event_id(eid), []).append(eid)
+    for eids in by_key.values():
+        retries = [e for e in eids if _is_retry_event(e)]
+        if retries:
+            kept.add(max(retries, key=_retry_rank))
+        else:
+            kept.update(eids)
+
     scenes: list[StaticScene] = []
-    for ev in expert_result.get("observation_events") or []:
+    for ev in events:
+        if ev.get("event_id", "") not in kept:
+            continue
         event_id = ev.get("event_id", "")
         step_no, phase = _parse_event_id(event_id)
         next_idx = (step_no - 1) if phase == "pre" else step_no
@@ -1221,11 +1258,10 @@ def translate_task_instance(task_instance: dict[str, Any],
             spatial_context=room_topology,
         )
 
-        # 问题类型生成迭代: 规划类在前(主干), 其余类型随后; 不适用则生成器返回空
+        # 问题类型生成迭代: 规划类在前(主干), 其余类型随后; 不适用则生成器返回空。
+        # 被覆盖的原事件已在 load_sampling_scenes 丢弃, 保留下来的最终 retry 帧
+        # 按正常 post 帧生成全部题型 (不跳过规划/预测)。
         for generator in QUESTION_GENERATORS:
-            # nav_retry 事件仅保留 bbox/perception 采样, 不重复生成主干规划/预测
-            if scene.is_retry and generator in (_gen_planning, _gen_prediction):
-                continue
             generated = generator(ctx)
             pairs.extend(generated)
             # 主干(规划)问题生成后记入历史, 供后续轮次作为上下文
@@ -1328,6 +1364,13 @@ def _rule_answer_nl(pair: QRAPair) -> str:
         if bbox:
             return f"Move to the {name} (bbox {bbox})."
         return f"Move to the {name}."
+    if action == PRIMITIVE_PLACE and a.get("placed_category"):
+        # PLACE 语义: 被放置物 (placed) + 目的地 (target), 顺序不可颠倒
+        prep = "inside" if a.get("placement_mode") == "inside" else "on"
+        dest = a.get("destination_category") or name
+        if bbox:
+            return f"Place the {a['placed_category']} {prep} the {dest} (bbox {bbox})."
+        return f"Place the {a['placed_category']} {prep} the {dest}."
     if bbox:
         return f"{action} the {name} (bbox {bbox})."
     if category:

@@ -47,6 +47,7 @@ from extract_feature import (
     SceneIndex,
     build_candidate_descriptors,
     build_scene_index,
+    carried_object_id,
     category_of,
     current_room,
     descriptor_is_bare_number,
@@ -141,10 +142,14 @@ def _num_options(qra_id: str) -> int:
 
 
 def _action_key(a: dict[str, Any]) -> tuple:
-    """动作干扰项去重键。bbox 也纳入键, 使"同动作、不同 bbox"的混淆项可被区分。"""
+    """动作干扰项去重键。bbox 也纳入键, 使"同动作、不同 bbox"的混淆项可被区分。
+
+    PLACE 的 placed_object (被放置物) 纳入键: "Place the sock inside X" 与
+    "Place the sock inside Y" (目的地不同) 是不同动作。
+    """
     bbox = tuple(a.get("object_bbox") or [])
     return (a.get("kind"), a.get("primitive"), a.get("target_object"),
-            a.get("tool_object"), a.get("room"), bbox)
+            a.get("placed_object"), a.get("tool_object"), a.get("room"), bbox)
 
 
 def _option_key(s: dict[str, Any]) -> tuple:
@@ -260,16 +265,25 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
                         plan: list[dict[str, Any]], t: int,
                         qra_id: str, rng: "random.Random",
                         cur: str = "", k: int = NUM_OPTIONS - 1) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """为规划类下一步动作生成干扰项 (动作三元组单点替换)。返回 [(action, source)]。"""
+    """为规划类下一步动作生成干扰项 (动作三元组单点替换)。返回 [(action, source)]。
+
+    PLACE 语义: ``target_object`` 是目的地/容器, ``placed_object`` (此前最近一次 PICK
+    的对象) 才是被放置物; 所有 PLACE 干扰项都保持该双槽位结构, 替换仅作用于其中一个槽位。
+    """
     prim = step.get("primitive") or PRIMITIVE_WAIT
     target = step.get("target_object")
     tool = step.get("tool_object")
     room = step.get("target_room") or room_of(index, target)
+    placed = carried_object_id(plan, t) if prim == PRIMITIVE_PLACE else None
+    mode = (step.get("placement_mode") or "on") if prim == PRIMITIVE_PLACE else None
     cands: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
     def _action(**kw: Any) -> dict[str, Any]:
         a = {"kind": "action", "primitive": prim, "target_object": target,
              "tool_object": tool, "room": room, "current_room": cur}
+        if prim == PRIMITIVE_PLACE:
+            a["placed_object"] = placed
+            a["placement_mode"] = mode
         a.update(kw)
         return a
 
@@ -281,20 +295,31 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
              "tool_object": s.get("tool_object"),
              "room": s.get("target_room") or room_of(index, s.get("target_object")),
              "current_room": cur}
+        if (s.get("primitive") or "") == PRIMITIVE_PLACE:
+            a["placed_object"] = carried_object_id(plan, i)
+            a["placement_mode"] = s.get("placement_mode") or "on"
+            if a["placed_object"] is None:
+                continue  # 该 PLACE 步骤语义不完整, 不作干扰项
         if _action_key(a) == _action_key(_action()):
             continue
         cands.append((a, {"type": "temporal_confusion", "step_id": s.get("step_id")}))
 
-    # 2) 原语替换: 对正确目标换一个可行原语
+    # 2) 原语替换: 对正确目标换一个可行原语 (换非 PLACE 时丢弃 placed 槽位;
+    #    无法推断被放置物时不产生 PLACE 替换)
     if target:
         for alt in sorted(_feasible_primitives(target, index)):
             if alt == prim:
                 continue
+            if alt == PRIMITIVE_PLACE and not placed:
+                continue
             a = _action(primitive=alt,
                         tool_object=tool if alt == PRIMITIVE_INTERACT else None)
+            if alt != PRIMITIVE_PLACE:
+                a.pop("placed_object", None)
+                a.pop("placement_mode", None)
             cands.append((a, {"type": "primitive_swap", "feasible_for": target}))
 
-    # 3) 目标替换: 同原语换真实物体
+    # 3) 目标替换: 同原语换真实物体 (PLACE 时替换的是目的地, placed 不变)
     for oid in _target_swap_pool(prim, target, index):
         cands.append((_action(target_object=oid, tool_object=None, room=room_of(index, oid)),
                       {"type": "object_swap", "object_id": oid}))
@@ -305,13 +330,22 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
             cands.append((_action(target_object=None, tool_object=None, room=r),
                           {"type": "room_swap", "room": r}))
 
-    # 5) 支撑面替换 (PLACE)
+    # 5) 支撑面替换 (PLACE): 换目的地支撑面 (placed 不变)
     if prim == PRIMITIVE_PLACE:
         for oid in _support_swap_pool(target, index):
             cands.append((_action(target_object=oid, tool_object=None, room=room_of(index, oid)),
                           {"type": "support_swap", "support": oid}))
 
-    # 6) 工具替换 (INTERACT)
+    # 6) 被放置物替换 (PLACE): 换一个真实可抓物体 (目的地不变; 排除目的地自身,
+    #    避免产生 "Place the hamper inside the hamper" 之类自指干扰项)
+    if prim == PRIMITIVE_PLACE and placed:
+        for oid in _target_swap_pool(PRIMITIVE_PICK, placed, index):
+            if oid == target:
+                continue
+            cands.append((_action(placed_object=oid),
+                          {"type": "placed_swap", "object_id": oid}))
+
+    # 7) 工具替换 (INTERACT)
     if prim == PRIMITIVE_INTERACT:
         for oid in _tool_swap_pool(tool, target, index):
             cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
@@ -498,6 +532,14 @@ def _planning_options(pair: Any, index: SceneIndex,
                "target_object": target, "tool_object": step.get("tool_object"),
                "room": step.get("target_room") or room_of(index, target),
                "current_room": cur}
+    # PLACE 双槽位: target_object 是目的地/容器, 被放置物 = 此前最近一次 PICK 的对象;
+    # 被放置物不可知时该步语义不完整, 数据不合法 → 放弃 (不生成"Place the hamper on the target")。
+    if correct["primitive"] == PRIMITIVE_PLACE:
+        placed = carried_object_id(plan, t)
+        if placed is None:
+            return [], -1
+        correct["placed_object"] = placed
+        correct["placement_mode"] = step.get("placement_mode") or "on"
     if target in desc_map:
         correct["category"] = desc_map[target]
         correct["room"] = None  # 描述符已含房间, 避免 MOVE 渲染重复 "in <room>"
@@ -638,6 +680,17 @@ def _target_nl(a: dict[str, Any], index: SceneIndex) -> str:
     return tgt
 
 
+def _placed_nl(a: dict[str, Any], index: SceneIndex) -> str | None:
+    """PLACE 的被放置物短语 (类别名, 不带 bbox —— bbox 锚在目的地 target 上)。
+
+    结构化体可带 ``placed_category`` 覆盖; 未提供时回退 ``category_of`` 反查。
+    """
+    oid = a.get("placed_object")
+    if not oid:
+        return None
+    return a.get("placed_category") or category_of(index, oid) or humanize(oid)
+
+
 def _interact_tool_cat(a: dict[str, Any], index: SceneIndex) -> str:
     """INTERACT 动作的工具类别 (tool 非空且与目标不同类别时); 自指返回空串。
 
@@ -674,7 +727,14 @@ def _action_nl(a: dict[str, Any], index: SceneIndex) -> str:
     if prim == PRIMITIVE_PICK:
         return f"Pick up the {tgt}"
     if prim == PRIMITIVE_PLACE:
-        return f"Place the object on the {tgt}"
+        # PLACE 双槽位: "Place the <placed> on/inside the <destination>", 顺序不可颠倒
+        placed = _placed_nl(a, index)
+        prep = "inside" if a.get("placement_mode") == "inside" else "on"
+        if placed and target:
+            return f"Place the {placed} {prep} the {tgt}"
+        if placed:
+            return f"Place the {placed}"
+        return f"Place the object {prep} the {tgt}"  # 兜底: 无被放置物 (正常流程已放弃该题)
     if prim == PRIMITIVE_INTERACT:
         tool_cat = _interact_tool_cat(a, index)
         if tool_cat:
@@ -755,11 +815,15 @@ Hard constraints (follow all of them):
 rename, add, or drop them. For example, "bottle of water" must appear exactly as-is.
 2. Only do phrasing — never change the meaning: do not change the action, object, or room, and \
 do not add or omit information.
-3. Action primitive semantics: PICK = "Pick up", PLACE = "Place ... on", WAIT = "Wait". \
+3. Action primitive semantics: PICK = "Pick up", WAIT = "Wait". \
 MOVE means navigating to the target's location — write "Move to the <target>" (never "Move the \
 <target>", which would wrongly mean carrying it); however, if the option carries a "current_room" \
 that differs from its "room" (i.e. the robot moves to a different room), write \
 "Find the <target> in <room>" instead of "Move to the <target> in <room>". \
+PLACE has two slots: "placed" is the object being moved and "target" is the destination — write \
+"Place the <placed> inside the <target>" when "placement_mode" is "inside", otherwise \
+"Place the <placed> on the <target>"; never swap the two slots (the destination is never the \
+object being placed) and never invent a generic destination such as "the target". \
 INTERACT: if a "tool" is present and differs from the "target", write "Use the <tool> to operate \
 the <target>"; if "tool" is null/absent or equals the "target", write "Operate the <target>" \
 (never "Use the <target> to operate the <target>").
@@ -786,7 +850,7 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
         b = structured.get("object_bbox")
         if target and isinstance(b, (list, tuple)) and len(b) == 4:
             target = f"{target} (bbox {list(b)})"  # bbox 跟在物品名后面, 供 LLM 措辞保留
-        return {
+        payload: dict[str, Any] = {
             "type": "action",
             "action": prim,
             "target": target,
@@ -794,6 +858,11 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
             "room": humanize(structured.get("room")) or None,
             "current_room": humanize(structured.get("current_room")) or None,
         }
+        # PLACE 双槽位: placed = 被放置物, target = 目的地 (LLM 据此措辞, 不得互换/发明)
+        if prim == PRIMITIVE_PLACE:
+            payload["placed"] = _placed_nl(structured, index)
+            payload["placement_mode"] = structured.get("placement_mode") or "on"
+        return payload
     if kind == "object":
         cat = structured.get("category")
         return {
@@ -860,9 +929,11 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
             return None
         # 坐标必须逐字保留, 否则整题回退 (数值是正确答案的关键, 不能由 LLM 重写)
         structured = options[i]["structured"]
-        # 措辞敏感的两种情形用确定性规则渲染覆盖 LLM (只覆盖该选项、不整题回退):
+        # 措辞敏感的情形用确定性规则渲染覆盖 LLM (只覆盖该选项、不整题回退):
         #   INTERACT 无 tool 或 tool 与 target 同类别 (自指) → "Operate the X" (杜绝 "Use the X to operate the X" 自指 / Use 不一致);
-        #   MOVE 跨房间 (room≠current_room) → "Find the X in <room>"。
+        #   MOVE 跨房间 (room≠current_room) → "Find the X in <room>";
+        #   PLACE 语义校验: 被放置物与目的地实体名必须逐字出现 (防 LLM 换槽位 /
+        #   发明 "on the target" 目的地), 违者用规则渲染覆盖该选项。
         if structured.get("kind") == "action":
             prim = structured.get("primitive")
             if prim == PRIMITIVE_INTERACT and not _interact_tool_cat(structured, index):
@@ -872,6 +943,12 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
                 if (room and structured.get("current_room")
                         and room != structured.get("current_room")
                         and structured.get("target_object")):
+                    s = _render_option(structured, index)
+            elif prim == PRIMITIVE_PLACE and structured.get("placed_object"):
+                placed_name = _placed_nl(structured, index)
+                tgt_name = structured.get("category") or category_of(index, structured.get("target_object"))
+                if not (placed_name and tgt_name
+                        and placed_name in s and tgt_name in s):
                     s = _render_option(structured, index)
         if structured.get("kind") == "bbox":
             exact = _bbox_nl_exact(list(structured.get("bbox_xyxy") or []))
@@ -982,6 +1059,10 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
     # (导航到着火点 / 用工具灭火) 会正确推进到着火物体, 而非停在工具上。
     target = a.get("target_object") or optimal
     cam = _robot_camera_grounding(scene) if scene is not None else {}
+    # PLACE 双槽位: 消歧题若为 PLACE 步骤, 被放置物同样回看最近一次 PICK (destination 仍为 target)
+    placed = carried_object_id(plan, getattr(pair, "simulation_step", 0)) if action == PRIMITIVE_PLACE else None
+    mode = (plan[getattr(pair, "simulation_step", 0)] or {}).get("placement_mode") or "on" \
+        if action == PRIMITIVE_PLACE and 0 <= getattr(pair, "simulation_step", 0) < len(plan) else None
 
     needed = _num_options(pair.qra_id) - 1
     # 语义候选 (target + optimal + rejected): 空间特征只为它们计算, 与题干 (translator) 用同一批输入,
@@ -1003,13 +1084,16 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
             return [], -1
 
     def _make(oid: str, use_tool: str | None) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if action == PRIMITIVE_PLACE:
+            extra = {"placed_object": placed, "placement_mode": mode}
         if oid in desc_map:
             return {"kind": "action", "primitive": action, "target_object": oid,
-                    "tool_object": use_tool, "room": None, "category": desc_map[oid]}
+                    "tool_object": use_tool, "room": None, "category": desc_map[oid], **extra}
         rooms = (index.affordance.get(oid) or {}).get("rooms") or []
         return {"kind": "action", "primitive": action, "target_object": oid,
                 "tool_object": use_tool, "room": rooms[0] if rooms else None,
-                "category": category_of(index, oid)}
+                "category": category_of(index, oid), **extra}
 
     correct = {"kind": "action", "structured": _make(target, tool),
                "source": {"type": "optimal_object" if target == optimal else "target_object",

@@ -782,3 +782,16 @@ def descriptor_is_bare_number(desc: str, cat: str) -> bool:
         return False
     rest = desc[len(cat):].strip()
     return bool(rest) and rest[0].isdigit()
+
+
+def carried_object_id(plan: list[dict[str, Any]], t: int) -> str | None:
+    """返回 ``plan[:t]`` 中最近一次 PICK 的 target_object (object_id, 非类别); 无则 None。
+
+    PLACE 步骤的 ``target_object`` 是目的地/容器 (如 hamper), 被放置物不在该步里,
+    需回看此前最近一次 PICK 的对象 (与 ``solution_plan`` 的 inventory 语义一致)。
+    无前置 PICK 时该 PLACE 步骤语义不完整, 返回 None, 调用方应放弃该题。
+    """
+    for s in reversed(plan[:t] or []):
+        if (s.get("primitive") or "") == "PICK":
+            return s.get("target_object")
+    return None
