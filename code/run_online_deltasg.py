@@ -41,6 +41,9 @@ def sample_diversity_record(run):
     te = run.get("task_environment") or {}
     task = te.get("task") or {}
     objects = te.get("added_objects") or []
+    robot = te.get("robot") or {}
+    robot_start_room = robot.get("initial_room") or ""
+    target_room_value = task.get("target_room") or ""
     plan_objects = task.get("plan_objects") or []
     semantic_reasoning = te.get("semantic_reasoning") or task.get("semantic_reasoning") or {}
     task_objects = [
@@ -97,7 +100,11 @@ def sample_diversity_record(run):
         "primary_task": task.get("primary_behavior_task"),
         "anomaly_type": semantic_reasoning.get("anomaly_type"),
         "solution_path": semantic_reasoning.get("solution_path"),
-        "target_room": task.get("target_room"),
+        "target_room": target_room_value,
+        "robot_start_room": robot_start_room,
+        "cross_room": bool(
+            robot_start_room and target_room_value and robot_start_room != target_room_value
+        ),
         "source_rooms": source_rooms,
         "target_categories": sorted(set(categories)),
         "target_models": [
@@ -376,6 +383,14 @@ def main():
         help="Prefer legal placements at least this many metres from prior room/support placements.",
     )
     parser.add_argument(
+        "--cross-room-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of Env-A native samples in which the robot spawns in a "
+             "room different from the manipulation target (cross-room movement). "
+             "Range [0, 1]. 0 = always same-room (default).",
+    )
+    parser.add_argument(
         "--min-global-cameras",
         type=int,
         default=2,
@@ -555,6 +570,8 @@ def main():
         parser.error("manipulation height bounds must satisfy 0 <= min < max")
     if args.min_placement_diversity_distance < 0:
         parser.error("--min-placement-diversity-distance must be non-negative")
+    if not 0.0 <= args.cross_room_ratio <= 1.0:
+        parser.error("--cross-room-ratio must be in [0, 1]")
     if args.max_camera_pose_attempts < 1 or args.camera_pose_render_steps < 1:
         parser.error("camera pose attempts and render steps must both be positive")
     if args.target_asset_model and not args.target_asset_category:
@@ -624,6 +641,7 @@ def main():
             min_manipulation_height=args.min_manipulation_height,
             max_manipulation_height=args.max_manipulation_height,
             min_placement_diversity_distance=args.min_placement_diversity_distance,
+            cross_room_ratio=args.cross_room_ratio,
             target_asset_category=args.target_asset_category,
             target_asset_model=args.target_asset_model,
             target_native_object_id=args.target_native_object_id,
@@ -754,6 +772,7 @@ def main():
                                 warmup_steps=max(args.warmup_steps, 10),
                                 preferred_target_name=preferred_target,
                                 preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                                preferred_room=engine.prepared_cross_room_start_room(),
                                 settle_scene=False,
                             )
                         except RobotSpawnError as exc:

@@ -7,6 +7,10 @@ cd "$ROOT_DIR"
 OUT_ROOT="${1:-code/outputs/batch100_all_multiscene_20260708}"
 ROBOT="${ROBOT:-Tiago}"
 MODEL="${DELTASG_LLM_MODEL:-qwen3.8-max}"
+# Pass the DashScope key as an explicit argv flag: `conda run` can drop arbitrary
+# env vars, so forwarding it on the command line is more reliable than relying on
+# DASHSCOPE_API_KEY reaching the Python subprocess through the wrapper.
+LLM_API_KEY="${LLM_API_KEY:-${DASHSCOPE_API_KEY:-}}"
 NUM="${NUM:-100}"
 MIN_OK_PER_SCENE="${MIN_OK_PER_SCENE:-1}"
 TASK_OBJECTS="${TASK_OBJECTS:-1}"
@@ -98,6 +102,7 @@ run_gen_scene() {
       --checkpoint-interval 10 \
       --warmup-steps 20 --settle-steps 5 \
       --llm-model "$MODEL" \
+      --llm-api-key "$LLM_API_KEY" \
       --max-llm-retries 5 --max-retries 4 \
       --placement-timeout 60 --relation-timeout 10 \
       --max-placement-attempts 4 --max-total-placement-time 120 \

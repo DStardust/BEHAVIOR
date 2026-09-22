@@ -527,6 +527,7 @@ def stabilize_robot_spawn(
     native_displacement_limit=0.05,
     preferred_target_name=None,
     preferred_max_distance=1.0,
+    preferred_room=None,
     settle_scene=True,
 ):
     """Place the robot on the official traversability map and persist that reset pose."""
@@ -728,10 +729,18 @@ def stabilize_robot_spawn(
                             distance = float(
                                 th.linalg.norm(target_position[:2].cpu() - candidate_xy)
                             )
-                        if target_rooms and room not in target_rooms:
-                            continue
-                        if distance > preferred_max_distance:
-                            continue
+                        if preferred_room:
+                            # Cross-room spawn: restrict candidates to the
+                            # requested start room. No same-room or
+                            # manipulation-distance gate — the robot navigates
+                            # to the target during plan execution.
+                            if room != preferred_room:
+                                continue
+                        else:
+                            if target_rooms and room not in target_rooms:
+                                continue
+                            if distance > preferred_max_distance:
+                                continue
                         position = th.tensor(
                             [float(xy[0]), float(xy[1]), float(trav_map.floor_heights[floor])],
                             dtype=th.float32,
@@ -758,9 +767,15 @@ def stabilize_robot_spawn(
                     flush=True,
                 )
             if not spawn_candidates:
+                if preferred_room:
+                    detail = f"in preferred room {preferred_room!r}"
+                else:
+                    detail = (
+                        f"within {preferred_max_distance}m of native target "
+                        f"{preferred_target_name!r}"
+                    )
                 print(
-                    f"[robot-spawn] no same-room traversable spawn within "
-                    f"{preferred_max_distance}m of native target {preferred_target_name!r}; "
+                    f"[robot-spawn] no traversable spawn {detail}; "
                     "falling back to ordinary stable spawn",
                     flush=True,
                 )

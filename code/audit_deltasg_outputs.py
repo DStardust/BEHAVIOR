@@ -638,6 +638,7 @@ def main():
     bbox_totals = Counter()
     diversity_totals = {
         "env_type": Counter(), "primary_task": Counter(), "target_room": Counter(),
+        "robot_start_room": Counter(), "cross_room": Counter(),
         "source_room": Counter(), "target_category": Counter(), "target_model": Counter(),
         "target_object_id": Counter(), "support_category": Counter(), "position_bin_25cm": Counter(),
         "placement_category_position_bin_25cm": Counter(),
@@ -664,6 +665,9 @@ def main():
         for key in ("env_type", "primary_task", "target_room"):
             if diversity.get(key):
                 diversity_totals[key][str(diversity[key])] += 1
+        if diversity.get("robot_start_room"):
+            diversity_totals["robot_start_room"][str(diversity["robot_start_room"])] += 1
+        diversity_totals["cross_room"][str(bool(diversity.get("cross_room")))] += 1
         for category in diversity.get("target_categories") or []:
             diversity_totals["target_category"][str(category)] += 1
         target_models = diversity.get("target_models") or [

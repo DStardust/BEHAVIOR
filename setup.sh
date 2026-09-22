@@ -344,7 +344,11 @@ if [ "$OMNIGIBSON" = true ]; then
             }
 
             install_isaac_packages() {
-                local temp_dir=$(mktemp -d)
+                # Persistent cache so a failed run doesn't re-download every wheel.
+                # Override the location with ISAAC_WHEEL_CACHE_DIR; delete the dir to force re-download.
+                local cache_dir="${ISAAC_WHEEL_CACHE_DIR:-$HOME/.cache/isaacsim_wheels}"
+                mkdir -p "$cache_dir"
+
                 local packages=(
                     "omniverse_kit-107.3.1.206797"
                     "isaacsim_kernel-5.1.0.0"
@@ -379,28 +383,40 @@ if [ "$OMNIGIBSON" = true ]; then
                     local pkg_name=${pkg%-*}
                     local filename="${pkg}-cp311-none-manylinux_2_35_${ARCH}.whl"
                     local url="https://pypi.nvidia.com/${pkg_name//_/-}/$filename"
-                    local filepath="$temp_dir/$filename"
+                    local filepath="$cache_dir/$filename"
 
-                    echo "Downloading $pkg..."
-                    if ! curl -sL "$url" -o "$filepath"; then
-                        echo "ERROR: Failed to download $pkg"
-                        rm -rf "$temp_dir"
-                        return 1
+                    # Older glibc needs the wheel tagged manylinux_2_31 or pip rejects it.
+                    if check_glibc_old; then
+                        local install_filepath="$cache_dir/${filename/manylinux_2_35/manylinux_2_31}"
+                    else
+                        local install_filepath="$filepath"
+                    fi
+
+                    if [ -f "$install_filepath" ] || [ -f "$filepath" ]; then
+                        echo "Using cached $pkg..."
+                    else
+                        echo "Downloading $pkg..."
+                        # Download to a *.part file and rename only on success, so an
+                        # interrupted download is never mistaken for a complete wheel.
+                        if ! curl -fsSL "$url" -o "$filepath.part"; then
+                            echo "ERROR: Failed to download $pkg"
+                            rm -f "$filepath.part"
+                            return 1
+                        fi
+                        mv "$filepath.part" "$filepath"
                     fi
 
                     # Rename for older GLIBC
-                    if check_glibc_old; then
-                        local new_filepath="${filepath/manylinux_2_35/manylinux_2_31}"
-                        mv "$filepath" "$new_filepath"
-                        filepath="$new_filepath"
+                    if check_glibc_old && [ -f "$filepath" ]; then
+                        mv "$filepath" "$install_filepath"
                     fi
+                    filepath="$install_filepath"
 
                     wheel_files+=("$filepath")
                 done
 
                 echo "Installing Isaac Sim packages..."
                 pip install "${wheel_files[@]}"
-                rm -rf "$temp_dir"
 
                 # Verify installation
                 if ! python -c "import isaacsim" 2>/dev/null; then

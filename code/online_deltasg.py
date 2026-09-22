@@ -469,6 +469,11 @@ class OnlineDeltaSGConfig:
     # This is applied only after collision, layout, and reachability filtering.
     min_placement_diversity_distance: float = 0.50
 
+    # Fraction of Env-A native samples in which the robot spawns in a room
+    # different from the first manipulation target, so the first MOVE step is a
+    # cross-room movement. 0.0 = current behaviour (always same-room spawn).
+    cross_room_ratio: float = 0.0
+
     # Deterministic coverage controls. These remain unset for normal diverse
     # generation and are used by the coverage backfill scheduler.
     target_asset_category: str | None = None
@@ -542,6 +547,7 @@ class OnlineDeltaSGEngine:
         self._rejected_native_target_cache: set[str] = set()
         self._prepared_native_target_id: str | None = None
         self._prepared_native_target: dict | None = None
+        self._prepared_cross_room_start_room: str | None = None
         self._env_a_attempt_prepared = False
         self._env_bc_attempt_prepared = False
         self._env_b_attempt_counts: Counter[str] = Counter()
@@ -4525,6 +4531,23 @@ class OnlineDeltaSGEngine:
         rooms = [node["name"] for node in graph.get("nodes", []) if node.get("type") == "room" and node["name"] != room]
         return self.rng.choice(sorted(rooms)) if rooms else None
 
+    def _choose_cross_room_start_room(self, graph, target_room):
+        """Pick a robot start room reachable from ``target_room`` via the room
+        topology, excluding the target room itself (so the first step becomes a
+        cross-room MOVE). Returns None when no other reachable room exists."""
+        if not target_room:
+            return None
+        paths_from_target = (
+            (graph.get("navigation") or {})
+            .get("shortest_room_paths", {})
+            .get(target_room, {})
+        )
+        candidates = sorted(
+            room for room, path in paths_from_target.items()
+            if path and room != target_room
+        )
+        return self.rng.choice(candidates) if candidates else None
+
     def _fire_extinguisher_room_candidates(self, fire_room):
         nav_clear = self._nav_clear_reachable_room_pixels()
         robot_reachable = self._robot_reachable_room_pixels()
@@ -6470,20 +6493,45 @@ class OnlineDeltaSGEngine:
 
     def prepare_native_task_robot_spawn(self, task_name: str) -> str | None:
         """Choose the official native target before a serial task is generated."""
+        self._prepared_cross_room_start_room = None
         if task_name not in NATIVE_TASK_TARGET_TOKENS:
             return None
         self._robot_component_cache = {}
         self._reachable_room_pixels_cache = {}
         self._nav_clear_room_pixels_cache = {}
         self._base_graph_cache = None
+        graph = self.snapshot()
         target = self._select_native_task_target(
-            task_name, self.snapshot(), require_robot_approach=False,
+            task_name, graph, require_robot_approach=False,
         )
         if target is not None:
             target["task_name"] = task_name
         self._prepared_native_target = target
         self._prepared_native_target_id = target.get("object_id") if target else None
+        if (
+            target is not None
+            and target.get("room_id")
+            and self.config.cross_room_ratio > 0
+            and self.rng.random() < self.config.cross_room_ratio
+        ):
+            start_room = self._choose_cross_room_start_room(graph, target["room_id"])
+            if start_room:
+                self._prepared_cross_room_start_room = start_room
+                print(
+                    f"[robot-spawn] cross-room start room={start_room} "
+                    f"target_room={target['room_id']} task={task_name}",
+                    flush=True,
+                )
         return self._prepared_native_target_id
+
+    def prepared_cross_room_start_room(self) -> str | None:
+        """Expose the cross-room start room chosen during spawn preparation.
+
+        The runner reads this after ``prepare_native_task_robot_spawn`` and
+        passes it to ``stabilize_robot_spawn`` so the robot spawns away from
+        the native target (None = ordinary same-room target-conditioned spawn).
+        """
+        return self._prepared_cross_room_start_room
 
     def prepare_retrieval_delivery_robot_spawn(self, task_name: str) -> str | None:
         """Pick a vetted native support surface near which to spawn the robot
@@ -6575,30 +6623,66 @@ class OnlineDeltaSGEngine:
         lower, upper = obj.aabb
         nearest_xy = th.minimum(th.maximum(robot_position[:2], lower[:2]), upper[:2])
         distance = float(th.linalg.norm(robot_position[:2] - nearest_xy))
-        if (
-            robot_room != target.get("room_id")
-            or distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
-        ):
-            print(
-                f"[robot-spawn] target binding rejected task={task_name} "
-                f"target={target['object_id']} room={robot_room} distance={distance:.3f}",
-                flush=True,
+        cross_room = self._prepared_cross_room_start_room is not None
+        if cross_room:
+            # The robot is intentionally spawned in a different room. It must
+            # land in the chosen start room, and the target must keep a valid
+            # same-room manipulation stand-off reachable through the robot's
+            # own traversable component (pixel connectivity, not just the room
+            # topology). The approach position below is where the robot will
+            # stand *after* navigating to the target's room, so its
+            # horizontal_distance stays within the manipulation envelope.
+            if robot_room != self._prepared_cross_room_start_room:
+                print(
+                    f"[robot-spawn] cross-room binding rejected task={task_name} "
+                    f"expected_room={self._prepared_cross_room_start_room} "
+                    f"actual_room={robot_room}",
+                    flush=True,
+                )
+                return False
+            target_position, _ = obj.get_position_orientation()
+            approach = self._validate_task_approach_position(
+                target_position,
+                {target.get("room_id")},
+                target_aabb_xy=(lower[:2], upper[:2]),
+                target_object_id=target.get("object_id"),
             )
-            return False
-        target["robot_approach"] = {
-            "ok": True,
-            "reason": "target_conditioned_spawn",
-            "horizontal_distance": distance,
-            "distance_reference": "aabb_edge",
-            "max_horizontal_distance": DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
-            "candidate_position_xy": self._to_list(robot_position[:2]),
-            "candidate_room": robot_room,
-            "target_rooms": [target["room_id"]],
-            "native_occupancy_rejections": 0,
-        }
+            if not approach.get("ok"):
+                print(
+                    f"[robot-spawn] cross-room binding rejected task={task_name} "
+                    f"approach={approach}",
+                    flush=True,
+                )
+                return False
+            approach["reason"] = "cross_room_spawn"
+            approach["cross_room_start_room"] = self._prepared_cross_room_start_room
+        else:
+            if (
+                robot_room != target.get("room_id")
+                or distance > DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE
+            ):
+                print(
+                    f"[robot-spawn] target binding rejected task={task_name} "
+                    f"target={target['object_id']} room={robot_room} distance={distance:.3f}",
+                    flush=True,
+                )
+                return False
+            approach = {
+                "ok": True,
+                "reason": "target_conditioned_spawn",
+                "horizontal_distance": distance,
+                "distance_reference": "aabb_edge",
+                "max_horizontal_distance": DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                "candidate_position_xy": self._to_list(robot_position[:2]),
+                "candidate_room": robot_room,
+                "target_rooms": [target["room_id"]],
+                "native_occupancy_rejections": 0,
+            }
+        target["robot_approach"] = approach
         print(
             f"[robot-spawn] target binding accepted task={task_name} "
-            f"target={target['object_id']} distance={distance:.3f}",
+            f"target={target['object_id']} room={robot_room} distance={distance:.3f} "
+            f"cross_room={cross_room}",
             flush=True,
         )
         return True
