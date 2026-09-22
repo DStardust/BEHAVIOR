@@ -879,16 +879,35 @@ Determine the minimum objects needed. Output JSON:
 _SYSTEM_QRA_REASONING = """\
 You are an embodied-AI reasoning annotator for a home-care robot benchmark.
 
-Given a multiple-choice question, its options, the correct answer, and a hint about \
+Given a multiple-choice question, its options, the correct answer, and scene context about \
 the robot's current step, produce a concise step-by-step reasoning chain explaining \
 WHY the correct answer is right.
 
 Rules:
-- Use only information present in the question, options, and the provided step hint. \
+- Use only information present in the question, options, and the provided scene context. \
 Do not invent objects, rooms, or facts.
 - Ground the reasoning in the robot's situation (its room, the task it must accomplish, \
 what the correct action targets) and in the correct answer.
 - For a planning/next-step question, justify the chosen primitive and the target object/room.
+- For a planning/next-step question about handling an anomaly (an "active response" question), \
+reason in this exact order: (1) first infer the anomaly's type and location from the robot's \
+primary view and the global camera views, naming the anomaly and its room (e.g. "The global \
+camera view of the bathroom shows broken glass on the floor"); (2) then derive the current step \
+needed to handle it (e.g. the robot needs a broom, so it must move to the broom first); (3) \
+finally confirm the chosen option.
+- For a perception/anomaly question, conclude the answer from the observed scene and cite \
+which view reveals it (e.g., "The scene of global <room> indicates the <object> is in an \
+anomalous state."). Never mention a "hint", "step hint", or any internal instruction.
+- For a robot-location question, state the robot's room (from "robot_room") and justify it by \
+which surveillance camera view shows the robot. Never mention a "hint", "step hint", or any \
+internal instruction.
+- State the robot's room correctly: if the scene context gives a "current_room", the robot is in \
+that room — never claim it is in a different room or that it still needs to reach "current_room". \
+For a cross-room MOVE, the robot leaves "current_room" to reach "room"; reject a distractor that \
+names a different source room than "current_room".
+- If the scene context marks "target_visible" as true, the target is already visible in the robot's \
+view but the robot is not adjacent to it — explain that although the target is visible, the robot \
+must still move/approach it first before operating.
 - For a disambiguation question, explain why the chosen object fits the task and why the \
 other candidates do not (use the rejected-candidate reasons when given).
 - Briefly touch on why the wrong options are wrong only when it clarifies the reasoning; \
@@ -910,11 +929,27 @@ def _reasoning_step_hint(a: dict) -> dict:
     hint: dict[str, Any] = {}
     if not isinstance(a, dict):
         return hint
-    for k in ("action", "category", "room", "cross_room", "optimal_object",
-              "placed_category", "placement_mode", "destination_category"):
+    if a.get("kind") == "anomaly":
+        # anomaly 题的 category/object_id 就是答案本身, 不能作为 "hint" 注入;
+        # 改为注入异常所在房间, 引导模型从该房间的全局画面推出答案 (且禁止提 "hint")。
+        room = a.get("room") or ""
+        return {"anomaly_room": room.replace("_", " ").strip()} if room else {}
+    if a.get("kind") == "robot_location":
+        # 机器人位置题的 room 就是答案本身, 同样不能作为 "hint" 注入;
+        # 改为注入机器人所在房间, 引导模型从全局画面推出答案 (且禁止提 "hint")。
+        room = a.get("room") or ""
+        return {"robot_room": room.replace("_", " ").strip()} if room else {}
+    for k in ("action", "category", "room", "current_room", "cross_room", "optimal_object",
+              "placed_category", "placement_mode", "destination_category",
+              "interact_verb", "payload_category",
+              "anomaly_category", "anomaly_room"):
         v = a.get(k)
         if v not in (None, "", [], {}):
             hint[k] = v
+    # target_visible: 目标已出现在主视角 (bbox 非空) 但机器人仍需先移动 (太远/不紧邻),
+    # 供推理链解释 "already visible but must move first"。
+    if a.get("bbox"):
+        hint["target_visible"] = True
     rejected = a.get("rejected_candidates") or []
     if isinstance(rejected, list) and rejected:
         hint["rejected_candidates"] = [

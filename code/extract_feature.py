@@ -65,6 +65,68 @@ def room_of(index: "SceneIndex", object_id: str | None) -> str:
     return (aff.get("rooms") or [""])[0] if aff else ""
 
 
+def interact_container_verb(nl: str | None) -> str:
+    """INTERACT 容器动作的动词 (取 step.nl 首词, 如 Sweep/Empty/Wipe), 未知回退 "sweep"。
+
+    多元素 INTERACT (含 destination/payload 槽) 的渲染不再按任务名硬编码动词,
+    而是从规划侧已写好的 ``nl`` 取权威动词, 使新增动词/任务自动可用 (鲁棒可复用)。
+    """
+    head = (nl or "").strip().split(" ", 1)[0].lower() if (nl or "").strip() else ""
+    return head or "sweep"
+
+
+# INTERACT 动词家族 → 槽位语义 (决定 target/tool/destination/payload 各自扮演什么角色)
+WIPE_VERBS = frozenset({"wipe", "wash", "rinse", "clean"})   # 清洗: target=被清洗物, destination=水槽, tool=海绵
+EMPTY_VERBS = frozenset({"empty", "pour", "dump"})           # 倾倒: payload=被倒物, tool=来源容器, target=目的地
+
+
+def interact_slots(step: dict[str, Any] | None) -> tuple[str, str | None, str | None, str | None]:
+    """归一化 INTERACT 步骤的槽位 → ``(verb, payload_oid, tool_oid, destination_oid)``。
+
+    不同任务对 target/tool/destination/payload 的命名不一致 (见下方三类动词家族),
+    这里统一成「被作用物(payload) / 工具(tool) / 去向(destination)」三元语义, 调用方各自把
+    oid 解析成类别名。含 destination/payload 槽即视为多元素动作; 否则降级为二元/一元。
+
+    - ``payload_object`` 存在 → 倾倒家族 (Empty X from Y into Z): target=去向, tool=来源, payload=被倒物;
+    - 仅 ``destination_object`` 存在 → 清扫/清洗家族 (Sweep/Wipe X into/in Y with Z): target=被作用物, dest=去向;
+    - 均不存在 → 二元/一元 (Use tool to operate target)。
+    """
+    step = step or {}
+    verb = interact_container_verb(step.get("nl"))
+    target = step.get("target_object")
+    tool = step.get("tool_object")
+    dest = step.get("destination_object")
+    payload = step.get("payload_object")
+    if payload:
+        return verb, payload, tool, target
+    if dest:
+        return verb, target, tool, dest
+    return verb, target, tool, None
+
+
+def interact_action_nl(verb: str, payload: str, tool: str, destination: str) -> str:
+    """把多元素 INTERACT 渲染成英文动作句 (payload/tool/destination 均为已解析类别名)。
+
+    按动词家族选择模板; 缺少工具/去向时自动降级, 最终回退到二元 "Use the tool to operate the
+    target" / 一元 "Operate the target"。这是清扫/倾倒/清洗三类多元素动作的唯一权威渲染器。
+    """
+    v = (verb or "").strip().lower()
+    if v in WIPE_VERBS:
+        head = f"Wipe the {payload} clean"
+        if destination:
+            head = f"{head} in the {destination}"
+        return f"{head} with the {tool}" if tool else head
+    if v in EMPTY_VERBS:
+        head = f"Empty the {payload} from the {tool}" if tool else f"Empty the {payload}"
+        return f"{head} into the {destination}" if destination else head
+    if destination:
+        head = f"{(v.capitalize() or 'Sweep')} the {payload} into the {destination}"
+        return f"{head} with the {tool}" if tool else head
+    if tool and tool != payload:
+        return f"Use the {tool} to operate the {payload}"
+    return f"Operate the {payload}"
+
+
 # ======================================================================
 # 场景索引: task_instance → 房间 / 物体 / affordance / 空间关系
 # ======================================================================
@@ -547,6 +609,28 @@ def build_room_topology(task_instance: dict[str, Any]) -> dict[str, Any]:
     return {"rooms": sorted(rooms), "edges": edges}
 
 
+def robot_visible_camera_rooms(task_instance: dict[str, Any] | None) -> list[str]:
+    """返回能看到机器人的全局摄像头去重后的房间名列表 (raw room id, 未 humanize)。
+
+    依据 ``camera[*].visible_robot_objects``: 布置阶段记录了每个全局摄像头画面里可见的
+    机器人 id (如 "robot_vgjnye")。房间非封闭 (客厅/餐厅连通) 时, 机器人物理出生房间可能
+    没有摄像头, 只有相邻房间的摄像头能看到它 —— 此时"当前房间"应按观测来源重标定。
+    """
+    ti = task_instance or {}
+    rid = ti.get("robot_id") or (ti.get("robot") or {}).get("robot_id") or ""
+    rooms: list[str] = []
+    seen: set[str] = set()
+    for cam in ti.get("camera") or []:
+        if not isinstance(cam, dict) or cam.get("camera_type") != "global_camera":
+            continue
+        if rid and rid in (cam.get("visible_robot_objects") or []):
+            room = cam.get("room_id") or ""
+            if room and room not in seen:
+                seen.add(room)
+                rooms.append(room)
+    return rooms
+
+
 def current_room(task_instance: dict[str, Any] | None, plan: list[dict[str, Any]], t: int,
                  index: "SceneIndex | None" = None) -> str:
     """当前房间: t<=0 → robot 初始房间; 否则上一动作目标物体所在房间 (从场景图解析)。
@@ -554,6 +638,10 @@ def current_room(task_instance: dict[str, Any] | None, plan: list[dict[str, Any]
     注意: solution_plan 步骤只带 ``target_object`` (不带 ``target_room``), 机器人当前房间
     需从场景图 ``room_of`` 反查; 初始房间在 raw 里位于 ``robot.initial_room`` (顶层
     ``robot_initial_room`` 常为 None, 扁平化后才是该值), 故两处都尝试。
+
+    摄像头混淆修正 (t<=0): 当且仅当唯一一个全局摄像头房间能看到机器人、且不同于物理出生
+    房间时, 按观测来源重标定 (如机器人在餐厅、却只有客厅摄像头可见 → 归客厅)。多个摄像头
+    房间都能看到机器人时维持物理房间 (无唯一观测来源, 不臆断)。
     """
     ti = task_instance or {}
     if index is None:
@@ -562,6 +650,9 @@ def current_room(task_instance: dict[str, Any] | None, plan: list[dict[str, Any]
         room = ti.get("robot_initial_room") or ""
         if not room:
             room = (ti.get("robot") or {}).get("initial_room") or ""
+        seen = robot_visible_camera_rooms(ti)
+        if len(seen) == 1 and seen[0] != room:
+            return seen[0]
         return room
     prev = plan[t - 1] if 0 <= t - 1 < len(plan) else {}
     return room_of(index, (prev or {}).get("target_object")) or ""
@@ -751,6 +842,33 @@ def target_location_phrase(task_instance: dict[str, Any], oid: str | None,
 
     # 同房间多实例且无自然语言特征可区分 → 数据不合法 (裸数字兜底), 放弃
     return None
+
+
+def delivery_target_unresolvable(task_instance: dict[str, Any]) -> bool:
+    """交付类指令 "Move X from A to B" 中源容器 A 与目的容器 B 无法区分时返回 True。
+
+    源容器 = 被搬运物的 ``placed_on``; 目的容器 = ``semantic_role == "delivery_destination"``
+    的对象 (``reference_only``)。两者同类别且同房间时, 指令模板会把 A、B 渲染成相同的
+    自然语言短语 (如 "the bottom cabinet in bedroom 0" 出现两次), 模型无法分辨源/目的
+    → 题干不可解, 应放弃该题。同类别异房间 (或源==目的同一对象) 可区分, 不视为不可解。
+
+    非交付任务没有 ``delivery_destination`` 对象 → 目的容器为空 → 返回 False (不误伤)。
+    """
+    source = dest = None
+    for obj in task_instance.get("plan_objects") or []:
+        if not isinstance(obj, dict):
+            continue
+        if (obj.get("semantic_role") or "") == "delivery_destination":
+            dest = obj.get("object_id") or dest
+            continue
+        if not obj.get("reference_only") and obj.get("placed_on"):
+            source = obj.get("placed_on") or source
+    if not source or not dest or source == dest:
+        return False
+    index = build_scene_index(task_instance)
+    if category_of(index, source) != category_of(index, dest):
+        return False
+    return room_of(index, source) == room_of(index, dest)
 
 
 def target_is_unresolvable(task_instance: dict[str, Any], oid: str | None,

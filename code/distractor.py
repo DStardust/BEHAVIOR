@@ -46,13 +46,17 @@ from typing import Any
 from extract_feature import (
     SceneIndex,
     build_candidate_descriptors,
+    build_room_topology,
     build_scene_index,
     carried_object_id,
     category_of,
     current_room,
     descriptor_is_bare_number,
+    global_camera_rooms,
     humanize,
     instances_of_category,
+    interact_action_nl,
+    interact_slots,
     is_structural,
     room_of,
     target_is_unresolvable,
@@ -149,7 +153,9 @@ def _action_key(a: dict[str, Any]) -> tuple:
     """
     bbox = tuple(a.get("object_bbox") or [])
     return (a.get("kind"), a.get("primitive"), a.get("target_object"),
-            a.get("placed_object"), a.get("tool_object"), a.get("room"), bbox)
+            a.get("placed_object"), a.get("tool_object"), a.get("room"),
+            a.get("source_room"), a.get("destination_object"),
+            a.get("payload_object"), bbox)
 
 
 def _option_key(s: dict[str, Any]) -> tuple:
@@ -165,6 +171,8 @@ def _option_key(s: dict[str, Any]) -> tuple:
         return (kind, s.get("object_id"), s.get("relation"), s.get("support_id"))
     if kind == "anomaly":
         return (kind, s.get("object_id"), s.get("state"))
+    if kind == "robot_location":
+        return (kind, s.get("room"))
     return (kind,)
 
 
@@ -199,6 +207,18 @@ def _room_swap_pool(room: str, index: SceneIndex) -> list[str]:
     return rooms
 
 
+def _source_room_pool(room: str, cur: str, index: SceneIndex) -> list[str]:
+    """源房间替换候选 (跨房间 MOVE 干扰项): 真实存在、且既非当前房间也非目标房间的房间。
+
+    用于渲染 "Move to <room> from <wrong_room> and find the <target>" 这类强迷惑干扰项,
+    考察模型是否知道机器人当前从哪个房间出发。
+    """
+    base = re.sub(r"_\d+$", "", cur)
+    rooms = [r for r in index.rooms if r != room and r != cur]
+    rooms.sort(key=lambda r: (0 if re.sub(r"_\d+$", "", r) == base else 1, r))
+    return rooms
+
+
 def _support_swap_pool(target: str | None, index: SceneIndex) -> list[str]:
     """支撑面替换候选 (PLACE): 其它真实支撑面。"""
     return [o for o in index.support_surfaces if o != target]
@@ -216,16 +236,25 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
                      k: int,
                      rng: "random.Random",
                      key_fn: Any = None,
-                     bucket_fn: Any = None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+                     bucket_fn: Any = None,
+                     must_include: list[Any] | None = None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """去重后按"来源类型"取样, 保证干扰项跨维度多样 (时序/原语/目标/房间…)。
 
     类型(桶)顺序与桶内顺序均用 rng 打乱后再轮询, 使干扰项类型的组合跨样本随机
     (同一样本内仍跨类型多样、且结果由 qra_id 种子确定可复现)。
     ``key_fn`` / ``bucket_fn`` 可覆盖默认的去重键 (动作键) 与多样性桶 (source.type),
     供其它结构化选项 (如状态命题, 桶改用 source.subtype) 复用同一取样逻辑。
+    ``must_include`` 列出必须至少入选一个的候选, 每项可为来源类型字符串 (匹配 source.type) 或
+    谓词 callable(action)->bool (匹配动作空间语义, 如 MOVE 的 within/cross/源房间), 这些候选先在
+    头部保留一个, 不被随机轮询丢弃。
     """
     key_fn = key_fn or (lambda a, src: _action_key(a))
     bucket_fn = bucket_fn or (lambda a, src: src.get("type", "other"))
+
+    def _matches(a: dict[str, Any], src: dict[str, Any], mt: Any) -> bool:
+        if callable(mt):
+            return bool(mt(a))
+        return (src or {}).get("type") == mt
 
     seen: set = set()
     uniq: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -238,8 +267,19 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
     if len(uniq) <= k:
         return uniq
 
+    # must-include: 每个必须项挪一个候选到头部 (确定性保证入选)
+    head: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for mt in (must_include or []):
+        for idx, (a, src) in enumerate(uniq):
+            if _matches(a, src, mt):
+                head.append(uniq.pop(idx))
+                break
+    if len(head) >= k:
+        return head[:k]
+    rest = uniq
+
     buckets: "OrderedDict[str, list]" = OrderedDict()
-    for a, src in uniq:
+    for a, src in rest:
         buckets.setdefault(bucket_fn(a, src), []).append((a, src))
 
     lists: list[list[tuple[dict[str, Any], dict[str, Any]]]] = []
@@ -248,7 +288,7 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
         lists.append(items)
     rng.shuffle(lists)
 
-    picked: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    picked: list[tuple[dict[str, Any], dict[str, Any]]] = list(head)
     i = 0
     while len(picked) < k and any(lists):
         lst = lists[i % len(lists)]
@@ -261,10 +301,48 @@ def _sample_distinct(cands: list[tuple[dict[str, Any], dict[str, Any]]],
 # ======================================================================
 # 干扰项生成: 规划类 (动作)
 # ======================================================================
+def _room_landmark(room: str, index: SceneIndex) -> str | None:
+    """房间替换干扰项的导航目标: 指定房间内的真实物体 (优先任务物体, 其次非结构物体)。
+
+    无目标房间的 MOVE (target=None) 会被 LLM 渲染成 "Find the target in ..." (不合法),
+    故必须落点到房间内的具体物体上。
+    """
+    def in_room(o: str) -> bool:
+        return room in (index.affordance.get(o) or {}).get("rooms", [])
+
+    cands = [o for o in index.task_objects if in_room(o)]
+    if not cands:
+        cands = [o for o in index.affordance if in_room(o) and not is_structural(index.affordance[o])]
+    if not cands:
+        cands = [o for o in index.affordance if in_room(o)]
+    return sorted(cands)[0] if cands else None
+
+
+def _move_is_cross(a: dict[str, Any]) -> bool:
+    """MOVE 动作是否为跨房间移动 (目标房间 ≠ 当前房间, 且无源房间)。"""
+    return (a.get("primitive") == PRIMITIVE_MOVE and bool(a.get("room"))
+            and bool(a.get("current_room")) and a["room"] != a["current_room"]
+            and not a.get("source_room"))
+
+
+def _move_is_within(a: dict[str, Any]) -> bool:
+    """MOVE 动作是否为房间内移动 (目标房间 == 当前房间, 且无源房间)。"""
+    return (a.get("primitive") == PRIMITIVE_MOVE and bool(a.get("room"))
+            and bool(a.get("current_room")) and a["room"] == a["current_room"]
+            and not a.get("source_room"))
+
+
+def _move_wrong_source(a: dict[str, Any]) -> bool:
+    """MOVE 动作是否带错误源房间 (起点错误的跨房间移动)。"""
+    return (a.get("primitive") == PRIMITIVE_MOVE and bool(a.get("source_room"))
+            and bool(a.get("current_room")) and a["source_room"] != a["current_room"])
+
+
 def _action_distractors(step: dict[str, Any], index: SceneIndex,
                         plan: list[dict[str, Any]], t: int,
                         qra_id: str, rng: "random.Random",
-                        cur: str = "", k: int = NUM_OPTIONS - 1) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+                        cur: str = "", k: int = NUM_OPTIONS - 1,
+                        must_include: list[Any] | None = None) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """为规划类下一步动作生成干扰项 (动作三元组单点替换)。返回 [(action, source)]。
 
     PLACE 语义: ``target_object`` 是目的地/容器, ``placed_object`` (此前最近一次 PICK
@@ -284,6 +362,14 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
         if prim == PRIMITIVE_PLACE:
             a["placed_object"] = placed
             a["placement_mode"] = mode
+        elif prim == PRIMITIVE_INTERACT:
+            # 多元素 INTERACT: 沿用规划侧权威槽位 (destination/payload/nl)
+            if step.get("nl"):
+                a["nl"] = step.get("nl")
+            if step.get("destination_object"):
+                a["destination_object"] = step.get("destination_object")
+            if step.get("payload_object"):
+                a["payload_object"] = step.get("payload_object")
         a.update(kw)
         return a
 
@@ -300,6 +386,14 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
             a["placement_mode"] = s.get("placement_mode") or "on"
             if a["placed_object"] is None:
                 continue  # 该 PLACE 步骤语义不完整, 不作干扰项
+        elif (s.get("primitive") or "") == PRIMITIVE_INTERACT:
+            # 多元素 INTERACT 干扰项: 沿用该步骤自身的权威槽位 (destination/payload/nl)
+            if s.get("nl"):
+                a["nl"] = s.get("nl")
+            if s.get("destination_object"):
+                a["destination_object"] = s.get("destination_object")
+            if s.get("payload_object"):
+                a["payload_object"] = s.get("payload_object")
         if _action_key(a) == _action_key(_action()):
             continue
         cands.append((a, {"type": "temporal_confusion", "step_id": s.get("step_id")}))
@@ -324,11 +418,23 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
         cands.append((_action(target_object=oid, tool_object=None, room=room_of(index, oid)),
                       {"type": "object_swap", "object_id": oid}))
 
-    # 4) 房间替换 (MOVE): 换真实房间
+    # 4) 房间替换 (MOVE): 换真实房间, 以该房间内真实物体为导航目标
+    #    (target=None 会被渲染成 "Find the target in ...", 属非法数据)
     if prim == PRIMITIVE_MOVE and room:
         for r in _room_swap_pool(room, index):
-            cands.append((_action(target_object=None, tool_object=None, room=r),
+            landmark = _room_landmark(r, index)
+            if landmark is None:
+                continue
+            cands.append((_action(target_object=landmark, tool_object=None, room=r),
                           {"type": "room_swap", "room": r}))
+
+    # 4b) 跨房间源房间替换 (MOVE): 同一目标, 换"从哪个房间出发" (源房间干扰项),
+    #     渲染成 "Move to <room> from <wrong_room> and find the <target>",
+    #     考察模型是否知道机器人当前从哪出发 (仅跨房间移动才有意义)。
+    if prim == PRIMITIVE_MOVE and room and cur and room != cur and target:
+        for wrong in _source_room_pool(room, cur, index)[:3]:
+            cands.append((_action(source_room=wrong),
+                          {"type": "source_room_swap", "room": wrong}))
 
     # 5) 支撑面替换 (PLACE): 换目的地支撑面 (placed 不变)
     if prim == PRIMITIVE_PLACE:
@@ -350,7 +456,7 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
         for oid in _tool_swap_pool(tool, target, index):
             cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
 
-    return _sample_distinct(cands, k, rng)
+    return _sample_distinct(cands, k, rng, must_include=must_include)
 
 
 # ======================================================================
@@ -358,8 +464,14 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
 # ======================================================================
 def _perception_options(pair: Any, index: SceneIndex,
                         llm: Any = None) -> tuple[list[dict[str, Any]], int]:
-    """感知题 → 判别式选择题: 正确项 = 当前可见物体, 干扰项 = 真实存在但不可见物体。"""
-    visible = list(pair.A.get("objects") or [])
+    """主视角可见题 → 判别式选择题: 正确项 = 机器人主视角可见物体, 干扰项 = 主视角不可见物体。
+
+    可见性真值来自 ``pair.A["objects"]`` (translator 已收敛到主视角-only 的全量 seg_instance):
+    "不在主视角"是已知否定, 干扰项不会把"全局画面/主视角里实际可见的物体"误标成不可见。
+    """
+    # 过滤到"在 affordance 里且非结构"的实体物体 (seg_instance 会带 floor/wall/robot 等结构物)
+    visible = [o for o in (pair.A.get("objects") or [])
+               if o in index.affordance and not is_structural(index.affordance[o])]
     if not visible:
         return [], -1
 
@@ -367,7 +479,7 @@ def _perception_options(pair: Any, index: SceneIndex,
     correct = next((o for o in sorted(visible) if o in index.task_objects), sorted(visible)[0])
     correct_aff = index.affordance.get(correct, {})
 
-    # 干扰项: 真实存在但不可见的物体, 按 (同房间, 同类别) 优先
+    # 干扰项: 主视角不可见的物体, 按 (同房间, 同类别) 优先
     dist_pool = [o for o in index.affordance
                  if o not in set(visible) and not is_structural(index.affordance[o])]
     croom = room_of(index, correct)
@@ -391,7 +503,7 @@ def _perception_options(pair: Any, index: SceneIndex,
                    "source": {"type": "visible_object", "object_id": correct}}
 
     # 判别式题干
-    pair.Q = "Which of the following objects is visible in the current view?"
+    pair.Q = "Which of the following objects is visible in the robot's primary view?"
     return _finalize(pair.qra_id, correct_opt, distractors, index, llm=llm, question=pair.Q)
 
 
@@ -532,6 +644,15 @@ def _planning_options(pair: Any, index: SceneIndex,
                "target_object": target, "tool_object": step.get("tool_object"),
                "room": step.get("target_room") or room_of(index, target),
                "current_room": cur}
+    # 多元素 INTERACT (清扫/倾倒/清洗): 携带规划侧权威槽位 (destination/payload/nl),
+    # 供 ``_action_nl`` 按动词家族渲染三元动作 (Sweep X into Y with Z 等)。
+    if correct["primitive"] == PRIMITIVE_INTERACT:
+        if step.get("nl"):
+            correct["nl"] = step.get("nl")
+        if step.get("destination_object"):
+            correct["destination_object"] = step.get("destination_object")
+        if step.get("payload_object"):
+            correct["payload_object"] = step.get("payload_object")
     # PLACE 双槽位: target_object 是目的地/容器, 被放置物 = 此前最近一次 PICK 的对象;
     # 被放置物不可知时该步语义不完整, 数据不合法 → 放弃 (不生成"Place the hamper on the target")。
     if correct["primitive"] == PRIMITIVE_PLACE:
@@ -544,11 +665,36 @@ def _planning_options(pair: Any, index: SceneIndex,
         correct["category"] = desc_map[target]
         correct["room"] = None  # 描述符已含房间, 避免 MOVE 渲染重复 "in <room>"
     _annotate_action_bbox(correct, cam)
+    # 裸数字后缀 (同房间多实例且无 NL 特征): 依规则该数据不可靠。若主视角 bbox 能定位
+    # 目标, 剥掉数字后缀 (bbox 已消歧, 数字只会制造噪音); 否则数据不合法 → 放弃该题。
+    if target in desc_map:
+        cat = category_of(index, target) or ""
+        if descriptor_is_bare_number(desc_map[target], cat):
+            if not correct.get("object_bbox"):
+                return [], -1
+            correct["category"] = _strip_bare_number(desc_map[target], cat)
+        # MOVE: 房间需作为独立槽位做 within/cross 措辞, 从 "cat in <room>" 描述符剥出房间。
+        if correct["primitive"] == PRIMITIVE_MOVE:
+            correct["category"], correct["room"] = _split_descriptor_room(
+                correct["category"], room_of(index, target))
     correct_opt = {"kind": "action", "structured": correct,
                    "source": {"type": "solution_plan_step", "step_id": step.get("step_id")}}
 
+    # MOVE within/cross 干扰项保障: 房间内正确项必有跨房间移动干扰项; 跨房间正确项必有
+    # 房间内移动干扰项 + 起点错误跨房间移动干扰项。以动作空间语义谓词 (room vs current_room) 保底,
+    # 贯穿两处取样 (action_distractors 与 _finalize); 场景无相应候选时静默降级。
+    move_must_include: list[Any] = []
+    room = correct.get("room")
+    if correct.get("primitive") == PRIMITIVE_MOVE and room and cur:
+        if room == cur:
+            move_must_include.append(_move_is_cross)      # 跨房间移动干扰项
+        else:
+            move_must_include.append(_move_is_within)     # 房间内移动干扰项
+            move_must_include.append(_move_wrong_source)  # 起点错误跨房间移动干扰项
+
     dist_opts = [{"kind": "action", "structured": a, "source": src}
-                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id, rng, cur, k=n - 1)]
+                 for a, src in _action_distractors(step, index, plan, t, pair.qra_id, rng, cur,
+                                                   k=n - 1, must_include=move_must_include)]
     for d in dist_opts:
         _annotate_action_bbox(d["structured"], cam)
 
@@ -562,9 +708,15 @@ def _planning_options(pair: Any, index: SceneIndex,
             continue
         if task_instance is not None and target_is_unresolvable(task_instance, oid, index):
             continue
+        cat_desc = desc_map.get(oid)
+        room_field = None
+        if prim == PRIMITIVE_MOVE:
+            # MOVE: 房间作为独立槽位做 within/cross 措辞, 从 "cat in <room>" 描述符剥出房间
+            # (否则 room=None + 描述符内嵌房间会让 LLM 渲染出 "in <room> within <room>" 双房间)。
+            cat_desc, room_field = _split_descriptor_room(cat_desc, room_of(index, oid))
         a = {"kind": "action", "primitive": prim, "target_object": oid,
              "tool_object": tool if prim == PRIMITIVE_INTERACT else None,
-             "room": None, "current_room": cur, "category": desc_map.get(oid)}
+             "room": room_field, "current_room": cur, "category": cat_desc}
         dist_opts.append({"kind": "action", "structured": a,
                           "source": {"type": "spatial_feature_confusion", "object_id": oid}})
 
@@ -581,13 +733,14 @@ def _planning_options(pair: Any, index: SceneIndex,
             dist_opts.append({"kind": "action", "structured": confused,
                               "source": {"type": "bbox_confusion"}})
 
-    # R3 must-include: 保证强迷惑干扰项 (空间特征 / 仅 bbox 错误) 至少各入选一个。
+    # R3 must-include: 保证强迷惑干扰项 (空间特征 / 仅 bbox 错误 / MOVE within-cross) 至少各入选一个。
     # 空间特征干扰项仅在有"可被干净区分"的同类实例时要求入选 (同房间裸数字者已被跳过)。
-    must_include: list[str] = []
+    must_include: list[Any] = []
     if any((d.get("source") or {}).get("type") == "spatial_feature_confusion" for d in dist_opts):
         must_include.append("spatial_feature_confusion")
     if isinstance(correct_bbox, (list, tuple)) and len(correct_bbox) == 4:
         must_include.append("bbox_confusion")
+    must_include.extend(move_must_include)
 
     return _finalize(pair.qra_id, correct_opt, dist_opts, index,
                      llm=llm, question=getattr(pair, "Q", "") or "",
@@ -667,6 +820,32 @@ def _prediction_options(pair: Any, index: SceneIndex,
 # ======================================================================
 # 选项渲染 (结构化 → 自然语言)
 # ======================================================================
+def _strip_bare_number(desc: str, cat: str) -> str:
+    """去掉描述符里的裸数字后缀: "furniture sink 0 in kitchen 0" → "furniture sink in kitchen 0"。
+
+    仅当 bbox 已能定位目标时使用 (bbox 消歧后数字只剩噪音, 依规则不可保留)。
+    """
+    rest = (desc or "").strip()[len((cat or "").strip()):].strip()
+    m = re.match(r"\d+\s*(.*)$", rest)
+    return f"{cat} {m.group(1)}".rstrip() if m else desc
+
+
+def _split_descriptor_room(desc: str, room_raw: str) -> tuple[str, str | None]:
+    """把 "cat in <room>" 兜底形态的描述符拆成 (类别, 房间raw); 其它形态原样返回 (房间 None)。
+
+    MOVE 的 within/cross 措辞需要房间作为独立槽位; "in <room>" 形态的房间已内嵌在描述符里,
+    剥出以免渲染成 "in <room> within <room>" 之类重复。room_raw 为空或描述符不是
+    " in <room>" 后缀时 (如 "near the door") 保持原样, 房间置 None。
+    """
+    desc = (desc or "").strip()
+    if not room_raw:
+        return desc, None
+    suffix = " in " + humanize(room_raw)
+    if desc.endswith(suffix):
+        return desc[:len(desc) - len(suffix)].strip(), room_raw
+    return desc, None
+
+
 def _target_nl(a: dict[str, Any], index: SceneIndex) -> str:
     """目标物体短语: 类别 + (主视角可见时的) bbox, 直接跟在物品名后面用于定位消歧。
 
@@ -716,8 +895,12 @@ def _action_nl(a: dict[str, Any], index: SceneIndex) -> str:
     tgt = _target_nl(a, index)
     if prim == PRIMITIVE_MOVE:
         if room and target:
-            if a.get("current_room") and room != a.get("current_room"):
-                return f"Find the {tgt} in {humanize(room)}"
+            if a.get("source_room"):
+                return f"Move to {humanize(room)} from {humanize(a['source_room'])} and find the {tgt}"
+            if a.get("current_room"):
+                if room != a.get("current_room"):
+                    return f"Move to {humanize(room)} and find the {tgt}"
+                return f"Move to the {tgt} within {humanize(room)}"
             return f"Move to the {tgt} in {humanize(room)}"
         if room:
             return f"Move to {humanize(room)}"
@@ -736,10 +919,19 @@ def _action_nl(a: dict[str, Any], index: SceneIndex) -> str:
             return f"Place the {placed}"
         return f"Place the object {prep} the {tgt}"  # 兜底: 无被放置物 (正常流程已放弃该题)
     if prim == PRIMITIVE_INTERACT:
-        tool_cat = _interact_tool_cat(a, index)
-        if tool_cat:
-            return f"Use the {tool_cat} to operate the {tgt}"
-        return f"Operate the {tgt}"
+        verb, p_oid, t_oid, d_oid = interact_slots(a)
+        if not d_oid:
+            # 二元 INTERACT: 沿用旧逻辑 (自指按类别比较; 目标保留 category 覆盖 + bbox 定位)
+            tool_cat = _interact_tool_cat(a, index)
+            if tool_cat:
+                return f"Use the {tool_cat} to operate the {tgt}"
+            return f"Operate the {tgt}"
+        # 多元素 INTERACT (清扫/倾倒/清洗): payload/tool/destination 均取裸类别, 按动词家族渲染
+        # (Sweep X into Y with Z / Empty X from Y into Z / Wipe X clean in Y with Z)。
+        p = (category_of(index, p_oid) or humanize(p_oid)) if p_oid else ""
+        t = (category_of(index, t_oid) or humanize(t_oid)) if t_oid else ""
+        d = (category_of(index, d_oid) or humanize(d_oid)) if d_oid else ""
+        return interact_action_nl(verb, p, t, d)
     if prim == PRIMITIVE_WAIT:
         return "Wait"
     return f"{prim} the {tgt}"
@@ -784,6 +976,12 @@ def _anomaly_nl(s: dict[str, Any], index: SceneIndex) -> str:
     return f"The {obj} is in an anomalous state."
 
 
+def _robot_location_nl(s: dict[str, Any], index: SceneIndex) -> str:
+    """机器人位置 → 自然语言 (英文, 规则兜底)。"""
+    room = humanize(s.get("room"))
+    return f"The robot is in the {room}."
+
+
 def _render_option(structured: dict[str, Any], index: SceneIndex) -> str:
     """按结构化选项的 kind 渲染成自然语言选项文本 (规则兜底)。"""
     kind = structured.get("kind")
@@ -797,6 +995,8 @@ def _render_option(structured: dict[str, Any], index: SceneIndex) -> str:
         return _state_nl(structured, index)
     if kind == "anomaly":
         return _anomaly_nl(structured, index)
+    if kind == "robot_location":
+        return _robot_location_nl(structured, index)
     return str(structured)
 
 
@@ -816,17 +1016,24 @@ rename, add, or drop them. For example, "bottle of water" must appear exactly as
 2. Only do phrasing — never change the meaning: do not change the action, object, or room, and \
 do not add or omit information.
 3. Action primitive semantics: PICK = "Pick up", WAIT = "Wait". \
-MOVE means navigating to the target's location — write "Move to the <target>" (never "Move the \
-<target>", which would wrongly mean carrying it); however, if the option carries a "current_room" \
-that differs from its "room" (i.e. the robot moves to a different room), write \
-"Find the <target> in <room>" instead of "Move to the <target> in <room>". \
+MOVE means navigating to the target's location (never "Move the <target>", which would wrongly \
+mean carrying it). The MOVE wording depends on the robot's room: \
+- if "source_room" is present: "Move to <room> from <source_room> and find the <target>"; \
+- else if "current_room" differs from "room" (cross-room): "Move to <room> and find the <target>"; \
+- else (same room): "Move to the <target> within <room>". \
 PLACE has two slots: "placed" is the object being moved and "target" is the destination — write \
 "Place the <placed> inside the <target>" when "placement_mode" is "inside", otherwise \
 "Place the <placed> on the <target>"; never swap the two slots (the destination is never the \
 object being placed) and never invent a generic destination such as "the target". \
 INTERACT: if a "tool" is present and differs from the "target", write "Use the <tool> to operate \
 the <target>"; if "tool" is null/absent or equals the "target", write "Operate the <target>" \
-(never "Use the <target> to operate the <target>").
+(never "Use the <target> to operate the <target>"). \
+For multi-object INTERACT (when "verb", "payload" and/or "destination" are present), phrase the \
+three roles explicitly instead of "operate": if verb is "wipe"/"wash"/"rinse"/"clean" write \
+"Wipe the <payload> clean in the <destination> with the <tool>"; if verb is \
+"empty"/"pour"/"dump" write "Empty the <payload> from the <tool> into the <target>"; otherwise \
+write "<Verb> the <payload> into the <destination> with the <tool>" (e.g. "Sweep the broken \
+pieces into the dustpan with the broom"). Never collapse these into "use X to operate Y".
 4. State proposition semantics (future tense, no action verb): relation "held" = \
 "The <object> will be held by the robot"; "on" = "The <object> will be on the <support>"; \
 "unchanged" = "The <object> will remain where it is". Keep the future-tense state wording, \
@@ -857,11 +1064,18 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
             "tool": category_of(index, structured.get("tool_object")) or None,
             "room": humanize(structured.get("room")) or None,
             "current_room": humanize(structured.get("current_room")) or None,
+            "source_room": humanize(structured.get("source_room")) or None,
         }
         # PLACE 双槽位: placed = 被放置物, target = 目的地 (LLM 据此措辞, 不得互换/发明)
         if prim == PRIMITIVE_PLACE:
             payload["placed"] = _placed_nl(structured, index)
             payload["placement_mode"] = structured.get("placement_mode") or "on"
+        # 多元素 INTERACT (清扫/倾倒/清洗): 归一化槽位后把 verb/payload/destination 交给 LLM
+        if prim == PRIMITIVE_INTERACT:
+            verb, p_oid, t_oid, d_oid = interact_slots(structured)
+            payload["verb"] = verb
+            payload["payload"] = (category_of(index, p_oid) or humanize(p_oid)) if p_oid else None
+            payload["destination"] = (category_of(index, d_oid) or humanize(d_oid)) if d_oid else None
         return payload
     if kind == "object":
         cat = structured.get("category")
@@ -884,6 +1098,8 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
     if kind == "anomaly":
         obj = structured.get("category") or category_of(index, structured.get("object_id"))
         return {"type": "anomaly", "object": obj, "state": structured.get("state")}
+    if kind == "robot_location":
+        return {"type": "robot_location", "room": humanize(structured.get("room"))}
     return {"type": "other", "raw": str(structured)}
 
 
@@ -936,13 +1152,15 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
         #   发明 "on the target" 目的地), 违者用规则渲染覆盖该选项。
         if structured.get("kind") == "action":
             prim = structured.get("primitive")
-            if prim == PRIMITIVE_INTERACT and not _interact_tool_cat(structured, index):
+            if prim == PRIMITIVE_INTERACT and (not _interact_tool_cat(structured, index)
+                                               or structured.get("destination_object")
+                                               or structured.get("payload_object")):
+                # 自指 / 多元素 INTERACT: 措辞敏感, 用规则渲染覆盖 (杜绝自指 + 保证三元动作槽位正确)
                 s = _render_option(structured, index)
             elif prim == PRIMITIVE_MOVE:
                 room = structured.get("room")
-                if (room and structured.get("current_room")
-                        and room != structured.get("current_room")
-                        and structured.get("target_object")):
+                if (room and structured.get("target_object")
+                        and (structured.get("current_room") or structured.get("source_room"))):
                     s = _render_option(structured, index)
             elif prim == PRIMITIVE_PLACE and structured.get("placed_object"):
                 placed_name = _placed_nl(structured, index)
@@ -972,7 +1190,7 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
 def _finalize(qra_id: str, correct_opt: dict[str, Any],
               dist_opts: list[dict[str, Any]], index: SceneIndex,
               llm: Any = None, question: str = "",
-              must_include: list[str] | None = None) -> tuple[list[dict[str, Any]], int]:
+              must_include: list[Any] | None = None) -> tuple[list[dict[str, Any]], int]:
     """把正确项 + 干扰项合成一份选择题选项列表, 返回 (options, answer_index)。
 
     选项文本优先由 LLM 依据结构化整合信息措辞 (``_llm_render_options``), LLM 不可用/失败/
@@ -999,12 +1217,14 @@ def _finalize(qra_id: str, correct_opt: dict[str, Any],
         uniq.append(d)
 
     rng = _rng(qra_id, "shuffle")
-    # must-include: 保证指定来源类型的干扰项至少入选一个 (R3 强迷惑项)
+    # must-include: 保证指定来源类型 (字符串) 或动作空间语义 (谓词) 的干扰项至少入选一个 (R3 强迷惑项)
     if must_include:
         head: list[dict[str, Any]] = []
         for mt in must_include:
             for d in uniq:
-                if (d.get("source") or {}).get("type") == mt and d not in head:
+                hit = (bool(mt(d["structured"])) if callable(mt)
+                       else (d.get("source") or {}).get("type") == mt)
+                if hit and d not in head:
                     head.append(d)
                     break
         rest = [d for d in uniq if d not in head]
@@ -1101,10 +1321,15 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
 
     dist_opts: list[dict[str, Any]] = []
     seen_ids = {target}
+    # PLACE 步骤的目的地槽位只接受真实支撑面: 被拒绝候选多为"同类别可抓物体"
+    # (如另一瓶水), 当作目的地会渲染出 "Place the bottle on the bottle" 自指干扰项。
+    support_set = set(index.support_surfaces) if action == PRIMITIVE_PLACE else None
 
     def _add(oid: str | None, src_type: str, use_tool: str | None) -> None:
         if not oid or oid in seen_ids or len(dist_opts) >= needed:
             return
+        if support_set is not None and oid not in support_set:
+            return  # 非支撑面不能作 PLACE 目的地
         seen_ids.add(oid)
         dist_opts.append({"kind": "action", "structured": _make(oid, use_tool),
                           "source": {"type": src_type, "object_id": oid}})
@@ -1153,6 +1378,41 @@ def _anomaly_options(pair: Any, index: SceneIndex,
     return _finalize(pair.qra_id, correct, distractors, index, llm=llm, question=pair.Q)
 
 
+def _robot_location_options(pair: Any, index: SceneIndex,
+                            llm: Any = None,
+                            task_instance: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], int]:
+    """机器人位置题 (kind="robot_location") → 选择题: 正确项 = 机器人所在房间; 干扰项 = 其它房间。
+
+    正确房间 = 唯一看到机器人的摄像头房间 (部署期 ``visible_robot_objects``, 逐摄像头完整);
+    干扰项池 = 全量房间拓扑 (连通图) ∪ 全局摄像头房间, 排除正确房间。这样除其它摄像头房间外,
+    还引入无摄像头的"无关房间"作干扰项 (模型需从画面判别机器人到底在哪间), 使位置题从
+    摄像头房间数受限的 2 选 1 扩展为 [5,8] 选 1。取并集是为了兜底: 部分摄像头房间 (正确房间
+    亦可能) 不在连通图 room_edges 里。
+    """
+    a = pair.A or {}
+    raw_room = a.get("room") or ""
+    if not raw_room:
+        return [], -1
+    room = humanize(raw_room)
+    topo_rooms = [humanize(r) for r in build_room_topology(task_instance).get("rooms", [])]
+    cam_rooms = global_camera_rooms(task_instance)
+    all_rooms: list[str] = []
+    seen_rooms: set[str] = set()
+    for r in topo_rooms + cam_rooms:
+        if r and r not in seen_rooms:
+            seen_rooms.add(r)
+            all_rooms.append(r)
+    correct = {"structured": {"kind": "robot_location", "room": room},
+               "source": {"type": "ground_truth_room", "room": room}}
+    dist_pool = [r for r in all_rooms if r != room]
+    distractors = [{"structured": {"kind": "robot_location", "room": r},
+                    "source": {"type": "wrong_room", "room": r}}
+                   for r in dist_pool]
+
+    pair.Q = "Based on the surveillance camera views, which room is the robot currently in?"
+    return _finalize(pair.qra_id, correct, distractors, index, llm=llm, question=pair.Q)
+
+
 # ======================================================================
 # 分发: 一条 pair → 选择题选项
 # ======================================================================
@@ -1164,6 +1424,8 @@ def _generate_pair_options(pair: Any, index: SceneIndex,
     kind = (pair.A or {}).get("kind")
     if kind == "anomaly":
         return _anomaly_options(pair, index, llm)
+    if kind == "robot_location":
+        return _robot_location_options(pair, index, llm, task_instance)
     if kind == "disambiguation":
         return _disambiguation_options(pair, index, plan, scene, llm, task_instance)
     qt = pair.question_type
