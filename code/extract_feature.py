@@ -75,9 +75,28 @@ def interact_container_verb(nl: str | None) -> str:
     return head or "sweep"
 
 
+# 开关动作: solution_plan 里 TOGGLE_ON/TOGGLE_OFF 被归一成 INTERACT, 只有 nl 保留了
+# on/off 方向; 这里把完整动词短语作为权威动词, 供渲染 "Turn on the X" / "Turn off the X"
+# 区分开与关 (否则两者都退化成 "Operate the X", 不可区分)。
+TOGGLE_ON_VERBS = frozenset({"turn on", "switch on", "toggle on", "power on"})
+TOGGLE_OFF_VERBS = frozenset({"turn off", "switch off", "toggle off", "power off"})
+
+
+def interact_toggle_verb(nl: str | None) -> str:
+    """从 ``nl`` 提取开关类动词短语 ("turn on"/"turn off"/"switch on"/...), 无则返回空串。"""
+    head = (nl or "").strip().lower()
+    for phrase in ("turn on", "turn off", "switch on", "switch off",
+                   "toggle on", "toggle off", "power on", "power off"):
+        if head.startswith(phrase):
+            return phrase
+    return ""
+
+
 # INTERACT 动词家族 → 槽位语义 (决定 target/tool/destination/payload 各自扮演什么角色)
 WIPE_VERBS = frozenset({"wipe", "wash", "rinse", "clean"})   # 清洗: target=被清洗物, destination=水槽, tool=海绵
 EMPTY_VERBS = frozenset({"empty", "pour", "dump"})           # 倾倒: payload=被倒物, tool=来源容器, target=目的地
+OPEN_VERBS = frozenset({"open"})                             # 开启 (舱门/盖): 与关闭不可混淆
+CLOSE_VERBS = frozenset({"close", "shut"})                   # 关闭 (舱门/盖): 与开启不可混淆
 
 
 def interact_slots(step: dict[str, Any] | None) -> tuple[str, str | None, str | None, str | None]:
@@ -92,7 +111,11 @@ def interact_slots(step: dict[str, Any] | None) -> tuple[str, str | None, str | 
     - 均不存在 → 二元/一元 (Use tool to operate target)。
     """
     step = step or {}
-    verb = interact_container_verb(step.get("nl"))
+    nl = step.get("nl")
+    verb = interact_container_verb(nl)
+    toggle = interact_toggle_verb(nl)
+    if toggle:
+        verb = toggle  # 开关动作: 用完整动词短语 (turn on/off), 保留 on/off 方向
     target = step.get("target_object")
     tool = step.get("tool_object")
     dest = step.get("destination_object")
@@ -101,7 +124,9 @@ def interact_slots(step: dict[str, Any] | None) -> tuple[str, str | None, str | 
         return verb, payload, tool, target
     if dest:
         return verb, target, tool, dest
-    return verb, target, tool, None
+    # 二元/一元 INTERACT (无 destination/payload): 没有独立 payload, 别拿 target 冒充,
+    # 否则下游 (build_answer) 会误写成 payload_object=target。
+    return verb, None, tool, None
 
 
 def interact_action_nl(verb: str, payload: str, tool: str, destination: str) -> str:
@@ -119,6 +144,18 @@ def interact_action_nl(verb: str, payload: str, tool: str, destination: str) -> 
     if v in EMPTY_VERBS:
         head = f"Empty the {payload} from the {tool}" if tool else f"Empty the {payload}"
         return f"{head} into the {destination}" if destination else head
+    if v in TOGGLE_ON_VERBS:
+        head = f"Turn on the {payload}"
+        return f"{head} with the {tool}" if tool else head
+    if v in TOGGLE_OFF_VERBS:
+        head = f"Turn off the {payload}"
+        return f"{head} with the {tool}" if tool else head
+    if v in OPEN_VERBS:
+        head = f"Open the {payload}"
+        return f"{head} with the {tool}" if tool else head
+    if v in CLOSE_VERBS:
+        head = f"Close the {payload}"
+        return f"{head} with the {tool}" if tool else head
     if destination:
         head = f"{(v.capitalize() or 'Sweep')} the {payload} into the {destination}"
         return f"{head} with the {tool}" if tool else head
@@ -591,7 +628,10 @@ def build_room_topology(task_instance: dict[str, Any]) -> dict[str, Any]:
     nav = graph.get("navigation") or {}
     raw_edges = nav.get("room_edges") or []
 
-    rooms: set[str] = set()
+    # 房间全集 = room_centers 的 keys (物理存在的房间); room_edges 只用于填连通边。
+    # 孤立房间 (有 room_center 但无 door/traversability 边) 也保留, 与 build_scene_index
+    # 的 rooms 口径对齐, 避免题干 structure 行漏掉机器人/任务所在的孤立房间。
+    rooms: set[str] = set((nav.get("room_centers") or {}).keys())
     edges: list[list[Any]] = []
     for e in raw_edges:
         src, tgt = e.get("source"), e.get("target")

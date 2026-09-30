@@ -44,7 +44,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from extract_feature import (
+    CLOSE_VERBS,
+    OPEN_VERBS,
     SceneIndex,
+    TOGGLE_OFF_VERBS,
+    TOGGLE_ON_VERBS,
     build_candidate_descriptors,
     build_room_topology,
     build_scene_index,
@@ -85,8 +89,12 @@ BBOX_NORM_SCALE = 1000
 # bbox 扰动平移幅度 (相对宽/高的比例): 在 [MIN, MAX] 内采样。
 # MAX 越小越近误、越难与真值区分; MIN 保证干扰框与真值有可辨差异 (避免与真值几乎重合)。
 # 用于 bbox 题的近误干扰框, 以及 planning 题"同动作、bbox 近误"的混淆干扰项。
-BBOX_PERTURB_MIN_SHIFT = 0.05
-BBOX_PERTURB_MAX_SHIFT = 0.15
+# 0928 校准: 原 [0.05, 0.15] 平移后干扰框与真值 IoU 仍 ~0.9, 8B VLM 无法区分 (实测 bbox 题 ~13%≈随机),
+# 上调到 [0.20, 0.40] 使 IoU 降到 ~0.5 的"可辨但非一眼错"中间带。BBOX_PERTURB_MIN_ABS 保证小目标
+# (框自身尺寸小) 也有可感知的绝对位移, 否则框相对位移会趋近于 0。
+BBOX_PERTURB_MIN_SHIFT = 0.20
+BBOX_PERTURB_MAX_SHIFT = 0.40
+BBOX_PERTURB_MIN_ABS = 25  # 最小绝对位移 (归一化像素, 相对 1000 画面), 保证小目标干扰框可辨
 
 # interaction kind → 该物体可行的动作原语集合 (可行性闸门的核心)
 _INTERACTION_PRIMITIVES: dict[str, set[str]] = {
@@ -150,12 +158,19 @@ def _action_key(a: dict[str, Any]) -> tuple:
 
     PLACE 的 placed_object (被放置物) 纳入键: "Place the sock inside X" 与
     "Place the sock inside Y" (目的地不同) 是不同动作。
+
+    INTERACT 的归一动词 (open/close/turn on/turn off, 只活在 ``nl`` 里) 也纳入键:
+    否则 "Open the dishwasher" 与 "Close the dishwasher" (target/tool/room 完全相同,
+    唯一区别是 nl 动词) 被误判为同一动作, 时序混淆干扰项在生成阶段就被 continue 丢弃。
     """
     bbox = tuple(a.get("object_bbox") or [])
+    verb = ""
+    if a.get("primitive") == PRIMITIVE_INTERACT:
+        verb = interact_slots(a)[0]
     return (a.get("kind"), a.get("primitive"), a.get("target_object"),
             a.get("placed_object"), a.get("tool_object"), a.get("room"),
             a.get("source_room"), a.get("destination_object"),
-            a.get("payload_object"), bbox)
+            a.get("payload_object"), verb, bbox)
 
 
 def _option_key(s: dict[str, Any]) -> tuple:
@@ -451,10 +466,15 @@ def _action_distractors(step: dict[str, Any], index: SceneIndex,
             cands.append((_action(placed_object=oid),
                           {"type": "placed_swap", "object_id": oid}))
 
-    # 7) 工具替换 (INTERACT)
+    # 7) 工具替换 (INTERACT)。启闭类动作 (turn on/off, open/close) 作用于物体自身、无独立
+    #    工具, 不生成工具替换干扰项 (否则 "Use the toilet to turn on the sink" /
+    #    "Use the floor lamp to operate the dishwasher" 语义不通)。
     if prim == PRIMITIVE_INTERACT:
-        for oid in _tool_swap_pool(tool, target, index):
-            cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
+        verb = interact_slots(step)[0]
+        if (verb not in TOGGLE_ON_VERBS and verb not in TOGGLE_OFF_VERBS
+                and verb not in OPEN_VERBS and verb not in CLOSE_VERBS):
+            for oid in _tool_swap_pool(tool, target, index):
+                cands.append((_action(tool_object=oid), {"type": "tool_swap", "tool": oid}))
 
     return _sample_distinct(cands, k, rng, must_include=must_include)
 
@@ -543,20 +563,27 @@ def _annotate_action_bbox(action: dict[str, Any], cam: dict[str, Any]) -> None:
         action["object_bbox"] = nb
 
 
-def _perturb_bbox(bbox: list[int], rng: "random.Random") -> list[int] | None:
-    """对正确 bbox 做确定性近误扰动 (平移幅度在 [MIN, MAX] 内, 保证在画面内且不等于真值)。
+def _perturb_bbox(bbox: list[int], rng: "random.Random",
+                  min_shift: float = BBOX_PERTURB_MIN_SHIFT,
+                  max_shift: float = BBOX_PERTURB_MAX_SHIFT,
+                  min_abs: int = BBOX_PERTURB_MIN_ABS) -> list[int] | None:
+    """对正确 bbox 做确定性近误扰动 (平移幅度在 [min_shift, max_shift] 内, 保证在画面内且不等于真值)。
 
-    近误扰动 (与真值大面积重叠但仍有可辨差异) 比粗扰动更难区分, 用于 bbox 题的干扰框
-    与 planning 题的 bbox 混淆项。MIN 下限避免生成与真值几乎重合、难以判定的干扰框。
+    近误扰动 (与真值部分重叠但仍有可辨差异) 比粗扰动更难区分, 用于 bbox 题的干扰框
+    与 planning 题的 bbox 混淆项。min_shift 下限避免生成与真值几乎重合、难以判定的干扰框;
+    min_abs 保证小目标 (框自身尺寸小) 的干扰框也有可感知的绝对位移。区间已参数化, 各题型
+    可传入各自的粗/细区间 (bbox 题用默认较粗区间, planning/disambiguation 内嵌 bbox 可单独校准)。
     """
     x1, y1, x2, y2 = bbox
     w = max(x2 - x1, 1)
     h = max(y2 - y1, 1)
     for _ in range(20):
-        fx = rng.uniform(BBOX_PERTURB_MIN_SHIFT, BBOX_PERTURB_MAX_SHIFT) * rng.choice((-1, 1))
-        fy = rng.uniform(BBOX_PERTURB_MIN_SHIFT, BBOX_PERTURB_MAX_SHIFT) * rng.choice((-1, 1))
-        dx = int(w * fx)
-        dy = int(h * fy)
+        mag_x = rng.uniform(min_shift, max_shift)
+        sign_x = rng.choice((-1, 1))
+        mag_y = rng.uniform(min_shift, max_shift)
+        sign_y = rng.choice((-1, 1))
+        dx = int(max(mag_x * w, min_abs)) * sign_x
+        dy = int(max(mag_y * h, min_abs)) * sign_y
         nx1 = max(0, min(BBOX_NORM_SCALE - 1, x1 + dx))
         nx2 = max(0, min(BBOX_NORM_SCALE - 1, x2 + dx))
         ny1 = max(0, min(BBOX_NORM_SCALE - 1, y1 + dy))
@@ -717,6 +744,15 @@ def _planning_options(pair: Any, index: SceneIndex,
         a = {"kind": "action", "primitive": prim, "target_object": oid,
              "tool_object": tool if prim == PRIMITIVE_INTERACT else None,
              "room": room_field, "current_room": cur, "category": cat_desc}
+        if prim == PRIMITIVE_INTERACT:
+            # 沿用规划侧权威槽位 (nl/destination/payload), 使开关/多元素动作的动词保持一致
+            # (否则 spatial_feature_confusion 会退化渲染成 "Operate the X", 与正确项动词分裂)。
+            if step.get("nl"):
+                a["nl"] = step.get("nl")
+            if step.get("destination_object"):
+                a["destination_object"] = step.get("destination_object")
+            if step.get("payload_object"):
+                a["payload_object"] = step.get("payload_object")
         dist_opts.append({"kind": "action", "structured": a,
                           "source": {"type": "spatial_feature_confusion", "object_id": oid}})
 
@@ -921,6 +957,10 @@ def _action_nl(a: dict[str, Any], index: SceneIndex) -> str:
     if prim == PRIMITIVE_INTERACT:
         verb, p_oid, t_oid, d_oid = interact_slots(a)
         if not d_oid:
+            # 开关/启闭动作 (turn on/off, open/close): 用目标自身渲染, 区分动作方向
+            # (否则这些只活在 nl 里的动词都退化成 Operate, 开关/启闭彼此不可区分)
+            if verb in TOGGLE_ON_VERBS or verb in TOGGLE_OFF_VERBS or verb in OPEN_VERBS or verb in CLOSE_VERBS:
+                return interact_action_nl(verb, tgt, "", "")
             # 二元 INTERACT: 沿用旧逻辑 (自指按类别比较; 目标保留 category 覆盖 + bbox 定位)
             tool_cat = _interact_tool_cat(a, index)
             if tool_cat:
@@ -1025,8 +1065,14 @@ PLACE has two slots: "placed" is the object being moved and "target" is the dest
 "Place the <placed> inside the <target>" when "placement_mode" is "inside", otherwise \
 "Place the <placed> on the <target>"; never swap the two slots (the destination is never the \
 object being placed) and never invent a generic destination such as "the target". \
-INTERACT: if a "tool" is present and differs from the "target", write "Use the <tool> to operate \
-the <target>"; if "tool" is null/absent or equals the "target", write "Operate the <target>" \
+INTERACT: when an "nl" field is present, the action's verb and phrasing come from "nl" \
+(e.g. "Turn on the faucet" -> the verb is "turn on"); apply that verb to the option's own \
+"target" object — the object noun MUST come from "target", never from the noun inside "nl" \
+(e.g. write "Turn on the <target>", not "Turn on the faucet", when the target is a sink). For \
+toggle verbs write "Turn on the <target>" / "Turn off the <target>"; for open/close write \
+"Open the <target>" / "Close the <target>". When "nl" is absent, use: \
+if a "tool" is present and differs from the "target", write "Use the <tool> to operate the \
+<target>"; if "tool" is null/absent or equals the "target", write "Operate the <target>" \
 (never "Use the <target> to operate the <target>"). \
 For multi-object INTERACT (when "verb", "payload" and/or "destination" are present), phrase the \
 three roles explicitly instead of "operate": if verb is "wipe"/"wash"/"rinse"/"clean" write \
@@ -1039,16 +1085,23 @@ pieces into the dustpan with the broom"). Never collapse these into "use X to op
 "unchanged" = "The <object> will remain where it is". Keep the future-tense state wording, \
 never rewrite it into an action instruction.
 5. For bbox options, output the coordinates verbatim as [x1, y1, x2, y2]; do not alter any number.
-6. One sentence per option, consistent style and similar length; do not hint which option is correct.
+6. The "option_type" ("correct"/"distractor") and "distractor" fields describe how each option \
+was derived from the same action (e.g. target swapped, room changed). Use them only to keep the \
+verb and action semantics consistent across all options — do not let them change the style, \
+length, or wording of any option, and never reveal which option is correct. \
+One sentence per option, consistent style and similar length; do not hint which option is correct.
 7. Output only JSON in the form: {"texts": ["option 1", "option 2", ...]}, with the same length \
 and order as the input options."""
 
 
-def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, Any]:
+def _option_payload(structured: dict[str, Any], index: SceneIndex,
+                    source: dict[str, Any] | None = None) -> dict[str, Any]:
     """把结构化选项压缩成"整合信息"字典 (人类可读), 作为 LLM 措辞的输入。
 
     注意: 这里只做 id → 类别/房间的人类可读映射 (``category_of`` / ``humanize``), 不改动语义;
-    因此 LLM 拿到的就是场景里真实存在的实体名, 无法"想出"不存在的物体。
+    因此 LLM 拿到的就是场景里真实存在的实体名, 无法"想出"不存在的物体。此外把规划侧权威
+    动作句 ``nl`` 与干扰项来源类型 (``source.type``) 一并交给 LLM, 使其能按「同一动作、只换
+    实体」渲染选项 (开关动词 turn on/off 等只活在 nl 里的信息也能进 LLM), 而不是退化成一刀切。
     """
     kind = structured.get("kind")
     if kind == "action":
@@ -1066,11 +1119,17 @@ def _option_payload(structured: dict[str, Any], index: SceneIndex) -> dict[str, 
             "current_room": humanize(structured.get("current_room")) or None,
             "source_room": humanize(structured.get("source_room")) or None,
         }
+        src_type = (source or {}).get("type")
+        payload["option_type"] = "correct" if src_type == "solution_plan_step" else "distractor"
+        if src_type and src_type != "solution_plan_step":
+            payload["distractor"] = src_type
+        if structured.get("nl"):
+            payload["nl"] = structured.get("nl")
         # PLACE 双槽位: placed = 被放置物, target = 目的地 (LLM 据此措辞, 不得互换/发明)
         if prim == PRIMITIVE_PLACE:
             payload["placed"] = _placed_nl(structured, index)
             payload["placement_mode"] = structured.get("placement_mode") or "on"
-        # 多元素 INTERACT (清扫/倾倒/清洗): 归一化槽位后把 verb/payload/destination 交给 LLM
+        # 多元素 INTERACT (清扫/倾倒/清洗/开关): 归一化槽位后把 verb/payload/destination 交给 LLM
         if prim == PRIMITIVE_INTERACT:
             verb, p_oid, t_oid, d_oid = interact_slots(structured)
             payload["verb"] = verb
@@ -1121,7 +1180,7 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
     if not callable(call):
         return None
 
-    payloads = [_option_payload(o["structured"], index) for o in options]
+    payloads = [_option_payload(o["structured"], index, o.get("source")) for o in options]
     user_prompt = (
         f"Question: {question or '(no question stem)'}\n\n"
         f"Rewrite each of the following {len(payloads)} options as a natural-language phrase "
@@ -1146,15 +1205,18 @@ def _llm_render_options(options: list[dict[str, Any]], question: str,
         # 坐标必须逐字保留, 否则整题回退 (数值是正确答案的关键, 不能由 LLM 重写)
         structured = options[i]["structured"]
         # 措辞敏感的情形用确定性规则渲染覆盖 LLM (只覆盖该选项、不整题回退):
-        #   INTERACT 无 tool 或 tool 与 target 同类别 (自指) → "Operate the X" (杜绝 "Use the X to operate the X" 自指 / Use 不一致);
+        #   INTERACT 自指 (tool 与 target 同类别) 或 多元素 (dest/payload) → 规则渲染
+        #     (杜绝 "Use the X to operate the X" 自指 + 保证三元动作槽位正确);
+        #     无 tool 的 INTERACT (如开关 turn on/off) 放行给 LLM, 靠 payload 里的 nl 措辞;
         #   MOVE 跨房间 (room≠current_room) → "Find the X in <room>";
         #   PLACE 语义校验: 被放置物与目的地实体名必须逐字出现 (防 LLM 换槽位 /
         #   发明 "on the target" 目的地), 违者用规则渲染覆盖该选项。
         if structured.get("kind") == "action":
             prim = structured.get("primitive")
-            if prim == PRIMITIVE_INTERACT and (not _interact_tool_cat(structured, index)
-                                               or structured.get("destination_object")
-                                               or structured.get("payload_object")):
+            if prim == PRIMITIVE_INTERACT and (
+                    (structured.get("tool_object") and not _interact_tool_cat(structured, index))
+                    or structured.get("destination_object")
+                    or structured.get("payload_object")):
                 # 自指 / 多元素 INTERACT: 措辞敏感, 用规则渲染覆盖 (杜绝自指 + 保证三元动作槽位正确)
                 s = _render_option(structured, index)
             elif prim == PRIMITIVE_MOVE:
@@ -1260,13 +1322,14 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
     """消歧题 (kind="disambiguation") → 选择题: 正确项 = optimal 对象 + 动作; 干扰项 = 候选/干扰物体。
 
     正确项与干扰项都复用 ``kind="action"`` 结构化体 (同动作、换目标物体), 使渲染 / 措辞 /
-    去重走既有 action 通道。干扰项优先用 ``rejected_candidates`` (语义干扰物), 不足时以
-    同原语的其它真实物体补齐 (补齐量封顶到 NUM_OPTIONS-1, 保证语义干扰物不被随机丢弃)。
+    去重走既有 action 通道, 全面对标 ``_planning_options`` 的干扰项生成与渲染:
+    - 干扰项来源: 语义干扰 (rejected_candidates) / 空间特征混淆 (同类多实例) / bbox 近误混淆 /
+      异类目标替换 (object_swap 填充);
+    - ``must_include`` 保底: 语义干扰物、空间特征混淆、bbox 混淆、MOVE within-cross 至少各入选一个;
+    - MOVE 从 "cat in <room>" 描述符剥出房间槽位, 恢复 within/cross 措辞 (room + current_room)。
 
-    每个选项携带房间 (SceneIndex.affordance.rooms) 与 ``category`` 覆盖: 当候选集中存在
-    同类别多实例时, 追加数字后缀 (object_id 末尾数字, 否则按出现顺序编 1/2/3) 使选项文本
-    可区分 —— 这是 Env-C "明确干扰" (两个同类别开关/书) 的核心, 否则 ``_finalize`` 会按
-    文本去重把语义干扰物折叠掉。数字后缀不暴露完整 instance id, 也不泄露哪个是 optimal。
+    同类别多实例用 ``build_candidate_descriptors`` 生成"独一无二空间特征" (房间/地标/门/方位)
+    区分选项文本; 只靠裸数字后缀区分时数据不合法 → 放弃。不暴露完整 instance id, 也不泄露哪个是 optimal。
     """
     a = pair.A or {}
     optimal = a.get("optimal_object")
@@ -1285,7 +1348,7 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
         if action == PRIMITIVE_PLACE and 0 <= getattr(pair, "simulation_step", 0) < len(plan) else None
 
     needed = _num_options(pair.qra_id) - 1
-    # 语义候选 (target + optimal + rejected): 空间特征只为它们计算, 与题干 (translator) 用同一批输入,
+    # 语义候选 (target + optimal + rejected): 与题干 (translator) 用同一批输入,
     # 保证题干列举的对象与选项标签一致 (同一类多实例用方位等特征区分, 而非任意的数字后缀)。
     semantic_ids: list[str] = [target]
     if optimal not in semantic_ids:
@@ -1295,7 +1358,14 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
         if oid and oid not in semantic_ids:
             semantic_ids.append(oid)
 
-    desc_map = build_candidate_descriptors(task_instance, semantic_ids, index) if task_instance else {}
+    # 同类实例 (空间特征混淆干扰项素材) 并入描述符全集, 使 desc_map 对同类别所有实例
+    # 一次性生成互异特征 (与 planning 的 build_candidate_descriptors 口径一致)。
+    siblings = instances_of_category(index, target)
+    all_ids = list(semantic_ids)
+    for oid in siblings:
+        if oid not in all_ids:
+            all_ids.append(oid)
+    desc_map = build_candidate_descriptors(task_instance, all_ids, index) if task_instance else {}
 
     # 依用户规则: 消歧候选 (target/optimal/rejected) 若只能靠裸数字后缀区分 (同房间多实例
     # 且无自然语言特征差异), 该题数据不合法 → 放弃 (返回空选项, 由审计脚本标记, 不静默降级)。
@@ -1303,17 +1373,26 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
         if oid in desc_map and descriptor_is_bare_number(desc_map[oid], category_of(index, oid)):
             return [], -1
 
+    cur = current_room(task_instance, plan, getattr(pair, "simulation_step", 0), index)
+
     def _make(oid: str, use_tool: str | None) -> dict[str, Any]:
         extra: dict[str, Any] = {}
         if action == PRIMITIVE_PLACE:
             extra = {"placed_object": placed, "placement_mode": mode}
         if oid in desc_map:
+            cat = desc_map[oid]
+            room = None
+            # MOVE: 从 "cat in <room>" 描述符剥出房间作为独立槽位, 恢复 within/cross 措辞
+            # (与 planning 的 _split_descriptor_room 一致, 避免 room=None + 描述符内嵌房间)。
+            if action == PRIMITIVE_MOVE:
+                cat, room = _split_descriptor_room(cat, room_of(index, oid))
             return {"kind": "action", "primitive": action, "target_object": oid,
-                    "tool_object": use_tool, "room": None, "category": desc_map[oid], **extra}
+                    "tool_object": use_tool, "room": room, "current_room": cur,
+                    "category": cat, **extra}
         rooms = (index.affordance.get(oid) or {}).get("rooms") or []
         return {"kind": "action", "primitive": action, "target_object": oid,
                 "tool_object": use_tool, "room": rooms[0] if rooms else None,
-                "category": category_of(index, oid), **extra}
+                "current_room": cur, "category": category_of(index, oid), **extra}
 
     correct = {"kind": "action", "structured": _make(target, tool),
                "source": {"type": "optimal_object" if target == optimal else "target_object",
@@ -1326,7 +1405,7 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
     support_set = set(index.support_surfaces) if action == PRIMITIVE_PLACE else None
 
     def _add(oid: str | None, src_type: str, use_tool: str | None) -> None:
-        if not oid or oid in seen_ids or len(dist_opts) >= needed:
+        if not oid or oid in seen_ids:
             return
         if support_set is not None and oid not in support_set:
             return  # 非支撑面不能作 PLACE 目的地
@@ -1334,18 +1413,61 @@ def _disambiguation_options(pair: Any, index: SceneIndex,
         dist_opts.append({"kind": "action", "structured": _make(oid, use_tool),
                           "source": {"type": src_type, "object_id": oid}})
 
+    # 1) 语义干扰 (rejected_candidates): 优先且 must_include 保底, 不被随机洗掉
     for rc in a.get("rejected_candidates") or []:
         oid = rc.get("object_id") if isinstance(rc, dict) else rc
         _add(oid, "rejected_candidate", tool)
-    for oid in _target_swap_pool(action, target, index):
+
+    # 2) 空间特征混淆 (同类多实例, 对标 planning 的 spatial_feature_confusion)
+    for oid in siblings:
+        if oid == target or oid in seen_ids:
+            continue
+        if task_instance is not None and target_is_unresolvable(task_instance, oid, index):
+            continue  # 同房间多实例且无 NL 特征 → 跳过 (裸数字不合法)
+        _add(oid, "spatial_feature_confusion", tool if action == PRIMITIVE_INTERACT else None)
+
+    # 3) 异类目标替换 (object_swap, 易排除的填充干扰, 封顶 needed)
+    for oid in _target_swap_pool(action, target, index)[:needed]:
         _add(oid, "object_swap", None)
 
+    # 4) bbox 近误混淆 (对标 planning 的 bbox_confusion): 正确目标主视角可见时,
+    #    追加"同动作、仅 bbox 数值不同"的干扰项 (最易混淆的一类)
     _annotate_action_bbox(correct["structured"], cam)
     for d in dist_opts:
         _annotate_action_bbox(d["structured"], cam)
+    correct_bbox = correct["structured"].get("object_bbox")
+    if isinstance(correct_bbox, (list, tuple)) and len(correct_bbox) == 4:
+        rng = _rng(pair.qra_id, "disambiguation")
+        for _ in range(2):
+            nb = _perturb_bbox(list(correct_bbox), rng)
+            if nb is None:
+                continue
+            confused = dict(correct["structured"])
+            confused["object_bbox"] = nb
+            dist_opts.append({"kind": "action", "structured": confused,
+                              "source": {"type": "bbox_confusion"}})
+
+    # 5) MOVE within/cross 保底 + must_include (对标 planning): 保证强迷惑干扰项至少各入选一个
+    move_must_include: list[Any] = []
+    room = correct["structured"].get("room")
+    if action == PRIMITIVE_MOVE and room and cur:
+        if room == cur:
+            move_must_include.append(_move_is_cross)
+        else:
+            move_must_include.append(_move_is_within)
+            move_must_include.append(_move_wrong_source)
+    must_include: list[Any] = []
+    if any((d.get("source") or {}).get("type") == "rejected_candidate" for d in dist_opts):
+        must_include.append("rejected_candidate")
+    if any((d.get("source") or {}).get("type") == "spatial_feature_confusion" for d in dist_opts):
+        must_include.append("spatial_feature_confusion")
+    if isinstance(correct_bbox, (list, tuple)) and len(correct_bbox) == 4:
+        must_include.append("bbox_confusion")
+    must_include.extend(move_must_include)
 
     return _finalize(pair.qra_id, correct, dist_opts, index,
-                     llm=llm, question=getattr(pair, "Q", "") or "")
+                     llm=llm, question=getattr(pair, "Q", "") or "",
+                     must_include=must_include or None)
 
 
 def _anomaly_options(pair: Any, index: SceneIndex,

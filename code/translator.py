@@ -83,6 +83,7 @@ from extract_feature import (
     global_camera_rooms,
     humanize,
     interact_action_nl,
+    interact_container_verb,
     interact_slots,
     object_category,
     resolve_rooms,
@@ -1448,10 +1449,11 @@ def _rule_answer_nl(pair: QRAPair) -> str:
         if bbox:
             return f"Place the {a['placed_category']} {prep} the {dest} (bbox {bbox})."
         return f"Place the {a['placed_category']} {prep} the {dest}."
-    if action == PRIMITIVE_INTERACT and (a.get("payload_object") or a.get("destination_object")):
-        # 多元素 INTERACT (清扫/倾倒/清洗): 按动词家族渲染三元动作
-        # (Sweep X into Y with Z / Empty X from Y into Z / Wipe X clean in Y with Z)
-        verb = a.get("interact_verb") or "sweep"
+    if action == PRIMITIVE_INTERACT:
+        # INTERACT 一律按动词家族渲染 (开关 turn on/off / 清扫 / 倾倒 / 清洗 / 二元 operate),
+        # 不再退化成裸原语 "INTERACT the X"。verb 取自 build_answer 的 interact_verb
+        # (interact_slots 已把 turn on/off 解析成完整短语), 缺失时从 nl 首词兜底。
+        verb = a.get("interact_verb") or interact_container_verb(a.get("nl")) or "operate"
         p = a.get("payload_category") or name
         t = a.get("tool_category") or ""
         d = a.get("destination_category") or ""
