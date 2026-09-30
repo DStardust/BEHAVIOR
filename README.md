@@ -16,6 +16,13 @@
 `DStardust/EM-STORM` 的最短流程见
 [ModelScope 上传说明](docs/deltasg_usage.md#上传-modelscope)。
 
+## EM-STORM Training
+
+训练代码独立维护在 `training/emstorm-qa-sft` 分支，使用 `emstorm-train` 环境，
+不依赖 OmniGibson 仿真或在线 LLM API。数据下载、QA 微调、评测、实时进度与断点续跑
+见 [训练中文使用说明](README_EMSTORM_TRAINING.md)，场景图训练格式见
+[训练设计与实验记录](docs/emstorm_training.md)。本分支不包含数据、模型权重或访问密钥。
+
 # 🛠️ Installation
 
 BEHAVIOR-1K provides an installation script that handles all dependencies and components. The script supports modular installation, allowing you to install only the components you need.
