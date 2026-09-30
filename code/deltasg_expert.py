@@ -620,7 +620,6 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
     warnings: list[str] = [*ordering_warnings, *hand_wash_warnings]
     provisional: list[dict[str, Any]] = []
     inventory: list[str] = []
-    last_navigation_target: str | None = None
 
     for raw_index, raw in enumerate(raw_plan, 1):
         if not isinstance(raw, dict):
@@ -650,9 +649,6 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
             if target is None:
                 continue
             primitive = "NAVIGATE_TO"
-            if target == last_navigation_target:
-                continue
-            last_navigation_target = target
         elif source == "PICK":
             primitive = "GRASP"
             target = target or default_target
@@ -870,6 +866,17 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
                 )
                 warnings.append(f"retargeted pre-{item['primitive']} navigation from {old_target} to {target}")
         else:
+            # Skip insertion when the immediately preceding operation already
+            # ends at `target` (its own target or destination is `target`) —
+            # e.g. a WIPE whose destination is the sink, immediately followed by
+            # a PLACE_INSIDE into that same sink: the robot is already there.
+            previous = provisional[index - 1] if index > 0 else None
+            if previous is not None and (
+                previous.get("target") == target
+                or previous.get("destination") == target
+            ):
+                index += 1
+                continue
             provisional.insert(
                 index,
                 {
@@ -883,6 +890,24 @@ def compile_expert_plan(run: dict[str, Any]) -> CompiledExpertPlan:
             warnings.append(f"inserted pre-{item['primitive']} navigation to {target}")
             index += 1
         index += 1
+
+    # Final navigation de-duplication: a NAVIGATE_TO is redundant when its
+    # target is where the robot already is. Location is the target of the last
+    # step of any kind — navigation, grasp, place, toggle, wipe — because the
+    # fine-operation pass above guarantees each manipulation is approached at
+    # its own target, so a manipulation leaves the robot at its target and a
+    # following navigation to that same target is a no-op. Running this after
+    # the fine-operation pass (rather than during MOVE translation) also lets
+    # it see navigations that pass inserted, e.g. a MOVE to a faucet aliased to
+    # the sink.
+    last_location = None
+    deduped: list[dict[str, Any]] = []
+    for item in provisional:
+        if item["primitive"] == "NAVIGATE_TO" and item["target"] == last_location:
+            continue
+        last_location = item["target"]
+        deduped.append(item)
+    provisional = deduped
 
     steps: list[ExpertStep] = []
     for index, item in enumerate(provisional, 1):

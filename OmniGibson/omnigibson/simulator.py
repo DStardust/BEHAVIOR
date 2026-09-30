@@ -174,6 +174,7 @@ def _launch_app():
     if gpu_id is not None:
         config_kwargs["active_gpu"] = gpu_id
         config_kwargs["physics_gpu"] = gpu_id
+    config_kwargs["limit_cpu_threads"] = gm.CPU_THREAD_COUNT
 
     # Clear the argv - Isaac Sim unfortunately reads from it directly, so we need to clear it to avoid issues.
     # Otherwise it will inherit the arguments of the entrypoint script.

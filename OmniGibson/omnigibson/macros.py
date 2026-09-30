@@ -140,6 +140,13 @@ gm.GPU_ID = os.getenv("OMNIGIBSON_GPU_ID", None)
 # Whether to generate a headless or non-headless application upon OmniGibson startup
 gm.HEADLESS = os.getenv("OMNIGIBSON_HEADLESS", "False").lower() in ("true", "1", "t")
 
+# Upper bound on the number of CPU threads Isaac Sim is allowed to spawn. Isaac Sim uses the
+# lesser of the host's CPU count and this value, and injects it into carb.tasking.plugin and
+# omni.tbb.globalcontrol. The stock default of 32 oversubscribes the CPU when several OmniGibson
+# processes run concurrently on one host, throttling each of them; lowering it (e.g. to 16) lets
+# more processes run side by side without contention. Override via OMNIGIBSON_CPU_THREAD_COUNT.
+gm.CPU_THREAD_COUNT = int(os.getenv("OMNIGIBSON_CPU_THREAD_COUNT", "16"))
+
 # Whether to enable remote streaming. None disables it, other valid options are "native", "webrtc".
 gm.REMOTE_STREAMING = os.getenv("OMNIGIBSON_REMOTE_STREAMING", None)
 
