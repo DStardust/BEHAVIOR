@@ -21,6 +21,7 @@ MIN_ACCEPT_RATE="${EXPERT_MIN_ACCEPT_RATE:-0.0}"
 SAMPLE_TIMEOUT="${EXPERT_SAMPLE_TIMEOUT:-1800}"
 PERSISTENT_SAMPLE_TIMEOUT="${EXPERT_PERSISTENT_SAMPLE_TIMEOUT:-600}"
 SAMPLE_RETRIES="${EXPERT_SAMPLE_RETRIES:-2}"
+GPU_WRAPPER="${DELTASG_GPU_WRAPPER:-code/run_omnigibson_single_gpu.sh}"
 mkdir -p "$OUTPUT_ROOT/logs"
 AUDIT_PROFILE_ARGS=(--require-backend "$BACKEND")
 if [[ "$BACKEND" == "physical_control" ]]; then
@@ -48,7 +49,7 @@ if [[ "$BACKEND" == "oracle_symbolic" ]]; then
     worker_status=0
     echo "[expert-batch] persistent worker attempt=$persistent_restart" \
       >>"$OUTPUT_ROOT/logs/persistent_worker.log"
-    DELTASG_CHILD_TIMEOUT=0 code/run_omnigibson_single_gpu.sh \
+    DELTASG_CHILD_TIMEOUT=0 "$GPU_WRAPPER" \
       conda run --no-capture-output -n behavior \
       python code/run_deltasg_expert_persistent.py \
         --input-root "$INPUT_ROOT" \
@@ -236,7 +237,7 @@ for input in "${FILES[@]}"; do
   while [[ "$attempt" -le "$SAMPLE_RETRIES" ]]; do
     echo "[expert-batch] attempt=$attempt/$SAMPLE_RETRIES timeout=${SAMPLE_TIMEOUT}s $relative" \
       | tee -a "$OUTPUT_ROOT/logs/master.log"
-    if DELTASG_CHILD_TIMEOUT="$SAMPLE_TIMEOUT" code/run_omnigibson_single_gpu.sh \
+    if DELTASG_CHILD_TIMEOUT="$SAMPLE_TIMEOUT" "$GPU_WRAPPER" \
         conda run --no-capture-output -n behavior \
         python code/run_deltasg_expert.py \
           --input-json "$input" \
