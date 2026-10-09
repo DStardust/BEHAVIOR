@@ -11,9 +11,11 @@ import argparse
 from collections import defaultdict, deque
 from dataclasses import replace
 import gc
+import hashlib
 import json
 import math
 import os
+import random
 import sys
 import time
 import traceback
@@ -3843,7 +3845,75 @@ def _create_expert_env(
     )
 
 
-def _initialize_segmentation_streams(env, run, camera_resolution=(640, 480)):
+# Visual-domain randomization applied at expert-rollout time (not generation
+# time) so a single generated task instance can yield multiple visually
+# distinct demonstrations. Ranges mirror the scene's nominal lighting and the
+# generation-time nominal 65 deg FOV.
+_VISUAL_FOV_MIN_DEG = 55.0
+_VISUAL_FOV_MAX_DEG = 75.0
+_LIGHTING_INTENSITY_MIN = 1800.0
+_LIGHTING_INTENSITY_MAX = 3800.0
+_LIGHTING_COLOR_JITTER = 0.08
+# OmniGibson VisionSensor defaults: a 17 mm focal length with a 20.995 mm
+# horizontal aperture (~63 deg). FOV is mapped onto the aperture while keeping
+# the focal length fixed: aperture = 2 * focal * tan(fov / 2).
+_DEFAULT_FOCAL_LENGTH = 17.0
+_DEFAULT_HORIZONTAL_APERTURE = 20.995
+
+
+def _visual_seed(run):
+    """Deterministic per-run seed for lighting + camera FOV variation.
+
+    Derived from the run identity so the same generated instance reproduces the
+    same visual conditions across expert re-runs, while different instances
+    diverge. Uses a stable string hash (MD5) rather than ``hash()`` so the seed
+    is reproducible across processes and Python hash-randomization settings.
+    """
+    te = run.get("task_environment") or {}
+    identity = (
+        run.get("run_id")
+        or te.get("env_id")
+        or (te.get("base_scene") or {}).get("scene_model")
+        or ""
+    )
+    return int(hashlib.md5(str(identity).encode("utf-8")).hexdigest()[:8], 16)
+
+
+def _horizontal_aperture_for_fov(fov_deg, focal_length=_DEFAULT_FOCAL_LENGTH):
+    return 2.0 * focal_length * math.tan(math.radians(float(fov_deg)) * 0.5)
+
+
+def _apply_expert_lighting(rng):
+    """Randomize the skybox Dome light intensity and warm tint; return a record."""
+    record = {"applied": False, "source": "skybox_dome_light"}
+    skybox = getattr(og.sim, "_skybox", None)
+    if skybox is None:
+        return record
+    intensity = rng.uniform(_LIGHTING_INTENSITY_MIN, _LIGHTING_INTENSITY_MAX)
+    jitter = _LIGHTING_COLOR_JITTER
+    base = (1.07, 0.85, 0.61)
+    color = [
+        float(np.clip(base[index] + rng.uniform(-jitter, jitter), 0.5, 1.5))
+        for index in range(3)
+    ]
+    try:
+        skybox.intensity = intensity
+        skybox.color = color
+        record.update(
+            {
+                "applied": True,
+                "intensity": round(float(intensity), 2),
+                "color": [round(value, 4) for value in color],
+            }
+        )
+    except Exception as exc:
+        record["error"] = str(exc)
+    return record
+
+
+def _initialize_segmentation_streams(
+    env, run, camera_resolution=(640, 480), visual_rng=None,
+):
     """Attach fixed official instance streams without moving an active camera."""
     # DLSS / TAA blends previous object positions into the current frame after
     # symbolic navigation and placement. Dataset supervision must represent a
@@ -3881,12 +3951,20 @@ def _initialize_segmentation_streams(env, run, camera_resolution=(640, 480)):
             continue
         camera_id = str(camera.get("camera_id") or f"global_{index}")
         safe_id = "".join(character if character.isalnum() else "_" for character in camera_id)
+        focal_length = _DEFAULT_FOCAL_LENGTH
+        horizontal_aperture = _DEFAULT_HORIZONTAL_APERTURE
+        fov_deg = None
+        if visual_rng is not None:
+            fov_deg = visual_rng.uniform(_VISUAL_FOV_MIN_DEG, _VISUAL_FOV_MAX_DEG)
+            horizontal_aperture = _horizontal_aperture_for_fov(fov_deg, focal_length)
         global_sensor = VisionSensor(
             relative_prim_path=f"/deltasg_global_cameras/camera_{index}_{safe_id}",
             name=f"deltasg_global_{index}_{safe_id}",
             modalities=["rgb"],
             image_height=int(image_height),
             image_width=int(image_width),
+            focal_length=focal_length,
+            horizontal_aperture=horizontal_aperture,
         )
         global_sensor.load(env.scene)
         global_sensor.set_position_orientation(
@@ -3894,6 +3972,7 @@ def _initialize_segmentation_streams(env, run, camera_resolution=(640, 480)):
             orientation=np.asarray(orientation, dtype=np.float32),
         )
         global_sensor.initialize()
+        global_sensor._deltasg_fov_deg = fov_deg
         global_streams.append((camera, global_sensor))
     for _ in range(5):
         og.sim.render()
@@ -5179,6 +5258,10 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
     if plan.task_family not in {"retrieval_delivery", "open_close", "appliance", "fire", "anomaly"}:
         raise ExpertPlanError(f"expert v1 does not execute task family {plan.task_family!r}")
     te = run.get("task_environment") or {}
+    visual_seed = _visual_seed(run)
+    visual_rng = random.Random(visual_seed)
+    lighting_record = {"applied": False, "source": "skybox_dome_light"}
+    expert_camera_fovs = {}
     hand_wash_context = _hand_wash_context_ids(run)
     generation_profile = (te.get("generation") or {}).get("solvability_profile")
     if generation_profile is not None and generation_profile != args.backend:
@@ -5287,9 +5370,15 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
             flush=True,
         )
     else:
+        lighting_record = _apply_expert_lighting(visual_rng)
         camera_streams = _initialize_segmentation_streams(
-            env, run, camera_resolution=(args.view_width, args.view_height)
+            env, run, camera_resolution=(args.view_width, args.view_height),
+            visual_rng=visual_rng,
         )
+        expert_camera_fovs = {
+            str(camera.get("camera_id")): getattr(sensor, "_deltasg_fov_deg", None)
+            for camera, sensor in (camera_streams.get("globals") or [])
+        }
         print("[expert] segmentation streams initialized", flush=True)
         # Sensor initialization rebuilds Replicator / PhysX views and can wake
         # an otherwise sleeping native fixture. Let that one-time setup effect
@@ -6464,6 +6553,11 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         "replayed_initial_states": initial_states,
         "delta_replay_integrity": replay_integrity,
         "rejection": rejection,
+        "visual_variation": {
+            "seed": visual_seed,
+            "lighting": lighting_record,
+            "camera_horizontal_fov_deg": expert_camera_fovs,
+        },
     }
     if persistent:
         cleanup_persistent_camera_streams(camera_streams)

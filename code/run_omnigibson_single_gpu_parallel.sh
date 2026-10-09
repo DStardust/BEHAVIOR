@@ -164,9 +164,11 @@ if (( CHILD_TIMEOUT > 0 )); then
   exec env -u ALL_PROXY -u all_proxy -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
     CUDA_HOME="$CUDA_ROOT" \
     CUDA_VISIBLE_DEVICES="$gpu_index" \
+    TORCH_COMPILE_DISABLE=1 \
     timeout --signal=TERM --kill-after=30 "$CHILD_TIMEOUT" "$@"
 fi
 exec env -u ALL_PROXY -u all_proxy -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
   CUDA_HOME="$CUDA_ROOT" \
   CUDA_VISIBLE_DEVICES="$gpu_index" \
+  TORCH_COMPILE_DISABLE=1 \
   "$@"

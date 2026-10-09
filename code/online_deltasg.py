@@ -8438,9 +8438,12 @@ class OnlineDeltaSGEngine:
         return positions
 
     def _choose_diverse_xy(self, candidates, historical_positions):
-        """Choose a maximin XY candidate, preferring the configured separation."""
-        if not candidates or not historical_positions:
+        """Choose an XY candidate: maximin spread against prior placements, or a
+        uniform random pick when there is no prior history to separate from."""
+        if not candidates:
             return None
+        if not historical_positions:
+            return self.rng.choice(candidates)
         scored = []
         for index, position in enumerate(candidates):
             min_distance = min(
@@ -9860,9 +9863,13 @@ class OnlineDeltaSGEngine:
                         free_grid_points.append((cx, cy))
 
                 historical_positions = placement.get("_diversity_avoid_positions_xy") or []
-                if free_grid_points and historical_positions:
+                if free_grid_points:
                     # Stay close to the nearest manipulation side of the support,
                     # then spread placements within that operationally safe band.
+                    # _choose_diverse_xy now falls back to a seeded random pick
+                    # when there is no prior placement history, so repeated
+                    # samples of the same category/support no longer coincide on
+                    # the fixed grid centre (previously free_grid_points[0]).
                     operable_points = free_grid_points
                     if access_xy is not None:
                         access_distances = [
@@ -9880,8 +9887,6 @@ class OnlineDeltaSGEngine:
                     selected = self._choose_diverse_xy(operable_points, historical_positions)
                     if selected is not None:
                         best_cx, best_cy = selected
-                elif free_grid_points:
-                    best_cx, best_cy = free_grid_points[0]
 
                 if best_cx is None:
                     return {
@@ -11195,6 +11200,42 @@ class OnlineDeltaSGEngine:
                 target_visibility, sees_robot, content_visibility,
                 content_pixel_count,
             ) = best_camera
+            # Seed-controlled camera jitter: the corner/wall camera poses are
+            # pure functions of room geometry, so every sample of a scene would
+            # otherwise be framed identically. Perturb the validated pose and
+            # re-aim, keeping it only if the same targets + robot stay visible
+            # and the frame still contains enough scene content.
+            jittered_pos, jittered_ori = self._jitter_camera_pose(
+                cam_pos, np.asarray(center, dtype=np.float32), focus
+            )
+            jitter_visibility = self._global_camera_visibility(
+                jittered_pos, jittered_ori, query_names, verbose=False
+            )
+            jitter_scene = self._global_camera_visibility(
+                jittered_pos, jittered_ori, scene_query_names, verbose=False
+            )
+            jitter_target_visibility = {
+                name: detail for name, detail in jitter_visibility.items()
+                if name in target_names
+            }
+            jitter_sees_robot = bool(robot_name and robot_name in jitter_visibility)
+            jitter_content = dict(jitter_scene)
+            jitter_content.update(jitter_visibility)
+            jitter_content_pixels = sum(
+                item.get("pixel_count", 0) for item in jitter_content.values()
+            )
+            if (
+                set(target_visibility) <= set(jitter_target_visibility)
+                and (not sees_robot or jitter_sees_robot)
+                and jitter_content_pixels >= self.config.camera_min_scene_content_pixels
+            ):
+                cam_pos = jittered_pos
+                orientation = jittered_ori
+                target_visibility = jitter_target_visibility
+                sees_robot = jitter_sees_robot
+                content_visibility = jitter_content
+                content_pixel_count = jitter_content_pixels
+                camera_method = f"{camera_method}_jittered"
             camera_index = len(global_camera_records) + 1
             camera_id = f"global_{room_id}_{camera_index}"
             camera_record = {
@@ -11321,6 +11362,32 @@ class OnlineDeltaSGEngine:
             if float(lo[0]) <= px <= float(hi[0]) and float(lo[1]) <= py <= float(hi[1]):
                 return True
         return False
+
+    def _jitter_camera_pose(self, position, room_center, focus=None):
+        """Seed-controlled perturbation of a validated global camera pose.
+
+        The corner/wall camera poses are pure functions of room geometry, so
+        without this every sample of a scene is framed identically. Jitter the
+        height and the inward offset, then re-aim at the original focus (or the
+        room centre) so the caller can re-validate and keep the jitter only when
+        the coverage contract still holds.
+        """
+        position = np.asarray(position, dtype=np.float32).copy()
+        height = float(np.clip(float(position[2]) + self.rng.uniform(-0.25, 0.25), 1.6, 2.4))
+        center_xy = np.asarray(room_center[:2], dtype=np.float32)
+        radial = position[:2] - center_xy
+        radial_norm = float(np.linalg.norm(radial))
+        if radial_norm > 1e-6:
+            radial = radial / radial_norm
+        inward = self.rng.uniform(-0.12, 0.18)
+        position[:2] = position[:2] + radial * inward
+        position[2] = height
+        look_at = (
+            np.asarray(focus, dtype=np.float32)
+            if focus is not None
+            else np.asarray([room_center[0], room_center[1], 0.6], dtype=np.float32)
+        )
+        return position, self._look_at_quat(position, look_at)
 
     def _global_camera_candidates(self, room_id, room_center):
         candidates = []

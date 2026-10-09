@@ -543,6 +543,14 @@ def stabilize_robot_spawn(
         if getattr(link, "prim_path", None)
     }
     rng = random.Random(seed)
+    # Tie OmniGibson's global torch/numpy RNGs (used by scene.get_random_point
+    # and downstream sampling) to this spawn seed. Without this the non-target
+    # robot spawn relies on OS entropy, so positions are neither reproducible
+    # nor controllable by --seed.
+    if seed is not None:
+        import torch as th
+        th.manual_seed(seed)
+        np.random.seed(seed % (2**32 - 1))
     def geometry_center(obj):
         aabb_state = get_state_by_class_name(obj, "AABB")
         if aabb_state is None:
@@ -1059,8 +1067,20 @@ def stabilize_robot_spawn(
     # so retain official-map order apart from the largest-component
     # preference above and let the short physics check validate it.
     spawn_candidates = spawn_candidates[:max_attempts]
+    # The target-conditioned (kind 0) candidates are built in deterministic
+    # distance-to-target order, so the first validated spawn is always the same
+    # nearest pixel. Shuffle within each kind so the seeded RNG picks *which*
+    # near-target pixel wins; the physics/stability gate below still validates
+    # every candidate, so the quality preference stays a soft prior rather than
+    # a hard deterministic tie-break.
+    kind0 = [candidate for candidate in spawn_candidates if candidate[2] == 0]
+    kind1 = [candidate for candidate in spawn_candidates if candidate[2] == 1]
+    rng.shuffle(kind0)
+    rng.shuffle(kind1)
+    spawn_candidates = kind0 + kind1
     print(
-        f"[robot-spawn] official-map candidates={len(spawn_candidates)}",
+        f"[robot-spawn] official-map candidates={len(spawn_candidates)} "
+        f"target-conditioned={len(kind0)}",
         flush=True,
     )
     if not spawn_candidates:
