@@ -391,6 +391,14 @@ def main():
              "Range [0, 1]. 0 = always same-room (default).",
     )
     parser.add_argument(
+        "--min-robot-spawn-distance",
+        type=float,
+        default=0.0,
+        help="Exclude target-conditioned robot spawn candidates closer than this "
+             "many metres from the target object (0 = allow the nearest point). "
+             "Lets the robot never start adjacent to the manipulation target.",
+    )
+    parser.add_argument(
         "--min-global-cameras",
         type=int,
         default=2,
@@ -604,6 +612,7 @@ def main():
             env,
             seed=args.seed,
             preferred_target_name=args.target_native_object_id,
+            preferred_min_distance=(args.min_robot_spawn_distance or None),
         )
         config = OnlineDeltaSGConfig(
             task_objects=args.task_objects,
@@ -772,6 +781,7 @@ def main():
                                 warmup_steps=max(args.warmup_steps, 10),
                                 preferred_target_name=preferred_target,
                                 preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                                preferred_min_distance=(args.min_robot_spawn_distance or None),
                                 preferred_room=engine.prepared_cross_room_start_room(),
                                 settle_scene=False,
                             )
@@ -847,6 +857,7 @@ def main():
                             warmup_steps=max(args.warmup_steps, 10),
                             preferred_target_name=preferred_target,
                             preferred_max_distance=DEFAULT_MAX_PHYSICAL_APPROACH_DISTANCE,
+                            preferred_min_distance=(args.min_robot_spawn_distance or None),
                             settle_scene=False,
                         )
                         if (

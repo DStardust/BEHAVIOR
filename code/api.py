@@ -527,10 +527,17 @@ def stabilize_robot_spawn(
     native_displacement_limit=0.05,
     preferred_target_name=None,
     preferred_max_distance=1.0,
+    preferred_min_distance=None,
     preferred_room=None,
     settle_scene=True,
 ):
-    """Place the robot on the official traversability map and persist that reset pose."""
+    """Place the robot on the official traversability map and persist that reset pose.
+
+    ``preferred_min_distance`` excludes target-conditioned spawn candidates
+    closer than this many metres from the target object, so the robot never
+    starts at (or adjacent to) the manipulation target. ``None`` disables the
+    gate (default behaviour: nearest-first candidates are eligible).
+    """
     if not getattr(env, "robots", None):
         for _ in range(warmup_steps):
             og.sim.step()
@@ -748,6 +755,8 @@ def stabilize_robot_spawn(
                             if target_rooms and room not in target_rooms:
                                 continue
                             if distance > preferred_max_distance:
+                                continue
+                            if preferred_min_distance is not None and distance < preferred_min_distance:
                                 continue
                         position = th.tensor(
                             [float(xy[0]), float(xy[1]), float(trav_map.floor_heights[floor])],

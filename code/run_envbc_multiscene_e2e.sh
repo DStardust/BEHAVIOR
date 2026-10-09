@@ -14,6 +14,7 @@ ENVC_NUM="${ENVC_NUM:-8}"
 SEED_BASE="${SEED_BASE:-96800}"
 RUN_EXPERT="${RUN_EXPERT:-1}"
 MIN_PLACEMENT_DIVERSITY_DISTANCE="${MIN_PLACEMENT_DIVERSITY_DISTANCE:-0.50}"
+MIN_ROBOT_SPAWN_DISTANCE="${MIN_ROBOT_SPAWN_DISTANCE:-0.0}"
 GPU_WRAPPER="${DELTASG_GPU_WRAPPER:-code/run_omnigibson_single_gpu.sh}"
 
 if [[ -f .env ]]; then
@@ -80,6 +81,7 @@ run_generation() {
       --max-camera-pose-attempts 8 --camera-pose-render-steps 4 \
       --min-manipulation-height 0.10 --max-manipulation-height 1.55 \
       --min-placement-diversity-distance "$MIN_PLACEMENT_DIVERSITY_DISTANCE" \
+      --min-robot-spawn-distance "$MIN_ROBOT_SPAWN_DISTANCE" \
       --solvability-profile oracle_symbolic \
       --output-dir "$output_dir" --seed "$seed" \
       "$@" >"$log_path" 2>&1 || status=$?
