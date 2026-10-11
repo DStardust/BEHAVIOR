@@ -5259,6 +5259,8 @@ def execute(run, input_path, output_dir, args, env=None, persistent=False):
         raise ExpertPlanError(f"expert v1 does not execute task family {plan.task_family!r}")
     te = run.get("task_environment") or {}
     visual_seed = _visual_seed(run)
+    if getattr(args, "visual_seed", None) is not None:
+        visual_seed = args.visual_seed
     visual_rng = random.Random(visual_seed)
     lighting_record = {"applied": False, "source": "skybox_dome_light"}
     expert_camera_fovs = {}
@@ -6581,6 +6583,14 @@ def main():
     parser.add_argument("--min-bbox-pixels", type=int, default=8)
     parser.add_argument("--view-width", type=int, default=640)
     parser.add_argument("--view-height", type=int, default=480)
+    parser.add_argument(
+        "--visual-seed",
+        type=int,
+        default=None,
+        help="Override the deterministic visual seed (lighting + FOV). "
+        "Use to produce multiple visual variants of one instance; "
+        "defaults to the seed derived from the run identity.",
+    )
     parser.add_argument("--max-native-displacement", type=float, default=0.05)
     parser.add_argument("--max-task-object-displacement", type=float, default=0.05)
     parser.add_argument(
